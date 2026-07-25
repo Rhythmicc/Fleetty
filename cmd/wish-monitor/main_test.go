@@ -161,8 +161,45 @@ func TestDashboardLayoutUsesTerminalSize(t *testing.T) {
 		t.Fatalf("wide terminal should use its height for process rows, got %d", wide.processRows)
 	}
 	narrow := newDashboardLayout(70, 24, 1, false)
-	if narrow.metricCols != 1 || !narrow.compactGPU {
-		t.Fatalf("narrow layout = %#v, want one metric column and compact GPU", narrow)
+	if narrow.metricCols != 2 || !narrow.compactGPU {
+		t.Fatalf("narrow layout = %#v, want two compact metric columns and compact GPU", narrow)
+	}
+}
+
+func TestMonitorViewFitsCommonTerminalSizes(t *testing.T) {
+	processes := make([]processInfo, 40)
+	for i := range processes {
+		processes[i] = processInfo{PID: 1000 + i, User: "worker", State: "S", CPU: float64(i), Memory: 0.1, RSS: 12 * 1024 * 1024, Elapsed: 120, Command: "python training-job.py"}
+	}
+	model := &monitorModel{
+		status: "Live data refreshes every second.",
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Date(2026, 7, 25, 12, 34, 56, 0, time.Local),
+			CPUPercent:  42, LoadAverage: "load 0.42 · 0.38 · 0.31",
+			MemoryUsed: 24 * 1024 * 1024 * 1024, MemoryTotal: 128 * 1024 * 1024 * 1024,
+			DiskUsed: 200 * 1024 * 1024 * 1024, DiskTotal: 1024 * 1024 * 1024 * 1024,
+			NetworkRX: 128 * 1024, NetworkTX: 64 * 1024, NetworkRXTotal: 8 * 1024 * 1024 * 1024, NetworkTXTotal: 4 * 1024 * 1024 * 1024,
+			GPUs: []gpuInfo{
+				{Index: 0, Name: "NVIDIA A100-PCIE-40GB", Utilization: 80, MemoryUsed: 16 * 1024 * 1024 * 1024, MemoryTotal: 40 * 1024 * 1024 * 1024, ClockMHz: 1410, Power: 180, PowerLimit: 250, Temperature: 70},
+				{Index: 1, Name: "NVIDIA TITAN RTX", Utilization: 20, MemoryUsed: 2 * 1024 * 1024 * 1024, MemoryTotal: 24 * 1024 * 1024 * 1024, ClockMHz: 900, Power: 80, PowerLimit: 280, Temperature: 45},
+			},
+			Processes: processes,
+		},
+		cpuHistory:       []float64{10, 25, 35, 42},
+		networkRXHistory: []float64{1024, 4096, 2048, 8192},
+		networkTXHistory: []float64{512, 1024, 4096, 2048},
+	}
+	for _, size := range []struct{ width, height int }{{161, 50}, {100, 40}, {80, 30}, {60, 24}} {
+		model.width, model.height = size.width, size.height
+		rendered := model.monitorView()
+		if got := lipgloss.Height(rendered); got > size.height {
+			t.Fatalf("%dx%d view height = %d\n%s", size.width, size.height, got, rendered)
+		}
+		for index, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d line %d width = %d\n%q", size.width, size.height, index, got, line)
+			}
+		}
 	}
 }
 
@@ -207,8 +244,8 @@ func TestGPULoadStatusAndWideLayout(t *testing.T) {
 		{Index: 1, Name: "NVIDIA TITAN RTX", MemoryTotal: 24 * 1024 * 1024 * 1024},
 	}}}
 	layout := newDashboardLayout(161, 50, 2, false)
-	if height := lipgloss.Height(model.gpuPanel(layout)); height != 7 {
-		t.Fatalf("wide GPU panel height = %d, want two lines per GPU", height)
+	if height := lipgloss.Height(model.gpuPanel(layout)); height != 6 {
+		t.Fatalf("wide GPU panel height = %d, want two lines per GPU plus border", height)
 	}
 }
 
@@ -227,14 +264,38 @@ func TestGPUMemoryColumnsAreAligned(t *testing.T) {
 
 func TestMetricCardsJoinHorizontally(t *testing.T) {
 	cards := []metricCard{
-		{"CPU", "1%", "load 0.1"},
-		{"MEMORY", "2 GiB", "10% used"},
-		{"DISK", "3 GiB", "20% used"},
-		{"NETWORK", "1 KiB/s", "2 KiB/s"},
+		{title: "CPU", value: "1%", detail: "load 0.1", visual: metricVisualCPU, primaryHistory: []float64{1}, titleStyle: cpuTitleStyle, borderColor: colorCPUBorder},
+		{title: "MEMORY", value: "2 GiB", detail: "10% used", visual: metricVisualMeter, usage: 10, titleStyle: memoryTitleStyle, borderColor: colorMemoryBorder},
+		{title: "DISK", value: "3 GiB", detail: "20% used", visual: metricVisualMeter, usage: 20, titleStyle: diskTitleStyle, borderColor: colorDiskBorder},
+		{title: "NETWORK", value: "1 KiB/s", detail: "2 KiB/s", visual: metricVisualNetwork, primaryHistory: []float64{1}, secondaryHistory: []float64{2}, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder},
 	}
 	rendered := renderMetricRows(cards, dashboardLayout{width: 161, metricCols: 4})
 	if height := lipgloss.Height(rendered); height != 5 {
 		t.Fatalf("metric cards height = %d, want one five-line row", height)
+	}
+}
+
+func TestBtopPanelsAndHistoryVisuals(t *testing.T) {
+	panel := btopPanel(80, "CPU", "LIVE", "line one\nline two", cpuTitleStyle, colorCPUBorder)
+	for index, line := range strings.Split(panel, "\n") {
+		if width := lipgloss.Width(line); width != 80 {
+			t.Fatalf("panel line %d width = %d, want 80: %q", index, width, line)
+		}
+	}
+	if !strings.Contains(panel, "CPU") || !strings.Contains(panel, "LIVE") {
+		t.Fatalf("panel title metadata missing: %q", panel)
+	}
+
+	history := []float64{}
+	for i := 0; i < 70; i++ {
+		history = appendHistory(history, float64(i), 60)
+	}
+	if len(history) != 60 || history[0] != 10 || history[len(history)-1] != 69 {
+		t.Fatalf("bounded history = %#v", history)
+	}
+	graph := sparkline([]float64{0, 50, 100}, 8, 100, cpuTitleStyle)
+	if lipgloss.Width(graph) != 8 || !strings.Contains(graph, "█") {
+		t.Fatalf("sparkline = %q, width %d", graph, lipgloss.Width(graph))
 	}
 }
 

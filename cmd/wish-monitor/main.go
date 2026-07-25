@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"image/color"
 	"net"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ import (
 	bubblewish "charm.land/wish/v2/bubbletea"
 	"charm.land/wish/v2/logging"
 	"github.com/charmbracelet/ssh"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -79,27 +81,30 @@ func main() {
 // terminal programs. Every SSH session owns one small collector and Bubble Tea
 // program, so the monitor has no daemon process besides this Go binary.
 type monitorModel struct {
-	collector       *metricsCollector
-	admin           *adminController
-	user            string
-	remote          string
-	width           int
-	height          int
-	snapshot        monitorSnapshot
-	loadErr         error
-	screen          screen
-	password        string
-	filter          string
-	filtering       bool
-	cursor          int
-	processOffset   int
-	selectedAction  *adminAction
-	selectedProcess *processInfo
-	processDetail   *processDetail
-	detailErr       error
-	status          string
-	busy            bool
-	collecting      bool
+	collector        *metricsCollector
+	admin            *adminController
+	user             string
+	remote           string
+	width            int
+	height           int
+	snapshot         monitorSnapshot
+	loadErr          error
+	screen           screen
+	password         string
+	filter           string
+	filtering        bool
+	cursor           int
+	processOffset    int
+	selectedAction   *adminAction
+	selectedProcess  *processInfo
+	processDetail    *processDetail
+	detailErr        error
+	status           string
+	busy             bool
+	collecting       bool
+	cpuHistory       []float64
+	networkRXHistory []float64
+	networkTXHistory []float64
 }
 
 type screen int
@@ -180,6 +185,9 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.collecting = false
 		m.snapshot = msg.snapshot
 		m.loadErr = msg.err
+		m.cpuHistory = appendHistory(m.cpuHistory, msg.snapshot.CPUPercent, 60)
+		m.networkRXHistory = appendHistory(m.networkRXHistory, float64(msg.snapshot.NetworkRX), 60)
+		m.networkTXHistory = appendHistory(m.networkTXHistory, float64(msg.snapshot.NetworkTX), 60)
 		m.clampProcessCursor()
 	case tickMsg:
 		return m, tea.Batch(m.startCollect(), tick())
@@ -471,7 +479,7 @@ func (m *monitorModel) clampProcessCursor() {
 }
 
 func (m *monitorModel) adminVisibleProcessRows() int {
-	return max(3, m.height-10)
+	return max(3, m.height-9)
 }
 
 func (m *monitorModel) visibleAdminProcessCount() int {
@@ -580,46 +588,67 @@ func (m *monitorModel) View() tea.View {
 func (m *monitorModel) monitorView() string {
 	layout := newDashboardLayout(m.width, m.height, len(m.snapshot.GPUs), m.snapshot.GPUError != "")
 	w := layout.width
-	header := dashboardHeader(w)
+	header := dashboardHeader(w, m.snapshot.CollectedAt)
 	if m.snapshot.CollectedAt.IsZero() {
 		return strings.Join([]string{header, "", panelStyle(w).Render("Collecting system metrics…")}, "\n")
 	}
 
+	memoryPercent := percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal)
+	diskPercent := percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal)
 	metrics := []metricCard{
-		{"CPU", fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent), m.snapshot.LoadAverage},
-		{"MEMORY", fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal)), fmt.Sprintf("%.1f%% used", percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal))},
-		{"DISK /", fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal)), fmt.Sprintf("%.1f%% used", percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal))},
 		{
-			"NETWORK",
-			fmt.Sprintf("↓ %s/s  ↑ %s/s", bytes(m.snapshot.NetworkRX), bytes(m.snapshot.NetworkTX)),
-			fmt.Sprintf("TOTAL ↓ %s  ↑ %s", bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)),
+			title: "CPU", value: fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent), detail: m.snapshot.LoadAverage,
+			visual: metricVisualCPU, usage: m.snapshot.CPUPercent, primaryHistory: m.cpuHistory,
+			titleStyle: cpuTitleStyle, borderColor: colorCPUBorder,
+		},
+		{
+			title: "MEMORY", value: fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal)), detail: fmt.Sprintf("%.1f%% used", memoryPercent),
+			visual: metricVisualMeter, usage: memoryPercent,
+			titleStyle: memoryTitleStyle, borderColor: colorMemoryBorder,
+		},
+		{
+			title: "DISK /", value: fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal)), detail: fmt.Sprintf("%.1f%% used", diskPercent),
+			visual: metricVisualMeter, usage: diskPercent,
+			titleStyle: diskTitleStyle, borderColor: colorDiskBorder,
+		},
+		{
+			title: "NETWORK", value: fmt.Sprintf("↓ %s/s  ↑ %s/s", bytes(m.snapshot.NetworkRX), bytes(m.snapshot.NetworkTX)), detail: fmt.Sprintf("TOTAL ↓ %s  ↑ %s", bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)),
+			visual: metricVisualNetwork, primaryHistory: m.networkRXHistory, secondaryHistory: m.networkTXHistory,
+			titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
 		},
 	}
 	metricRows := renderMetricRows(metrics, layout)
 	gpu := m.gpuPanel(layout)
 	processes := m.processPanel(layout)
-	footer := helpStyle.Render("[m] management  [r] refresh  [q] quit") + "  " + dimStyle.Render(m.status)
+	footer := renderFooter(w, m.status)
 	if m.loadErr != nil {
 		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
 	}
 	return strings.Join([]string{header, metricRows, gpu, processes, footer}, "\n")
 }
 
-func dashboardHeader(width int) string {
+func dashboardHeader(width int, collectedAt time.Time) string {
 	title := titleStyle.Render("GPU SSH MONITOR")
-	meta := dimStyle.Render("LIVE  ·  READ-ONLY  ·  1s REFRESH")
-	if width < 68 {
-		return title + "\n" + meta
+	live := liveBadgeStyle.Render("● LIVE")
+	clock := "--:--:--"
+	if !collectedAt.IsZero() {
+		clock = collectedAt.Format("15:04:05")
 	}
-	return title + dimStyle.Render("  /  ") + meta
+	meta := dimStyle.Render("READ ONLY  ·  1s") + "  " + clockStyle.Render(clock)
+	if width < 54 {
+		return title + "  " + live + "\n" + meta
+	}
+	left := title + "  " + live
+	gap := max(2, width-lipgloss.Width(left)-lipgloss.Width(meta))
+	return left + strings.Repeat(" ", gap) + meta
 }
 
 func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 	w := layout.width
 	if m.snapshot.GPUError != "" {
-		return panelStyle(w).Render(sectionStyle.Render("GPU") + "\n" + dimStyle.Render("nvidia-smi unavailable: "+m.snapshot.GPUError))
+		return btopPanel(w, "GPU", "UNAVAILABLE", dimStyle.Render("nvidia-smi unavailable: "+m.snapshot.GPUError), gpuTitleStyle, colorGPUBorder)
 	}
-	lines := []string{sectionStyle.Render("GPU")}
+	lines := make([]string, 0, max(1, len(m.snapshot.GPUs)*3))
 	memoryUsedWidth, memoryTotalWidth := gpuMemoryWidths(m.snapshot.GPUs)
 	nameWidth := gpuNameWidth(m.snapshot.GPUs, w)
 	for _, gpu := range m.snapshot.GPUs {
@@ -653,7 +682,11 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 	if len(m.snapshot.GPUs) == 0 {
 		lines = append(lines, dimStyle.Render("No NVIDIA GPU was reported."))
 	}
-	return panelStyle(w).Render(strings.Join(lines, "\n"))
+	meta := fmt.Sprintf("%d DEVICE", len(m.snapshot.GPUs))
+	if len(m.snapshot.GPUs) != 1 {
+		meta += "S"
+	}
+	return btopPanel(w, "GPU", meta, strings.Join(lines, "\n"), gpuTitleStyle, colorGPUBorder)
 }
 
 func gpuTelemetry(gpu gpuInfo, showPowerLimit bool) string {
@@ -704,9 +737,8 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	w := layout.width
 	format := newProcessFormat(w)
 	lines := []string{
-		sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU"),
 		processLegend(w),
-		processHeaderStyle.Render(format.header()),
+		processTableHeader(format.header(), w-4),
 	}
 	for i, p := range m.snapshot.Processes {
 		if i >= layout.processRows {
@@ -717,7 +749,7 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	if len(m.snapshot.Processes) == 0 {
 		lines = append(lines, dimStyle.Render("No process data available."))
 	}
-	return panelStyle(w).Render(strings.Join(lines, "\n"))
+	return btopPanel(w, "PROCESSES", "CPU ↓  ·  READ ONLY", strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
 }
 
 func (m *monitorModel) passwordView() string {
@@ -748,9 +780,8 @@ func (m *monitorModel) adminView() string {
 	}
 	format := newProcessFormat(w)
 	table := []string{
-		sectionStyle.Render("PROCESS MANAGER") + "  " + dimStyle.Render(fmt.Sprintf("%d / %d processes · rows %d-%d", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end)),
 		processLegend(w),
-		processHeaderStyle.Render(format.header()),
+		processTableHeader(format.header(), w-4),
 	}
 	for i := m.processOffset; i < end; i++ {
 		row := format.row(processes[i])
@@ -784,7 +815,7 @@ func (m *monitorModel) adminView() string {
 		dimStyle.Render(truncate("Click a process for details. Host actions remain fixed and require confirmation.", w)),
 		actions,
 		filterLine,
-		panelStyle(w).Render(strings.Join(table, "\n")),
+		btopPanel(w, "PROCESS MANAGER", fmt.Sprintf("%d/%d  ·  ROWS %d-%d", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end), strings.Join(table, "\n"), processTitleStyle, colorProcessBorder),
 		helpStyle.Render("[/] filter  [↑/↓] select  [enter/click] details  [c] clear  [esc] monitor") + "  " + dimStyle.Render(m.status),
 	}, "\n")
 }
@@ -874,9 +905,25 @@ func (m *monitorModel) processTerminateConfirmView() string {
 	}, "\n")
 }
 
-type metricCard struct{ title, value, detail string }
+type metricVisual int
 
-const adminProcessRowStart = 8
+const (
+	metricVisualNone metricVisual = iota
+	metricVisualCPU
+	metricVisualMeter
+	metricVisualNetwork
+)
+
+type metricCard struct {
+	title, value, detail             string
+	visual                           metricVisual
+	usage                            float64
+	primaryHistory, secondaryHistory []float64
+	titleStyle                       lipgloss.Style
+	borderColor                      color.Color
+}
+
+const adminProcessRowStart = 7
 
 type dashboardLayout struct {
 	width       int
@@ -897,38 +944,50 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 	switch {
 	case width >= 132:
 		cols = 4
-	case width >= 76:
+	case width >= 52:
 		cols = 2
 	}
 	compactGPU := width < 112
 	metricLines := ((4 + cols - 1) / cols) * 5 // three content lines plus border
-	gpuContentLines := 1
+	gpuContentLines := 0
 	if gpuUnavailable {
-		gpuContentLines = 2
+		gpuContentLines = 1
 	} else if compactGPU {
-		gpuContentLines += gpuCount * 3
+		gpuContentLines = gpuCount * 3
 	} else {
-		gpuContentLines += gpuCount * 2
+		gpuContentLines = gpuCount * 2
+	}
+	if !gpuUnavailable && gpuCount == 0 {
+		gpuContentLines = 1
 	}
 	gpuLines := gpuContentLines + 2 // rounded border
 	// Header, metric cards, GPU panel, process panel headings/border, and footer.
 	headerLines := 1
-	if width < 68 {
+	if width < 54 {
 		headerLines = 2
 	}
-	reserved := headerLines + metricLines + gpuLines + 5 + 1
-	processRows := max(2, height-reserved)
+	reserved := headerLines + metricLines + gpuLines + 4 + 1
+	processRows := max(0, height-reserved)
 	return dashboardLayout{width: width, height: height, metricCols: cols, processRows: processRows, compactGPU: compactGPU}
 }
 
 func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 	cardWidth := max(16, (layout.width-(layout.metricCols-1))/layout.metricCols)
 	render := func(c metricCard) string {
-		return metricStyle(cardWidth).Render(strings.Join([]string{
-			sectionStyle.Render(c.title),
+		contentWidth := max(4, cardWidth-4)
+		title := c.titleStyle
+		if title.GetForeground() == nil {
+			title = sectionStyle
+		}
+		border := c.borderColor
+		if border == nil {
+			border = colorPanelBorder
+		}
+		return btopPanel(cardWidth, c.title, "", strings.Join([]string{
 			valueStyle.Render(truncate(c.value, cardWidth-4)),
 			dimStyle.Render(truncate(c.detail, cardWidth-4)),
-		}, "\n"))
+			renderMetricVisual(c, contentWidth),
+		}, "\n"), title, border)
 	}
 	rows := make([]string, 0, (len(cards)+layout.metricCols-1)/layout.metricCols)
 	for start := 0; start < len(cards); start += layout.metricCols {
@@ -943,6 +1002,25 @@ func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, items...))
 	}
 	return strings.Join(rows, "\n")
+}
+
+func renderMetricVisual(card metricCard, width int) string {
+	switch card.visual {
+	case metricVisualCPU:
+		_, style := gpuLoadStatus(card.usage)
+		return sparkline(card.primaryHistory, width, 100, style)
+	case metricVisualMeter:
+		return bar(card.usage, width)
+	case metricVisualNetwork:
+		graphWidth := max(2, (width-5)/2)
+		ceiling := historyMax(card.primaryHistory, card.secondaryHistory)
+		return networkRXStyle.Render("↓") +
+			sparkline(card.primaryHistory, graphWidth, ceiling, networkRXStyle) +
+			dimStyle.Render("  ") + networkTXStyle.Render("↑") +
+			sparkline(card.secondaryHistory, graphWidth, ceiling, networkTXStyle)
+	default:
+		return dimStyle.Render(strings.Repeat("─", max(1, width)))
+	}
 }
 
 type processFormat struct {
@@ -1005,9 +1083,9 @@ func processLegend(width int) string {
 	for _, item := range items {
 		label := item.state
 		switch {
-		case width >= 96:
+		case width >= 108:
 			label += " " + item.full
-		case width >= 58:
+		case width >= 78:
 			label += " " + item.short
 		}
 		parts = append(parts, processStateStyle(item.state).Render(label))
@@ -1459,17 +1537,36 @@ func sanitizeTerminalText(value string) string {
 }
 
 var (
+	colorPanelBorder         = lipgloss.Color("#40516B")
+	colorCPUBorder           = lipgloss.Color("#315F57")
+	colorMemoryBorder        = lipgloss.Color("#514A78")
+	colorDiskBorder          = lipgloss.Color("#6B5438")
+	colorNetworkBorder       = lipgloss.Color("#315B72")
+	colorGPUBorder           = lipgloss.Color("#53517A")
+	colorProcessBorder       = lipgloss.Color("#465572")
 	titleStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
 	sectionStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
 	valueStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Bold(true)
 	accentStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
+	cpuTitleStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#7EE2B8")).Bold(true)
+	memoryTitleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A7E7")).Bold(true)
+	diskTitleStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#F6C177")).Bold(true)
+	networkTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
+	gpuTitleStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
+	processTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#9FC3FF")).Bold(true)
 	dangerStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80")).Bold(true)
 	dimStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC"))
 	warningStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD180"))
 	helpStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDB4FF")).Bold(true)
-	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC")).Bold(true)
+	clockStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F6C177")).Bold(true)
+	liveBadgeStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#7EE2B8")).Bold(true).Padding(0, 1)
+	keycapStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true).Padding(0, 1)
+	hintLabelStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C9CEDA"))
+	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#B8C0D9")).Background(lipgloss.Color("#1D2433")).Bold(true)
 	inputStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
 	selectedRowStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true)
+	networkRXStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
+	networkTXStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A7E7")).Bold(true)
 	processRunningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
 	processSleepingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#9FC3FF"))
 	processWaitingStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C")).Bold(true)
@@ -1491,11 +1588,68 @@ var (
 func panelStyle(width int) lipgloss.Style {
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5B6B8A")).Padding(0, 1).Width(max(20, width-2))
 }
-func metricStyle(width int) lipgloss.Style {
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#3D506F")).Padding(0, 1).Width(width - 2)
-}
 func clickableStyle(width int) lipgloss.Style {
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#B9A4FF")).Padding(0, 1).Width(max(20, width-2))
+}
+
+func btopPanel(width int, title, meta, content string, titleStyle lipgloss.Style, borderColor color.Color) string {
+	width = max(20, width)
+	innerWidth := width - 2
+	contentWidth := width - 4
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+
+	titleText := " " + truncate(title, max(4, innerWidth-5)) + " "
+	metaText := ""
+	if meta != "" {
+		metaText = " " + meta + " "
+	}
+	fillWidth := innerWidth - 1 - lipgloss.Width(titleText) - lipgloss.Width(metaText)
+	if fillWidth < 1 {
+		metaText = ""
+		fillWidth = max(1, innerWidth-1-lipgloss.Width(titleText))
+	}
+	top := borderStyle.Render("╭─") +
+		titleStyle.Render(titleText) +
+		borderStyle.Render(strings.Repeat("─", fillWidth)) +
+		dimStyle.Render(metaText) +
+		borderStyle.Render("╮")
+
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	rendered := make([]string, 0, len(lines)+2)
+	rendered = append(rendered, top)
+	lineStyle := lipgloss.NewStyle().Width(contentWidth)
+	for _, line := range lines {
+		line = ansi.Truncate(line, contentWidth, "…")
+		rendered = append(rendered,
+			borderStyle.Render("│")+" "+lineStyle.Render(line)+" "+borderStyle.Render("│"),
+		)
+	}
+	rendered = append(rendered, borderStyle.Render("╰"+strings.Repeat("─", innerWidth)+"╯"))
+	return strings.Join(rendered, "\n")
+}
+
+func processTableHeader(header string, width int) string {
+	return processHeaderStyle.Width(max(1, width)).MaxWidth(max(1, width)).Render(header)
+}
+
+func renderFooter(width int, status string) string {
+	hints := strings.Join([]string{
+		keyHint("m", "management"),
+		keyHint("r", "refresh"),
+		keyHint("q", "quit"),
+	}, "  ")
+	remaining := width - lipgloss.Width(hints) - 2
+	if remaining < 12 || strings.TrimSpace(status) == "" {
+		return hints
+	}
+	return hints + "  " + dimStyle.Render(truncate(status, remaining))
+}
+
+func keyHint(key, label string) string {
+	return keycapStyle.Render(key) + " " + hintLabelStyle.Render(label)
 }
 
 func usableWidth(width int) int {
@@ -1563,6 +1717,55 @@ func elapsed(seconds uint64) string {
 	}
 	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 }
+
+func appendHistory(history []float64, value float64, limit int) []float64 {
+	history = append(history, value)
+	if len(history) > limit {
+		history = append([]float64(nil), history[len(history)-limit:]...)
+	}
+	return history
+}
+
+func historyMax(histories ...[]float64) float64 {
+	maxValue := 0.0
+	for _, history := range histories {
+		for _, value := range history {
+			if value > maxValue {
+				maxValue = value
+			}
+		}
+	}
+	if maxValue <= 0 {
+		return 1
+	}
+	return maxValue
+}
+
+func sparkline(history []float64, width int, ceiling float64, style lipgloss.Style) string {
+	const levels = "▁▂▃▄▅▆▇█"
+	width = max(1, width)
+	if ceiling <= 0 {
+		ceiling = 1
+	}
+	if len(history) > width {
+		history = history[len(history)-width:]
+	}
+	var graph strings.Builder
+	for _, value := range history {
+		ratio := value / ceiling
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		index := int(ratio * float64(len([]rune(levels))-1))
+		graph.WriteRune([]rune(levels)[index])
+	}
+	padding := width - len(history)
+	return dimStyle.Render(strings.Repeat("·", padding)) + style.Render(graph.String())
+}
+
 func bar(value float64, width int) string {
 	filled := int(value / 100 * float64(width))
 	if filled < 0 {
