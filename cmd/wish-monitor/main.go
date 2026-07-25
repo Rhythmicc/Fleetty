@@ -814,6 +814,11 @@ func readProcesses() ([]processInfo, error) {
 		memory, _ := strconv.ParseFloat(fields[3], 64)
 		rss, _ := strconv.ParseUint(fields[4], 10, 64)
 		elapsed, _ := strconv.ParseUint(fields[5], 10, 64)
+		// ps can briefly appear as the busiest process because it is sampling
+		// the whole process table. It is collector noise, not a useful host task.
+		if fields[6] == "ps" {
+			continue
+		}
 		processes = append(processes, processInfo{PID: pid, User: fields[1], CPU: cpu, Memory: memory, RSS: rss * 1024, Elapsed: elapsed, Command: strings.Join(fields[6:], " ")})
 	}
 	sort.SliceStable(processes, func(i, j int) bool { return processes[i].CPU > processes[j].CPU })
