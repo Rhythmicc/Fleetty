@@ -13,7 +13,8 @@ fixed-size TUI dashboard composed from `nvitop` and `btop`.
 - bottom 48 rows: `btop`
 - concurrent SSH sessions share one dashboard source
 - stdin is only used for monitor controls: `r` redraws the current client,
-  `q` or `Ctrl-C` exits; it is not forwarded to `nvitop` or `btop`
+  `m` opens the password-protected management menu, and `q` or `Ctrl-C` exits;
+  it is not forwarded to `nvitop` or `btop`
 - no dashboard collector runs when nobody is connected
 - color-preserving differential terminal updates to reduce flicker
 
@@ -67,6 +68,50 @@ your normal network controls, firewall, or SSH reverse proxy as appropriate.
 - `NVITOP_ROWS` default `21`
 - `BTOP_ROWS` default `48`
 - `PANE_CWD` default `$HOME`
+- `ADMIN_PASSWORD_HASH` bcrypt password hash for management mode (recommended)
+- `ADMIN_PASSWORD` plaintext fallback for management mode; avoid this in
+  production and prefer `ADMIN_PASSWORD_HASH`
+- `ADMIN_RESTART_MONITOR_CMD` default `systemctl restart gpu-ssh-monitor.service`
+- `ADMIN_REBOOT_CMD` default `systemctl reboot`
+- `ADMIN_POWEROFF_CMD` default `systemctl poweroff`
+
+## Management mode
+
+Set an administrator password to enable it. From the monitor, press `m`, enter
+the password, choose an operation, then type `y` to confirm it. The menu is a
+Bubble Tea model driven by the existing SSH session, so the live dashboard is
+paused while the prompt is visible and restored on exit.
+
+The built-in fixed operations are:
+
+- restart the `gpu-ssh-monitor` systemd service
+- reboot the host
+- power off the host
+
+The commands run as the account that runs this service (the sample unit uses
+`root`). They are deliberately not editable by SSH users: change their values
+only in the service environment. The password is checked before the menu is
+shown and every operation needs a second, explicit `y` confirmation. Each
+request is written to the service log with the SSH username and remote address.
+
+For a systemd installation, keep the secret outside the unit file in a
+root-readable environment file:
+
+```ini
+# /etc/gpu-ssh-monitor/admin.env (chmod 600)
+ADMIN_PASSWORD_HASH=$2y$12$replace-this-with-a-bcrypt-hash
+# Optional: override these when your unit or service name differs.
+# ADMIN_RESTART_MONITOR_CMD=systemctl restart gpu-ssh-monitor.service
+# ADMIN_REBOOT_CMD=systemctl reboot
+# ADMIN_POWEROFF_CMD=systemctl poweroff
+```
+
+For local development only, `ADMIN_PASSWORD=...` is supported as a convenient
+fallback. To generate a bcrypt hash when `htpasswd` is available:
+
+```bash
+htpasswd -nbBC 12 '' 'choose-a-strong-password' | tr -d ':\n'
+```
 
 ## systemd
 

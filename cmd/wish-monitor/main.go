@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -10,16 +11,19 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/log/v2"
 	"charm.land/wish/v2"
 	"charm.land/wish/v2/accesscontrol"
 	"charm.land/wish/v2/activeterm"
 	"charm.land/wish/v2/logging"
 	"github.com/charmbracelet/ssh"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
@@ -27,12 +31,13 @@ func main() {
 	port := envString("SSH_PORT", "23234")
 	hostKeyPath := envString("SSH_HOST_KEY_PATH", ".ssh/gpu-ssh-monitor_ed25519")
 	dashboard := newDashboardDaemon()
+	admin := newAdminController()
 
 	server, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(hostKeyPath),
 		wish.WithMiddleware(
-			dashboardMiddleware(dashboard),
+			dashboardMiddleware(dashboard, admin),
 			activeterm.Middleware(),
 			accesscontrol.Middleware(),
 			logging.Middleware(),
@@ -221,7 +226,7 @@ func (d *dashboardDaemon) stopLocked() {
 	_ = os.Remove(d.socketPath)
 }
 
-func dashboardMiddleware(dashboard *dashboardDaemon) wish.Middleware {
+func dashboardMiddleware(dashboard *dashboardDaemon, admin *adminController) wish.Middleware {
 	return func(next ssh.Handler) ssh.Handler {
 		return func(session ssh.Session) {
 			_ = next
@@ -234,15 +239,18 @@ func dashboardMiddleware(dashboard *dashboardDaemon) wish.Middleware {
 			}
 			defer conn.Close()
 			defer dashboard.clientDisconnected()
+			output := newPausableWriter(session)
+			defer output.Resume()
 
 			copyDone := make(chan error, 1)
 			go func() {
-				_, err := io.Copy(session, conn)
+				_, err := io.Copy(output, conn)
 				copyDone <- err
 			}()
 
-			actions := make(chan sessionAction)
-			go watchSessionKeys(session, actions)
+			inputs := make(chan byte, 64)
+			go watchSessionInput(session, inputs)
+			adminSession := newAdminSession(admin, session, output, conn)
 
 			signals := make(chan ssh.Signal, 8)
 			session.Signals(signals)
@@ -255,10 +263,11 @@ func dashboardMiddleware(dashboard *dashboardDaemon) wish.Middleware {
 				case <-session.Context().Done():
 					_ = conn.Close()
 					return
-				case action, ok := <-actions:
+				case input, ok := <-inputs:
 					if !ok {
 						continue
 					}
+					action := adminSession.Handle(input)
 					switch action {
 					case actionRefresh:
 						_, _ = conn.Write([]byte("r"))
@@ -289,6 +298,7 @@ type sessionAction int
 const (
 	actionExit sessionAction = iota
 	actionRefresh
+	actionNone
 )
 
 func restoreTerminal(writer io.Writer) {
@@ -304,8 +314,8 @@ func watchExitSignals(signals <-chan ssh.Signal, done chan<- struct{}) {
 	}
 }
 
-func watchSessionKeys(reader io.Reader, actions chan<- sessionAction) {
-	defer close(actions)
+func watchSessionInput(reader io.Reader, inputs chan<- byte) {
+	defer close(inputs)
 	buf := make([]byte, 32)
 	for {
 		n, err := reader.Read(buf)
@@ -314,15 +324,329 @@ func watchSessionKeys(reader io.Reader, actions chan<- sessionAction) {
 		}
 
 		for _, b := range buf[:n] {
-			if b == 0x03 || b == 'q' || b == 'Q' {
-				actions <- actionExit
-				return
-			}
-			if b == 'r' || b == 'R' {
-				actions <- actionRefresh
-			}
+			inputs <- b
 		}
 	}
+}
+
+// pausableWriter stops dashboard frames while an administrative prompt owns the
+// terminal. It deliberately serializes the final frame before the prompt is
+// drawn, so monitor output cannot overwrite a password or confirmation prompt.
+type pausableWriter struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	paused bool
+	writer io.Writer
+}
+
+func newPausableWriter(writer io.Writer) *pausableWriter {
+	result := &pausableWriter{writer: writer}
+	result.cond = sync.NewCond(&result.mu)
+	return result
+}
+
+func (w *pausableWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for w.paused {
+		w.cond.Wait()
+	}
+	return w.writer.Write(data)
+}
+
+func (w *pausableWriter) Pause() {
+	w.mu.Lock()
+	w.paused = true
+	w.mu.Unlock()
+}
+
+func (w *pausableWriter) Resume() {
+	w.mu.Lock()
+	w.paused = false
+	w.cond.Broadcast()
+	w.mu.Unlock()
+}
+
+type adminAction struct {
+	key     byte
+	label   string
+	command string
+}
+
+type adminController struct {
+	password     string
+	passwordHash string
+	actions      []adminAction
+}
+
+func newAdminController() *adminController {
+	controller := &adminController{
+		password:     os.Getenv("ADMIN_PASSWORD"),
+		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
+		actions: []adminAction{
+			{key: '1', label: "Restart gpu-ssh-monitor service", command: os.Getenv("ADMIN_RESTART_MONITOR_CMD")},
+			{key: '2', label: "Reboot this machine", command: os.Getenv("ADMIN_REBOOT_CMD")},
+			{key: '3', label: "Power off this machine", command: os.Getenv("ADMIN_POWEROFF_CMD")},
+		},
+	}
+	if controller.actions[0].command == "" {
+		controller.actions[0].command = "systemctl restart gpu-ssh-monitor.service"
+	}
+	if controller.actions[1].command == "" {
+		controller.actions[1].command = "systemctl reboot"
+	}
+	if controller.actions[2].command == "" {
+		controller.actions[2].command = "systemctl poweroff"
+	}
+	return controller
+}
+
+func (a *adminController) enabled() bool {
+	return a.password != "" || a.passwordHash != ""
+}
+
+func (a *adminController) validPassword(password string) bool {
+	if a.passwordHash != "" {
+		return bcrypt.CompareHashAndPassword([]byte(a.passwordHash), []byte(password)) == nil
+	}
+	if a.password == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a.password), []byte(password)) == 1
+}
+
+type adminMode int
+
+const (
+	adminModeMonitor adminMode = iota
+	adminModeDisabled
+	adminModePassword
+	adminModeMenu
+	adminModeConfirm
+)
+
+type adminSession struct {
+	model   *adminModel
+	session ssh.Session
+	output  *pausableWriter
+	conn    net.Conn
+}
+
+func newAdminSession(controller *adminController, session ssh.Session, output *pausableWriter, conn net.Conn) *adminSession {
+	return &adminSession{
+		model:   &adminModel{controller: controller},
+		session: session,
+		output:  output,
+		conn:    conn,
+	}
+}
+
+func (a *adminSession) Handle(input byte) sessionAction {
+	if input == 0x03 {
+		return actionExit
+	}
+	wasMonitor := a.model.mode == adminModeMonitor
+	_, _ = a.model.Update(keyMessage(input))
+	if a.model.exit {
+		return actionExit
+	}
+
+	if wasMonitor && a.model.mode != adminModeMonitor {
+		a.output.Pause()
+	}
+	if a.model.pending != nil {
+		a.runPendingAction()
+	}
+	if !wasMonitor && a.model.mode == adminModeMonitor {
+		a.leave()
+		return actionNone
+	}
+	if a.model.mode != adminModeMonitor {
+		a.draw()
+	}
+	if wasMonitor && a.model.mode == adminModeMonitor && (input == 'r' || input == 'R') {
+		return actionRefresh
+	}
+	return actionNone
+}
+
+func (a *adminSession) runPendingAction() {
+	action := *a.model.pending
+	a.model.pending = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/bin/sh", "-c", action.command)
+	command.Stdout = a.session
+	command.Stderr = a.session
+	err := command.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		a.model.status = "Operation timed out."
+	} else if err != nil {
+		a.model.status = fmt.Sprintf("Operation failed: %v", err)
+	} else {
+		a.model.status = "Operation requested successfully."
+	}
+	log.Info("administrative action requested", "user", a.session.User(), "remote_addr", a.session.RemoteAddr().String(), "action", action.label, "error", err)
+}
+
+func (a *adminSession) draw() {
+	_, _ = io.WriteString(a.session, "\x1b[2J\x1b[H\x1b[?25h"+a.model.View().Content)
+}
+
+func (a *adminSession) leave() {
+	a.output.Resume()
+	_, _ = a.conn.Write([]byte("r"))
+}
+
+// adminModel uses Bubble Tea's Model/Update/View contract. We keep the outer
+// SSH loop as the program driver because the dashboard already owns the same
+// terminal; running a second tea.Program would make the two renderers race.
+type adminModel struct {
+	controller *adminController
+	mode       adminMode
+	password   []byte
+	attempts   int
+	selected   adminAction
+	pending    *adminAction
+	status     string
+	exit       bool
+}
+
+func (m *adminModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m *adminModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := message.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	input := key.Key().Code
+
+	if m.mode == adminModeMonitor {
+		switch input {
+		case 0x03, 'q', 'Q':
+			m.exit = true
+		case 'm', 'M':
+			m.password = nil
+			m.attempts = 0
+			m.status = ""
+			if m.controller.enabled() {
+				m.mode = adminModePassword
+			} else {
+				m.mode = adminModeDisabled
+			}
+		}
+		return m, nil
+	}
+
+	switch m.mode {
+	case adminModeDisabled:
+		m.mode = adminModeMonitor
+	case adminModePassword:
+		m.updatePassword(input)
+	case adminModeMenu:
+		m.updateMenu(input)
+	case adminModeConfirm:
+		m.updateConfirmation(input)
+	}
+	return m, nil
+}
+
+func (m *adminModel) updatePassword(input rune) {
+	switch input {
+	case 0x03, tea.KeyEscape:
+		m.mode = adminModeMonitor
+	case tea.KeyEnter, '\n':
+		password := string(m.password)
+		m.password = nil
+		if m.controller.validPassword(password) {
+			m.mode = adminModeMenu
+			m.status = ""
+			return
+		}
+		m.attempts++
+		if m.attempts >= 3 {
+			m.mode = adminModeMonitor
+			return
+		}
+		m.status = "Incorrect password."
+	case tea.KeyBackspace, 0x08:
+		if len(m.password) > 0 {
+			m.password = m.password[:len(m.password)-1]
+		}
+	default:
+		if input >= 0x20 && input <= 0x7e && len(m.password) < 256 {
+			m.password = append(m.password, byte(input))
+		}
+	}
+}
+
+func (m *adminModel) updateMenu(input rune) {
+	if input == 0x03 || input == tea.KeyEscape || input == 'q' || input == 'Q' {
+		m.mode = adminModeMonitor
+		return
+	}
+	for _, action := range m.controller.actions {
+		if input == rune(action.key) {
+			m.selected = action
+			m.mode = adminModeConfirm
+			return
+		}
+	}
+}
+
+func (m *adminModel) updateConfirmation(input rune) {
+	if input == 'y' || input == 'Y' {
+		selected := m.selected
+		m.pending = &selected
+		m.mode = adminModeMenu
+		return
+	}
+	m.mode = adminModeMenu
+}
+
+func (m *adminModel) View() tea.View {
+	var view strings.Builder
+	switch m.mode {
+	case adminModeDisabled:
+		view.WriteString("Management mode is disabled. Set ADMIN_PASSWORD_HASH (recommended) or ADMIN_PASSWORD.\r\n\r\nPress any key to return to the monitor.")
+	case adminModePassword:
+		view.WriteString("Management mode\r\n\r\n")
+		if m.status != "" {
+			view.WriteString(m.status + "\r\n\r\n")
+		}
+		view.WriteString("Password: " + strings.Repeat("*", len(m.password)))
+	case adminModeMenu:
+		view.WriteString("Management mode\r\n\r\n")
+		if m.status != "" {
+			view.WriteString(m.status + "\r\n\r\n")
+		}
+		for _, action := range m.controller.actions {
+			fmt.Fprintf(&view, "[%c] %s\r\n", action.key, action.label)
+		}
+		view.WriteString("\r\n[q] Return to monitor\r\n\r\nSelect an operation: ")
+	case adminModeConfirm:
+		fmt.Fprintf(&view, "Management mode\r\n\r\n%s\r\n\r\nType y to confirm, or any other key to cancel: ", m.selected.label)
+	}
+	return tea.NewView(view.String())
+}
+
+func keyMessage(input byte) tea.KeyPressMsg {
+	key := tea.Key{Code: rune(input)}
+	switch input {
+	case '\r', '\n':
+		key.Code = tea.KeyEnter
+	case 0x08, 0x7f:
+		key.Code = tea.KeyBackspace
+	case 0x1b:
+		key.Code = tea.KeyEscape
+	default:
+		if input >= 0x20 && input <= 0x7e {
+			key.Text = string(rune(input))
+		}
+	}
+	return tea.KeyPressMsg(key)
 }
 
 func envString(key string, fallback string) string {

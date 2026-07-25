@@ -12,6 +12,8 @@ Environment=SSH_PORT=23234
 Environment=SSH_SNAPSHOT_MS=500
 Environment=DASHBOARD_WORKDIR=/opt/gpu-ssh-monitor
 Environment=DASHBOARD_CMD=/usr/bin/node
+# Optional management-password and command overrides, owned by root (0600).
+EnvironmentFile=-/etc/gpu-ssh-monitor/admin.env
 ExecStart=/opt/gpu-ssh-monitor/gpu-ssh-monitor
 Restart=always
 RestartSec=2
