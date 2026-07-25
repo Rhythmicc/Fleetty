@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -180,6 +182,40 @@ func TestProcessFormatRespondsToWidth(t *testing.T) {
 	}
 	if got := newProcessFormat(60).mode; got != processCompact {
 		t.Fatalf("compact mode = %d, want compact", got)
+	}
+}
+
+func TestProcessColumnsAreAligned(t *testing.T) {
+	format := newProcessFormat(140)
+	header := format.header()
+	row := format.row(processInfo{
+		PID: 42, User: "alice", State: "R+", CPU: 12.3, Memory: 4.5,
+		RSS: 10 * 1024 * 1024, Elapsed: 65, Command: "trainer",
+	})
+	for _, field := range []string{"STAT", "RSS", "ELAPSED", "COMMAND"} {
+		if strings.Index(header, field) != strings.Index(row, map[string]string{
+			"STAT": "R+", "RSS": "10.0 MiB", "ELAPSED": "1m05s", "COMMAND": "trainer",
+		}[field]) {
+			t.Fatalf("%s is not aligned\nheader: %q\nrow:    %q", field, header, row)
+		}
+	}
+	if strings.Index(header, "CPU")+len("CPU") != strings.Index(row, "12.3%")+len("12.3%") {
+		t.Fatalf("CPU is not right-aligned\nheader: %q\nrow:    %q", header, row)
+	}
+	if strings.Index(header, "MEM")+len("MEM") != strings.Index(row, "4.5%")+len("4.5%") {
+		t.Fatalf("MEM is not right-aligned\nheader: %q\nrow:    %q", header, row)
+	}
+}
+
+func TestProcessStateColorsAndRefreshInterval(t *testing.T) {
+	if refreshInterval != time.Second {
+		t.Fatalf("refresh interval = %s", refreshInterval)
+	}
+	if processStateStyle("R").Render("row") == processStateStyle("S").Render("row") {
+		t.Fatal("running and sleeping processes should use different colors")
+	}
+	if processStateStyle("D").Render("row") == processStateStyle("Z").Render("row") {
+		t.Fatal("waiting and zombie processes should use different colors")
 	}
 }
 

@@ -28,7 +28,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const refreshInterval = 2 * time.Second
+const refreshInterval = time.Second
 
 func main() {
 	host := envString("SSH_HOST", "0.0.0.0")
@@ -99,6 +99,7 @@ type monitorModel struct {
 	detailErr       error
 	status          string
 	busy            bool
+	collecting      bool
 }
 
 type screen int
@@ -124,12 +125,12 @@ func newMonitorModel(admin *adminController, sess ssh.Session, width, height int
 		remote:    remote,
 		width:     width,
 		height:    height,
-		status:    "Live data refreshes every 2 seconds.",
+		status:    "Live data refreshes every second.",
 	}
 }
 
 func (m *monitorModel) Init() tea.Cmd {
-	return tea.Batch(m.collect(), tick())
+	return tea.Batch(m.startCollect(), tick())
 }
 
 func tick() tea.Cmd {
@@ -163,16 +164,25 @@ func (m *monitorModel) collect() tea.Cmd {
 	}
 }
 
+func (m *monitorModel) startCollect() tea.Cmd {
+	if m.collecting {
+		return nil
+	}
+	m.collecting = true
+	return m.collect()
+}
+
 func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case snapshotMsg:
+		m.collecting = false
 		m.snapshot = msg.snapshot
 		m.loadErr = msg.err
 		m.clampProcessCursor()
 	case tickMsg:
-		return m, tea.Batch(m.collect(), tick())
+		return m, tea.Batch(m.startCollect(), tick())
 	case actionResultMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -196,7 +206,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("SIGTERM sent to PID %d.", msg.pid)
 			m.screen = screenAdmin
 			m.selectedProcess, m.processDetail, m.detailErr = nil, nil, nil
-			return m, m.collect()
+			return m, m.startCollect()
 		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
@@ -231,7 +241,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.screen, m.password, m.status = screenPassword, "", "Enter the management password."
 		case "r":
 			m.status = "Refreshing now…"
-			return m.collect()
+			return m.startCollect()
 		}
 	case screenPassword:
 		switch key {
@@ -298,7 +308,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "enter":
 			return m.openProcess(m.cursor)
 		case "r":
-			return m.collect()
+			return m.startCollect()
 		}
 	case screenConfirm:
 		switch key {
@@ -593,7 +603,7 @@ func (m *monitorModel) monitorView() string {
 
 func dashboardHeader(width int) string {
 	title := titleStyle.Render("GPU SSH MONITOR")
-	meta := dimStyle.Render("LIVE  ·  READ-ONLY  ·  2s REFRESH")
+	meta := dimStyle.Render("LIVE  ·  READ-ONLY  ·  1s REFRESH")
 	if width < 68 {
 		return title + "\n" + meta
 	}
@@ -633,12 +643,12 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	w := layout.width
 	format := newProcessFormat(w)
-	lines := []string{sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU"), processHeaderStyle.Render(format.header())}
+	lines := []string{sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU · colored by STAT"), processHeaderStyle.Render(format.header())}
 	for i, p := range m.snapshot.Processes {
 		if i >= layout.processRows {
 			break
 		}
-		lines = append(lines, format.row(p))
+		lines = append(lines, processStateStyle(p.State).Render(format.row(p)))
 	}
 	if len(m.snapshot.Processes) == 0 {
 		lines = append(lines, dimStyle.Render("No process data available."))
@@ -674,13 +684,15 @@ func (m *monitorModel) adminView() string {
 	}
 	format := newProcessFormat(w)
 	table := []string{
-		sectionStyle.Render("PROCESS MANAGER") + "  " + dimStyle.Render(fmt.Sprintf("%d / %d processes · rows %d-%d", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end)),
+		sectionStyle.Render("PROCESS MANAGER") + "  " + dimStyle.Render(fmt.Sprintf("%d / %d processes · rows %d-%d · colored by STAT", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end)),
 		processHeaderStyle.Render(format.header()),
 	}
 	for i := m.processOffset; i < end; i++ {
 		row := format.row(processes[i])
 		if i == m.cursor && !m.filtering {
 			row = selectedRowStyle.Render(row)
+		} else {
+			row = processStateStyle(processes[i].State).Render(row)
 		}
 		table = append(table, row)
 	}
@@ -878,33 +890,57 @@ const (
 
 func newProcessFormat(width int) processFormat {
 	if width >= 112 {
-		return processFormat{mode: processFull, commandWidth: max(16, width-66)}
+		return processFormat{mode: processFull, commandWidth: max(16, width-72)}
 	}
 	if width >= 78 {
-		return processFormat{mode: processMedium, commandWidth: max(14, width-46)}
+		return processFormat{mode: processMedium, commandWidth: max(14, width-52)}
 	}
-	return processFormat{mode: processCompact, commandWidth: max(10, width-29)}
+	return processFormat{mode: processCompact, commandWidth: max(10, width-35)}
 }
 
 func (f processFormat) header() string {
 	switch f.mode {
 	case processFull:
-		return "PID       USER          CPU     MEM     RSS       ELAPSED   COMMAND"
+		return fmt.Sprintf("%-9s %-13s %-5s %6s  %6s  %-8s  %-8s  %s", "PID", "USER", "STAT", "CPU", "MEM", "RSS", "ELAPSED", "COMMAND")
 	case processMedium:
-		return "PID       USER          CPU     MEM     RSS       COMMAND"
+		return fmt.Sprintf("%-9s %-13s %-5s %6s  %6s  %-8s  %s", "PID", "USER", "STAT", "CPU", "MEM", "RSS", "COMMAND")
 	default:
-		return "PID       CPU     MEM     COMMAND"
+		return fmt.Sprintf("%-9s %-5s %6s  %6s  %s", "PID", "STAT", "CPU", "MEM", "COMMAND")
 	}
 }
 
 func (f processFormat) row(p processInfo) string {
 	switch f.mode {
 	case processFull:
-		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, f.commandWidth))
+		return fmt.Sprintf("%-9d %-13s %-5s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), truncate(p.State, 5), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, f.commandWidth))
 	case processMedium:
-		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), truncate(p.Command, f.commandWidth))
+		return fmt.Sprintf("%-9d %-13s %-5s %5.1f%%  %5.1f%%  %-8s  %s", p.PID, truncate(p.User, 12), truncate(p.State, 5), p.CPU, p.Memory, bytes(p.RSS), truncate(p.Command, f.commandWidth))
 	default:
-		return fmt.Sprintf("%-9d %5.1f%%  %5.1f%%  %s", p.PID, p.CPU, p.Memory, truncate(p.Command, f.commandWidth))
+		return fmt.Sprintf("%-9d %-5s %5.1f%%  %5.1f%%  %s", p.PID, truncate(p.State, 5), p.CPU, p.Memory, truncate(p.Command, f.commandWidth))
+	}
+}
+
+func processStateStyle(state string) lipgloss.Style {
+	if state == "" {
+		return processDefaultStyle
+	}
+	switch state[0] {
+	case 'R':
+		return processRunningStyle
+	case 'S':
+		return processSleepingStyle
+	case 'D':
+		return processWaitingStyle
+	case 'T', 't':
+		return processStoppedStyle
+	case 'Z':
+		return processZombieStyle
+	case 'I':
+		return processIdleStyle
+	case 'X', 'x':
+		return processDeadStyle
+	default:
+		return processDefaultStyle
 	}
 }
 
@@ -989,10 +1025,10 @@ type gpuInfo struct {
 }
 
 type processInfo struct {
-	PID           int
-	User, Command string
-	CPU, Memory   float64
-	RSS, Elapsed  uint64
+	PID                  int
+	User, State, Command string
+	CPU, Memory          float64
+	RSS, Elapsed         uint64
 }
 
 type processDetail struct {
@@ -1194,29 +1230,29 @@ func readGPUs() ([]gpuInfo, string) {
 func readProcesses() ([]processInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,user=,pcpu=,pmem=,rss=,etimes=,comm=", "--sort=-pcpu").Output()
+	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,comm=", "--sort=-pcpu").Output()
 	if err != nil {
 		return nil, err
 	}
 	var processes []processInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 7 {
+		if len(fields) < 8 {
 			continue
 		}
 		pid, _ := strconv.Atoi(fields[0])
-		cpu, _ := strconv.ParseFloat(fields[2], 64)
-		memory, _ := strconv.ParseFloat(fields[3], 64)
-		rss, _ := strconv.ParseUint(fields[4], 10, 64)
-		elapsed, _ := strconv.ParseUint(fields[5], 10, 64)
+		cpu, _ := strconv.ParseFloat(fields[3], 64)
+		memory, _ := strconv.ParseFloat(fields[4], 64)
+		rss, _ := strconv.ParseUint(fields[5], 10, 64)
+		elapsed, _ := strconv.ParseUint(fields[6], 10, 64)
 		// ps can briefly appear as the busiest process because it is sampling
 		// the whole process table. It is collector noise, not a useful host task.
-		if fields[6] == "ps" {
+		if fields[7] == "ps" {
 			continue
 		}
 		processes = append(processes, processInfo{
-			PID: pid, User: sanitizeTerminalText(fields[1]), CPU: cpu, Memory: memory,
-			RSS: rss * 1024, Elapsed: elapsed, Command: sanitizeTerminalText(strings.Join(fields[6:], " ")),
+			PID: pid, User: sanitizeTerminalText(fields[1]), State: sanitizeTerminalText(fields[2]), CPU: cpu, Memory: memory,
+			RSS: rss * 1024, Elapsed: elapsed, Command: sanitizeTerminalText(strings.Join(fields[7:], " ")),
 		})
 	}
 	sort.SliceStable(processes, func(i, j int) bool { return processes[i].CPU > processes[j].CPU })
@@ -1316,6 +1352,14 @@ var (
 	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC")).Bold(true)
 	inputStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
 	selectedRowStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true)
+	processRunningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
+	processSleepingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#9FC3FF"))
+	processWaitingStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C")).Bold(true)
+	processStoppedStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD180"))
+	processZombieStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF7B72")).Bold(true)
+	processIdleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#8C91A8"))
+	processDeadStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5370")).Bold(true)
+	processDefaultStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#D7DAE0"))
 	compactButtonStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#30374A")).Padding(0, 1)
 	compactDangerButtonStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFF4F2")).Background(lipgloss.Color("#5A3037")).Padding(0, 1)
 )
