@@ -175,8 +175,21 @@ func TestGPUClockAndPowerParsing(t *testing.T) {
 	if gpu.ClockMHz != 1410 || gpu.Power != 70.64 || gpu.PowerLimit != 250 {
 		t.Fatalf("GPU telemetry = %#v", gpu)
 	}
-	if got := gpuTelemetry(gpu, true); got != "CLK 1410 MHz · PWR 71/250 W · 55°C" {
+	if got := gpuTelemetry(gpu, true); got != "CLK 1410 MHz · PWR  71/250 W ·  55°C" {
 		t.Fatalf("GPU telemetry text = %q", got)
+	}
+}
+
+func TestGPUMemoryColumnsAreAligned(t *testing.T) {
+	gpus := []gpuInfo{
+		{MemoryUsed: 425 * 1024 * 1024, MemoryTotal: 40 * 1024 * 1024 * 1024},
+		{MemoryUsed: 1 * 1024 * 1024, MemoryTotal: 24 * 1024 * 1024 * 1024},
+	}
+	usedWidth, totalWidth := gpuMemoryWidths(gpus)
+	first := gpuMemoryText(gpus[0], usedWidth, totalWidth)
+	second := gpuMemoryText(gpus[1], usedWidth, totalWidth)
+	if lipgloss.Width(first) != lipgloss.Width(second) || strings.Index(first, "/") != strings.Index(second, "/") {
+		t.Fatalf("GPU memory columns are not aligned: %q / %q", first, second)
 	}
 }
 

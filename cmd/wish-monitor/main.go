@@ -620,23 +620,27 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 		return panelStyle(w).Render(sectionStyle.Render("GPU") + "\n" + dimStyle.Render("nvidia-smi unavailable: "+m.snapshot.GPUError))
 	}
 	lines := []string{sectionStyle.Render("GPU")}
+	memoryUsedWidth, memoryTotalWidth := gpuMemoryWidths(m.snapshot.GPUs)
 	for _, gpu := range m.snapshot.GPUs {
+		memory := gpuMemoryText(gpu, memoryUsedWidth, memoryTotalWidth)
 		if layout.compactGPU {
 			lines = append(lines,
 				accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index))+"  "+truncate(gpu.Name, w-12),
-				bar(gpu.Utilization, max(8, w-43))+fmt.Sprintf(" %3.0f%%  MEM %s/%s", gpu.Utilization, bytes(gpu.MemoryUsed), bytes(gpu.MemoryTotal)),
+				bar(gpu.Utilization, max(8, w-lipgloss.Width(memory)-12))+fmt.Sprintf(" %3.0f%%  %s", gpu.Utilization, memory),
 				dimStyle.Render(gpuTelemetry(gpu, false)),
 			)
 			continue
 		}
 		nameWidth := min(28, max(14, w/5))
-		barWidth := min(42, max(10, w-nameWidth-86))
+		showPowerLimit := w >= 128
+		telemetry := gpuTelemetry(gpu, showPowerLimit)
+		barWidth := min(42, max(10, w-nameWidth-lipgloss.Width(memory)-lipgloss.Width(telemetry)-22))
 		lines = append(lines, fmt.Sprintf("%s  %-*s  %s %3.0f%%  %s  %s",
 			accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
 			nameWidth, truncate(gpu.Name, nameWidth),
 			bar(gpu.Utilization, barWidth), gpu.Utilization,
-			fmt.Sprintf("MEM %s/%s", bytes(gpu.MemoryUsed), bytes(gpu.MemoryTotal)),
-			dimStyle.Render(gpuTelemetry(gpu, w >= 128)),
+			memory,
+			dimStyle.Render(telemetry),
 		))
 	}
 	if len(m.snapshot.GPUs) == 0 {
@@ -647,9 +651,21 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 
 func gpuTelemetry(gpu gpuInfo, showPowerLimit bool) string {
 	if showPowerLimit && gpu.PowerLimit > 0 {
-		return fmt.Sprintf("CLK %d MHz · PWR %.0f/%.0f W · %d°C", gpu.ClockMHz, gpu.Power, gpu.PowerLimit, gpu.Temperature)
+		return fmt.Sprintf("CLK %4d MHz · PWR %3.0f/%3.0f W · %3d°C", gpu.ClockMHz, gpu.Power, gpu.PowerLimit, gpu.Temperature)
 	}
-	return fmt.Sprintf("CLK %d MHz · PWR %.0f W · %d°C", gpu.ClockMHz, gpu.Power, gpu.Temperature)
+	return fmt.Sprintf("CLK %4d MHz · PWR %3.0f W · %3d°C", gpu.ClockMHz, gpu.Power, gpu.Temperature)
+}
+
+func gpuMemoryWidths(gpus []gpuInfo) (usedWidth, totalWidth int) {
+	for _, gpu := range gpus {
+		usedWidth = max(usedWidth, lipgloss.Width(bytes(gpu.MemoryUsed)))
+		totalWidth = max(totalWidth, lipgloss.Width(bytes(gpu.MemoryTotal)))
+	}
+	return max(usedWidth, 1), max(totalWidth, 1)
+}
+
+func gpuMemoryText(gpu gpuInfo, usedWidth, totalWidth int) string {
+	return fmt.Sprintf("MEM %*s/%*s", usedWidth, bytes(gpu.MemoryUsed), totalWidth, bytes(gpu.MemoryTotal))
 }
 
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
@@ -847,7 +863,7 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 	case width >= 76:
 		cols = 2
 	}
-	compactGPU := width < 96
+	compactGPU := width < 112
 	metricLines := ((4 + cols - 1) / cols) * 5 // three content lines plus border
 	gpuContentLines := 1
 	if gpuUnavailable {
