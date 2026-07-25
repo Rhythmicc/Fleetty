@@ -1184,7 +1184,7 @@ func newAdminController() *adminController {
 		password:     os.Getenv("ADMIN_PASSWORD"),
 		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
 		actions: []adminAction{
-			{label: "Restart monitor service", description: "Restart the GPU SSH monitor service.", command: envString("ADMIN_RESTART_MONITOR_CMD", "systemctl restart gpu-tui-monitor.service")},
+			{label: "Restart monitor service", description: "Restart the GPU SSH monitor service.", command: envString("ADMIN_RESTART_MONITOR_CMD", "systemctl restart gpu-ssh-monitor.service")},
 			{label: "Reboot machine", description: "Restart the entire host. Active workloads will be interrupted.", command: envString("ADMIN_REBOOT_CMD", "systemctl reboot")},
 		},
 	}

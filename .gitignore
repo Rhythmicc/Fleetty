@@ -1,38 +1,16 @@
-# dependencies (bun install)
-node_modules
-gpu-ssh-monitor
-gpu-tui-ssh
-.ssh/
+# Local builds and generated files
+/gpu-ssh-monitor
+/gpu-tui-ssh
+/dist/
+/coverage/
+*.out
 *.sock
 
-# output
-out
-dist
-*.tgz
-
-# code coverage
-coverage
-*.lcov
-
-# logs
-logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
-
-# dotenv environment variable files
+# Local runtime state and secrets
+/.ssh/
 .env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
+.env.*
 
-# caches
-.eslintcache
-.cache
-*.tsbuildinfo
-
-# IntelliJ based IDEs
-.idea
-
-# Finder (MacOS) folder config
+# Editors and operating systems
+/.idea/
 .DS_Store

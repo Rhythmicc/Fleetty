@@ -98,6 +98,14 @@ func TestDisabledManagementMode(t *testing.T) {
 	}
 }
 
+func TestDefaultRestartCommandMatchesPackagedService(t *testing.T) {
+	t.Setenv("ADMIN_RESTART_MONITOR_CMD", "")
+	admin := newAdminController()
+	if got := admin.actions[0].command; got != "systemctl restart gpu-ssh-monitor.service" {
+		t.Fatalf("default restart command = %q", got)
+	}
+}
+
 func TestManagementCardsCanBeClicked(t *testing.T) {
 	m := &monitorModel{
 		admin: &adminController{actions: []adminAction{

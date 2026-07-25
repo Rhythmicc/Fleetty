@@ -9,11 +9,14 @@ WorkingDirectory=/opt/gpu-ssh-monitor
 Environment=HOME=/root
 Environment=SSH_HOST=0.0.0.0
 Environment=SSH_PORT=23234
+Environment=SSH_HOST_KEY_PATH=/etc/gpu-ssh-monitor/ssh_host_ed25519
+Environment=DEFAULT_THEME=dark
 # Optional management-password and command overrides, owned by root (0600).
 EnvironmentFile=-/etc/gpu-ssh-monitor/admin.env
 ExecStart=/opt/gpu-ssh-monitor/gpu-ssh-monitor
 Restart=always
 RestartSec=2
+UMask=0077
 User=root
 Group=root
 

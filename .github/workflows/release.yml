@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Test, build, and release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build Linux release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for monitor_arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${monitor_arch}" \
+              go build -trimpath -ldflags="-s -w" \
+              -o "dist/gpu-ssh-monitor_linux_${monitor_arch}" \
+              ./cmd/wish-monitor
+          done
+          cp deploy/gpu-ssh-monitor.service dist/gpu-ssh-monitor.service
+          (
+            cd dist
+            sha256sum gpu-ssh-monitor_linux_* gpu-ssh-monitor.service > checksums.txt
+          )
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --title "GPU SSH Monitor ${GITHUB_REF_NAME}"
