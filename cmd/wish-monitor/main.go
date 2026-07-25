@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -371,7 +372,15 @@ type adminAction struct {
 	key     byte
 	label   string
 	command string
+	kind    adminActionKind
 }
+
+type adminActionKind int
+
+const (
+	adminActionCommand adminActionKind = iota
+	adminActionProcessManager
+)
 
 type adminController struct {
 	password     string
@@ -384,9 +393,10 @@ func newAdminController() *adminController {
 		password:     os.Getenv("ADMIN_PASSWORD"),
 		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
 		actions: []adminAction{
-			{key: '1', label: "Restart gpu-ssh-monitor service", command: os.Getenv("ADMIN_RESTART_MONITOR_CMD")},
-			{key: '2', label: "Reboot this machine", command: os.Getenv("ADMIN_REBOOT_CMD")},
-			{key: '3', label: "Power off this machine", command: os.Getenv("ADMIN_POWEROFF_CMD")},
+			{key: '1', label: "Restart gpu-ssh-monitor service", command: os.Getenv("ADMIN_RESTART_MONITOR_CMD"), kind: adminActionCommand},
+			{key: '2', label: "Reboot this machine", command: os.Getenv("ADMIN_REBOOT_CMD"), kind: adminActionCommand},
+			{key: '3', label: "Power off this machine", command: os.Getenv("ADMIN_POWEROFF_CMD"), kind: adminActionCommand},
+			{key: '4', label: "Manage processes", kind: adminActionProcessManager},
 		},
 	}
 	if controller.actions[0].command == "" {
@@ -423,6 +433,11 @@ const (
 	adminModePassword
 	adminModeMenu
 	adminModeConfirm
+	adminModeProcessList
+	adminModeProcessDetailPID
+	adminModeProcessDetail
+	adminModeProcessTerminatePID
+	adminModeProcessTerminateConfirm
 )
 
 type adminSession struct {
@@ -457,6 +472,9 @@ func (a *adminSession) Handle(input byte) sessionAction {
 	if a.model.pending != nil {
 		a.runPendingAction()
 	}
+	if a.model.processTask != processTaskNone {
+		a.runProcessTask()
+	}
 	if !wasMonitor && a.model.mode == adminModeMonitor {
 		a.leave()
 		return actionNone
@@ -489,6 +507,43 @@ func (a *adminSession) runPendingAction() {
 	log.Info("administrative action requested", "user", a.session.User(), "remote_addr", a.session.RemoteAddr().String(), "action", action.label, "error", err)
 }
 
+func (a *adminSession) runProcessTask() {
+	task := a.model.processTask
+	pid := a.model.processPIDValue
+	a.model.processTask = processTaskNone
+
+	switch task {
+	case processTaskList:
+		processes, err := listProcesses()
+		if err != nil {
+			a.model.status = fmt.Sprintf("Could not list processes: %v", err)
+			return
+		}
+		a.model.processOutput = processes
+	case processTaskDetail:
+		details, startTime, err := processDetails(pid)
+		if err != nil {
+			a.model.status = fmt.Sprintf("Could not inspect PID %d: %v", pid, err)
+			if a.model.mode == adminModeProcessTerminateConfirm {
+				a.model.mode = adminModeProcessList
+			}
+			return
+		}
+		a.model.processOutput = details
+		a.model.processStartTime = startTime
+	case processTaskTerminate:
+		if err := terminateProcess(pid, a.model.processStartTime); err != nil {
+			a.model.status = fmt.Sprintf("Could not terminate PID %d: %v", pid, err)
+		} else {
+			a.model.status = fmt.Sprintf("SIGTERM sent to PID %d.", pid)
+		}
+		processes, err := listProcesses()
+		if err == nil {
+			a.model.processOutput = processes
+		}
+	}
+}
+
 func (a *adminSession) draw() {
 	_, _ = io.WriteString(a.session, "\x1b[2J\x1b[H\x1b[?25h"+a.model.View().Content)
 }
@@ -502,15 +557,29 @@ func (a *adminSession) leave() {
 // SSH loop as the program driver because the dashboard already owns the same
 // terminal; running a second tea.Program would make the two renderers race.
 type adminModel struct {
-	controller *adminController
-	mode       adminMode
-	password   []byte
-	attempts   int
-	selected   adminAction
-	pending    *adminAction
-	status     string
-	exit       bool
+	controller       *adminController
+	mode             adminMode
+	password         []byte
+	attempts         int
+	selected         adminAction
+	pending          *adminAction
+	status           string
+	exit             bool
+	processPID       []byte
+	processPIDValue  int
+	processStartTime uint64
+	processOutput    string
+	processTask      processTask
 }
+
+type processTask int
+
+const (
+	processTaskNone processTask = iota
+	processTaskList
+	processTaskDetail
+	processTaskTerminate
+)
 
 func (m *adminModel) Init() tea.Cmd {
 	return nil
@@ -549,6 +618,16 @@ func (m *adminModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateMenu(input)
 	case adminModeConfirm:
 		m.updateConfirmation(input)
+	case adminModeProcessList:
+		m.updateProcessList(input)
+	case adminModeProcessDetailPID:
+		m.updateProcessPID(input, false)
+	case adminModeProcessDetail:
+		m.mode = adminModeProcessList
+	case adminModeProcessTerminatePID:
+		m.updateProcessPID(input, true)
+	case adminModeProcessTerminateConfirm:
+		m.updateProcessTermination(input)
 	}
 	return m, nil
 }
@@ -589,6 +668,12 @@ func (m *adminModel) updateMenu(input rune) {
 	}
 	for _, action := range m.controller.actions {
 		if input == rune(action.key) {
+			if action.kind == adminActionProcessManager {
+				m.status = ""
+				m.processTask = processTaskList
+				m.mode = adminModeProcessList
+				return
+			}
 			m.selected = action
 			m.mode = adminModeConfirm
 			return
@@ -604,6 +689,65 @@ func (m *adminModel) updateConfirmation(input rune) {
 		return
 	}
 	m.mode = adminModeMenu
+}
+
+func (m *adminModel) updateProcessList(input rune) {
+	switch input {
+	case 0x03:
+		m.exit = true
+	case tea.KeyEscape, 'q', 'Q':
+		m.mode = adminModeMenu
+	case 'r', 'R':
+		m.status = ""
+		m.processTask = processTaskList
+	case 'd', 'D':
+		m.status = ""
+		m.processPID = nil
+		m.mode = adminModeProcessDetailPID
+	case 't', 'T':
+		m.status = ""
+		m.processPID = nil
+		m.mode = adminModeProcessTerminatePID
+	}
+}
+
+func (m *adminModel) updateProcessPID(input rune, terminate bool) {
+	switch input {
+	case 0x03:
+		m.exit = true
+	case tea.KeyEscape:
+		m.mode = adminModeProcessList
+	case tea.KeyEnter, '\n':
+		pid, err := validateProcessPID(string(m.processPID))
+		if err != nil {
+			m.status = err.Error()
+			return
+		}
+		m.processPIDValue = pid
+		if terminate {
+			m.mode = adminModeProcessTerminateConfirm
+		} else {
+			m.mode = adminModeProcessDetail
+		}
+		m.processTask = processTaskDetail
+	case tea.KeyBackspace, 0x08:
+		if len(m.processPID) > 0 {
+			m.processPID = m.processPID[:len(m.processPID)-1]
+		}
+	default:
+		if input >= '0' && input <= '9' && len(m.processPID) < 10 {
+			m.processPID = append(m.processPID, byte(input))
+		}
+	}
+}
+
+func (m *adminModel) updateProcessTermination(input rune) {
+	if input == 'y' || input == 'Y' {
+		m.processTask = processTaskTerminate
+		m.mode = adminModeProcessList
+		return
+	}
+	m.mode = adminModeProcessList
 }
 
 func (m *adminModel) View() tea.View {
@@ -628,6 +772,33 @@ func (m *adminModel) View() tea.View {
 		view.WriteString("\r\n[q] Return to monitor\r\n\r\nSelect an operation: ")
 	case adminModeConfirm:
 		fmt.Fprintf(&view, "Management mode\r\n\r\n%s\r\n\r\nType y to confirm, or any other key to cancel: ", m.selected.label)
+	case adminModeProcessList:
+		view.WriteString("Process management\r\n\r\n")
+		if m.status != "" {
+			view.WriteString(m.status + "\r\n\r\n")
+		}
+		view.WriteString("[r] Refresh  [d] PID details  [t] Terminate PID  [q] Back\r\n\r\n")
+		view.WriteString(m.processOutput)
+	case adminModeProcessDetailPID:
+		view.WriteString("Process management\r\n\r\nEnter a PID to inspect (Esc to cancel): ")
+		view.Write(m.processPID)
+		if m.status != "" {
+			view.WriteString("\r\n\r\n" + m.status)
+		}
+	case adminModeProcessDetail:
+		view.WriteString("Process details\r\n\r\n")
+		if m.status != "" {
+			view.WriteString(m.status + "\r\n\r\n")
+		}
+		view.WriteString(m.processOutput + "\r\nPress any key to return to the process list.")
+	case adminModeProcessTerminatePID:
+		view.WriteString("Terminate process\r\n\r\nEnter a PID to terminate with SIGTERM (Esc to cancel): ")
+		view.Write(m.processPID)
+		if m.status != "" {
+			view.WriteString("\r\n\r\n" + m.status)
+		}
+	case adminModeProcessTerminateConfirm:
+		fmt.Fprintf(&view, "Terminate process\r\n\r\n%s\r\n\r\nSend SIGTERM to PID %d? Type y to confirm, or any other key to cancel: ", m.processOutput, m.processPIDValue)
 	}
 	return tea.NewView(view.String())
 }
@@ -647,6 +818,105 @@ func keyMessage(input byte) tea.KeyPressMsg {
 		}
 	}
 	return tea.KeyPressMsg(key)
+}
+
+func listProcesses() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,ppid=,user=,stat=,etimes=,%cpu=,%mem=,comm=", "--sort=-%cpu").Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", errors.New("process listing timed out")
+	}
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimSpace(sanitizeTerminalText(string(output))), "\n")
+	if len(lines) > 25 {
+		lines = lines[:25]
+	}
+	return "  PID  PPID USER       STAT ELAPSED %CPU %MEM COMMAND\r\n" + strings.Join(lines, "\r\n") + "\r\n", nil
+}
+
+func processDetails(pid int) (string, uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,user=,group=,lstart=,etime=,stat=,%cpu=,%mem=,args=").Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", 0, errors.New("process lookup timed out")
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	details := strings.TrimSpace(sanitizeTerminalText(string(output)))
+	if details == "" {
+		return "", 0, fmt.Errorf("PID %d no longer exists", pid)
+	}
+	startTime, err := processStartTime(pid)
+	if err != nil {
+		return "", 0, err
+	}
+	return details, startTime, nil
+}
+
+func validateProcessPID(value string) (int, error) {
+	pid, err := strconv.Atoi(value)
+	if err != nil || pid < 2 {
+		return 0, errors.New("enter a PID greater than 1")
+	}
+	if pid == os.Getpid() {
+		return 0, errors.New("the monitor service cannot terminate itself")
+	}
+	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, fmt.Errorf("PID %d does not exist", pid)
+		}
+		return 0, err
+	}
+	return pid, nil
+}
+
+func terminateProcess(pid int, expectedStartTime uint64) error {
+	if _, err := validateProcessPID(strconv.Itoa(pid)); err != nil {
+		return err
+	}
+	currentStartTime, err := processStartTime(pid)
+	if err != nil {
+		return err
+	}
+	if expectedStartTime == 0 || currentStartTime != expectedStartTime {
+		return errors.New("PID was reused; refresh its details before terminating it")
+	}
+	return syscall.Kill(pid, syscall.SIGTERM)
+}
+
+func processStartTime(pid int) (uint64, error) {
+	contents, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, err
+	}
+	closingParenthesis := strings.LastIndex(string(contents), ")")
+	if closingParenthesis == -1 {
+		return 0, errors.New("could not read process start time")
+	}
+	fields := strings.Fields(string(contents[closingParenthesis+1:]))
+	if len(fields) <= 19 {
+		return 0, errors.New("could not read process start time")
+	}
+	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return startTime, nil
+}
+
+func sanitizeTerminalText(value string) string {
+	var result strings.Builder
+	for _, char := range value {
+		if char == '\n' || char == '\r' || char == '\t' || char >= 0x20 && char != 0x7f {
+			result.WriteRune(char)
+		}
+	}
+	return result.String()
 }
 
 func envString(key string, fallback string) string {

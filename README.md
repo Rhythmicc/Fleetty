@@ -87,12 +87,19 @@ The built-in fixed operations are:
 - restart the `gpu-ssh-monitor` systemd service
 - reboot the host
 - power off the host
+- manage processes: list the busiest processes, inspect a PID, or send an
+  explicitly confirmed `SIGTERM` to a PID
 
 The commands run as the account that runs this service (the sample unit uses
 `root`). They are deliberately not editable by SSH users: change their values
 only in the service environment. The password is checked before the menu is
 shown and every operation needs a second, explicit `y` confirmation. Each
 request is written to the service log with the SSH username and remote address.
+
+Process management is intentionally limited to read-only `ps` queries and a
+single `SIGTERM` operation. It only accepts numeric, live PIDs; PID 1 and the
+monitor service itself are rejected. Process output is sanitized before it is
+rendered, so a process command line cannot inject terminal escape sequences.
 
 For a systemd installation, keep the secret outside the unit file in a
 root-readable environment file:

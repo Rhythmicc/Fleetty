@@ -46,3 +46,40 @@ func TestAdminModelDisabledAndIncorrectPassword(t *testing.T) {
 		t.Fatalf("incorrect password state = mode %v, status %q", model.mode, model.status)
 	}
 }
+
+func TestAdminModelProcessManagerNavigation(t *testing.T) {
+	controller := &adminController{
+		password: "secret",
+		actions:  []adminAction{{key: '4', label: "Manage processes", kind: adminActionProcessManager}},
+	}
+	model := &adminModel{controller: controller, mode: adminModeMenu}
+
+	model.Update(keyMessage('4'))
+	if model.mode != adminModeProcessList || model.processTask != processTaskList {
+		t.Fatalf("process manager = mode %v, task %v", model.mode, model.processTask)
+	}
+
+	model.processTask = processTaskNone // Simulate the session completing the list request.
+	model.Update(keyMessage('d'))
+	if model.mode != adminModeProcessDetailPID {
+		t.Fatalf("detail prompt mode = %v", model.mode)
+	}
+	model.Update(keyMessage(0x1b))
+	if model.mode != adminModeProcessList {
+		t.Fatalf("escape from detail prompt = %v", model.mode)
+	}
+
+	model.Update(keyMessage('t'))
+	if model.mode != adminModeProcessTerminatePID {
+		t.Fatalf("terminate prompt mode = %v", model.mode)
+	}
+}
+
+func TestProcessInputSafety(t *testing.T) {
+	if _, err := validateProcessPID("1"); err == nil {
+		t.Fatal("PID 1 should be rejected")
+	}
+	if got := sanitizeTerminalText("safe\x1b[2J\ntext\x00"); got != "safe[2J\ntext" {
+		t.Fatalf("sanitized process text = %q", got)
+	}
+}
