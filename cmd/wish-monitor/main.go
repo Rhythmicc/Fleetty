@@ -589,7 +589,11 @@ func (m *monitorModel) monitorView() string {
 		{"CPU", fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent), m.snapshot.LoadAverage},
 		{"MEMORY", fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal)), fmt.Sprintf("%.1f%% used", percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal))},
 		{"DISK /", fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal)), fmt.Sprintf("%.1f%% used", percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal))},
-		{"NETWORK", fmt.Sprintf("↓ %s/s", bytes(m.snapshot.NetworkRX)), fmt.Sprintf("↑ %s/s", bytes(m.snapshot.NetworkTX))},
+		{
+			"NETWORK",
+			fmt.Sprintf("↓ %s/s  ↑ %s/s", bytes(m.snapshot.NetworkRX), bytes(m.snapshot.NetworkTX)),
+			fmt.Sprintf("TOTAL ↓ %s  ↑ %s", bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)),
+		},
 	}
 	metricRows := renderMetricRows(metrics, layout)
 	gpu := m.gpuPanel(layout)
@@ -836,7 +840,7 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 		cols = 2
 	}
 	compactGPU := width < 96
-	metricLines := ((4 + cols - 1) / cols) * 4 // two content lines plus border
+	metricLines := ((4 + cols - 1) / cols) * 5 // three content lines plus border
 	gpuContentLines := 1
 	if gpuUnavailable {
 		gpuContentLines = 2
@@ -859,8 +863,11 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 	cardWidth := max(16, (layout.width-(layout.metricCols-1))/layout.metricCols)
 	render := func(c metricCard) string {
-		line := valueStyle.Render(truncate(c.value, cardWidth-4)) + "  " + dimStyle.Render(truncate(c.detail, max(6, cardWidth-lipgloss.Width(c.value)-7)))
-		return metricStyle(cardWidth).Render(sectionStyle.Render(c.title) + "\n" + line)
+		return metricStyle(cardWidth).Render(strings.Join([]string{
+			sectionStyle.Render(c.title),
+			valueStyle.Render(truncate(c.value, cardWidth-4)),
+			dimStyle.Render(truncate(c.detail, cardWidth-4)),
+		}, "\n"))
 	}
 	rows := make([]string, 0, (len(cards)+layout.metricCols-1)/layout.metricCols)
 	for start := 0; start < len(cards); start += layout.metricCols {
@@ -1010,6 +1017,8 @@ type monitorSnapshot struct {
 	MemoryUsed, MemoryTotal uint64
 	DiskUsed, DiskTotal     uint64
 	NetworkRX, NetworkTX    uint64
+	NetworkRXTotal          uint64
+	NetworkTXTotal          uint64
 	GPUs                    []gpuInfo
 	GPUError                string
 	Processes               []processInfo
@@ -1054,6 +1063,13 @@ type metricsCollector struct {
 
 type netCounters struct{ rx, tx uint64 }
 
+func counterDelta(current, previous uint64) uint64 {
+	if current < previous {
+		return 0
+	}
+	return current - previous
+}
+
 func newMetricsCollector() *metricsCollector { return &metricsCollector{} }
 
 func (c *metricsCollector) collect() (monitorSnapshot, error) {
@@ -1083,15 +1099,18 @@ func (c *metricsCollector) collect() (monitorSnapshot, error) {
 	}
 	if net, err := readNetwork(); err != nil {
 		errs = append(errs, "network: "+err.Error())
-	} else if c.haveNet {
-		delta := time.Since(c.lastNetAt).Seconds()
-		if delta > 0 {
-			s.NetworkRX = uint64(float64(net.rx-c.previousNet.rx) / delta)
-			s.NetworkTX = uint64(float64(net.tx-c.previousNet.tx) / delta)
-		}
-		c.previousNet, c.lastNetAt = net, time.Now()
 	} else {
-		c.previousNet, c.haveNet, c.lastNetAt = net, true, time.Now()
+		s.NetworkRXTotal, s.NetworkTXTotal = net.rx, net.tx
+		if c.haveNet {
+			delta := time.Since(c.lastNetAt).Seconds()
+			if delta > 0 {
+				s.NetworkRX = uint64(float64(counterDelta(net.rx, c.previousNet.rx)) / delta)
+				s.NetworkTX = uint64(float64(counterDelta(net.tx, c.previousNet.tx)) / delta)
+			}
+			c.previousNet, c.lastNetAt = net, time.Now()
+		} else {
+			c.previousNet, c.haveNet, c.lastNetAt = net, true, time.Now()
+		}
 	}
 	s.LoadAverage = readLoadAverage()
 	s.GPUs, s.GPUError = readGPUs()

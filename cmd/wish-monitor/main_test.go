@@ -144,6 +144,12 @@ func TestFormattingHelpers(t *testing.T) {
 	if got := trimLastRune("a界"); got != "a" {
 		t.Fatalf("trimLastRune = %q", got)
 	}
+	if got := counterDelta(150, 100); got != 50 {
+		t.Fatalf("counter delta = %d", got)
+	}
+	if got := counterDelta(10, 100); got != 0 {
+		t.Fatalf("reset counter delta = %d, want 0", got)
+	}
 }
 
 func TestDashboardLayoutUsesTerminalSize(t *testing.T) {
@@ -168,8 +174,8 @@ func TestMetricCardsJoinHorizontally(t *testing.T) {
 		{"NETWORK", "1 KiB/s", "2 KiB/s"},
 	}
 	rendered := renderMetricRows(cards, dashboardLayout{width: 161, metricCols: 4})
-	if height := lipgloss.Height(rendered); height != 4 {
-		t.Fatalf("metric cards height = %d, want one four-line row", height)
+	if height := lipgloss.Height(rendered); height != 5 {
+		t.Fatalf("metric cards height = %d, want one five-line row", height)
 	}
 }
 
