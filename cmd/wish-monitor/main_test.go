@@ -49,6 +49,47 @@ func TestPasswordPasteAndLegacyKeyInput(t *testing.T) {
 	}
 }
 
+func TestThemeSelectionIsSessionLocal(t *testing.T) {
+	first := &monitorModel{screen: screenMonitor, colorMode: colorModeDark}
+	second := &monitorModel{screen: screenMonitor, colorMode: colorModeDark}
+
+	first.handleKey(testKey("t"))
+	if first.colorMode != colorModeLight {
+		t.Fatalf("first session theme = %s, want light", first.colorMode)
+	}
+	if second.colorMode != colorModeDark {
+		t.Fatalf("second session theme changed to %s", second.colorMode)
+	}
+
+	lightView := first.View()
+	darkView := second.View()
+	lightR, lightG, lightB, _ := lightView.BackgroundColor.RGBA()
+	darkR, darkG, darkB, _ := darkView.BackgroundColor.RGBA()
+	if lightR == darkR && lightG == darkG && lightB == darkB {
+		t.Fatal("light and dark sessions should use different terminal backgrounds")
+	}
+	if lightView.Content == darkView.Content {
+		t.Fatal("light theme should remap the session's rendered palette")
+	}
+
+	filtering := &monitorModel{screen: screenAdmin, filtering: true, colorMode: colorModeDark}
+	filtering.handleKey(testKey("T"))
+	if filtering.colorMode != colorModeDark || filtering.filter != "T" {
+		t.Fatalf("filter input should receive T without changing theme: mode=%s filter=%q", filtering.colorMode, filtering.filter)
+	}
+}
+
+func TestProcessHeaderHasHighContrastInBothThemes(t *testing.T) {
+	dark := processTableHeader("PID  USER  CPU  COMMAND", 50)
+	if !strings.Contains(dark, "38;2;16;19;26") || !strings.Contains(dark, "48;2;159;195;255") {
+		t.Fatalf("dark process header should use dark text on a bright background: %q", dark)
+	}
+	light := applyLightTheme(dark)
+	if !strings.Contains(light, "38;2;248;250;252") || !strings.Contains(light, "48;2;49;93;145") {
+		t.Fatalf("light process header should use light text on a dark background: %q", light)
+	}
+}
+
 func TestDisabledManagementMode(t *testing.T) {
 	m := &monitorModel{admin: &adminController{}, screen: screenMonitor}
 	m.handleKey(testKey("m"))

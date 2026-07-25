@@ -105,7 +105,15 @@ type monitorModel struct {
 	cpuHistory       []float64
 	networkRXHistory []float64
 	networkTXHistory []float64
+	colorMode        colorMode
 }
+
+type colorMode int
+
+const (
+	colorModeDark colorMode = iota
+	colorModeLight
+)
 
 type screen int
 
@@ -131,6 +139,7 @@ func newMonitorModel(admin *adminController, sess ssh.Session, width, height int
 		width:     width,
 		height:    height,
 		status:    "Live data refreshes every second.",
+		colorMode: parseColorMode(os.Getenv("DEFAULT_THEME")),
 	}
 }
 
@@ -236,6 +245,11 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	key := msg.String()
 	if key == "ctrl+c" || key == "q" && m.screen == screenMonitor {
 		return tea.Quit
+	}
+	themeKey := key == "T" || key == "t" && (m.screen == screenMonitor || m.screen == screenAdmin)
+	if themeKey && m.screen != screenPassword && !(m.screen == screenAdmin && m.filtering) {
+		m.toggleColorMode()
+		return nil
 	}
 
 	switch m.screen {
@@ -578,17 +592,21 @@ func (m *monitorModel) View() tea.View {
 	default:
 		body = m.monitorView()
 	}
+	if m.colorMode == colorModeLight {
+		body = applyLightTheme(body)
+	}
 	v := tea.NewView(body)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = "GPU SSH Monitor"
+	v.BackgroundColor, v.ForegroundColor = viewColors(m.colorMode)
 	return v
 }
 
 func (m *monitorModel) monitorView() string {
 	layout := newDashboardLayout(m.width, m.height, len(m.snapshot.GPUs), m.snapshot.GPUError != "")
 	w := layout.width
-	header := dashboardHeader(w, m.snapshot.CollectedAt)
+	header := dashboardHeader(w, m.snapshot.CollectedAt, m.colorMode)
 	if m.snapshot.CollectedAt.IsZero() {
 		return strings.Join([]string{header, "", panelStyle(w).Render("Collecting system metrics…")}, "\n")
 	}
@@ -627,14 +645,19 @@ func (m *monitorModel) monitorView() string {
 	return strings.Join([]string{header, metricRows, gpu, processes, footer}, "\n")
 }
 
-func dashboardHeader(width int, collectedAt time.Time) string {
+func dashboardHeader(width int, collectedAt time.Time, mode colorMode) string {
 	title := titleStyle.Render("GPU SSH MONITOR")
 	live := liveBadgeStyle.Render("● LIVE")
 	clock := "--:--:--"
 	if !collectedAt.IsZero() {
 		clock = collectedAt.Format("15:04:05")
 	}
-	meta := dimStyle.Render("READ ONLY  ·  1s") + "  " + clockStyle.Render(clock)
+	modeLabel := strings.ToUpper(mode.String())
+	metaLabel := "READ ONLY  ·  1s  ·  " + modeLabel
+	if width < 80 {
+		metaLabel = "1s  ·  " + modeLabel
+	}
+	meta := dimStyle.Render(metaLabel) + "  " + clockStyle.Render(clock)
 	if width < 54 {
 		return title + "  " + live + "\n" + meta
 	}
@@ -1562,7 +1585,7 @@ var (
 	liveBadgeStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#7EE2B8")).Bold(true).Padding(0, 1)
 	keycapStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true).Padding(0, 1)
 	hintLabelStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C9CEDA"))
-	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#B8C0D9")).Background(lipgloss.Color("#1D2433")).Bold(true)
+	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#9FC3FF")).Bold(true)
 	inputStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
 	selectedRowStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true)
 	networkRXStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
@@ -1638,6 +1661,7 @@ func processTableHeader(header string, width int) string {
 func renderFooter(width int, status string) string {
 	hints := strings.Join([]string{
 		keyHint("m", "management"),
+		keyHint("t", "theme"),
 		keyHint("r", "refresh"),
 		keyHint("q", "quit"),
 	}, "  ")
@@ -1650,6 +1674,100 @@ func renderFooter(width int, status string) string {
 
 func keyHint(key, label string) string {
 	return keycapStyle.Render(key) + " " + hintLabelStyle.Render(label)
+}
+
+func parseColorMode(value string) colorMode {
+	if strings.EqualFold(strings.TrimSpace(value), "light") {
+		return colorModeLight
+	}
+	return colorModeDark
+}
+
+func (mode colorMode) String() string {
+	if mode == colorModeLight {
+		return "light"
+	}
+	return "dark"
+}
+
+func (m *monitorModel) toggleColorMode() {
+	if m.colorMode == colorModeLight {
+		m.colorMode = colorModeDark
+	} else {
+		m.colorMode = colorModeLight
+	}
+	m.status = fmt.Sprintf("%s theme enabled for this SSH session.", strings.ToUpper(m.colorMode.String()))
+}
+
+func viewColors(mode colorMode) (background, foreground color.Color) {
+	if mode == colorModeLight {
+		return lipgloss.Color("#F4F1EA"), lipgloss.Color("#263244")
+	}
+	return lipgloss.Color("#0E1117"), lipgloss.Color("#D7DAE0")
+}
+
+type themeColorSwap struct{ dark, light string }
+
+var lightThemeColorSwaps = []themeColorSwap{
+	{"#10131A", "#F8FAFC"},
+	{"#0E1117", "#F4F1EA"},
+	{"#9EE493", "#1F6F50"},
+	{"#F5F7FF", "#172033"},
+	{"#B9A4FF", "#5A3FA3"},
+	{"#7EE2B8", "#166B4B"},
+	{"#C4A7E7", "#704E91"},
+	{"#F6C177", "#945E13"},
+	{"#70D6FF", "#0B668A"},
+	{"#9FC3FF", "#315D91"},
+	{"#FF8A80", "#B42318"},
+	{"#9CA3BC", "#5B6475"},
+	{"#FFD180", "#8A5A00"},
+	{"#CDB4FF", "#664A96"},
+	{"#C9CEDA", "#384252"},
+	{"#B8C0D9", "#334155"},
+	{"#24283B", "#E4E9F0"},
+	{"#FFB86C", "#A94B00"},
+	{"#FF7B72", "#B42318"},
+	{"#8C91A8", "#667085"},
+	{"#FF5370", "#A80F2D"},
+	{"#D7DAE0", "#2E3642"},
+	{"#FFD166", "#8A5A00"},
+	{"#FF9F43", "#B54708"},
+	{"#30374A", "#D9E0EA"},
+	{"#FFF4F2", "#8F1D18"},
+	{"#5A3037", "#F4D8D5"},
+	{"#40516B", "#7A889C"},
+	{"#315F57", "#5E877D"},
+	{"#514A78", "#756D99"},
+	{"#6B5438", "#92795C"},
+	{"#315B72", "#66869A"},
+	{"#53517A", "#74739C"},
+	{"#465572", "#697D9B"},
+	{"#5B6B8A", "#7183A0"},
+}
+
+// Rendering always uses the immutable dark palette. Light mode rewrites only
+// known ANSI RGB sequences in the completed view, keeping theme selection
+// session-local without mutating shared styles across concurrent SSH sessions.
+func applyLightTheme(rendered string) string {
+	for _, swap := range lightThemeColorSwaps {
+		dark := ansiRGB(swap.dark)
+		light := ansiRGB(swap.light)
+		rendered = strings.ReplaceAll(rendered, "38;2;"+dark, "38;2;"+light)
+		rendered = strings.ReplaceAll(rendered, "48;2;"+dark, "48;2;"+light)
+	}
+	return rendered
+}
+
+func ansiRGB(hex string) string {
+	hex = strings.TrimPrefix(hex, "#")
+	if len(hex) != 6 {
+		return ""
+	}
+	red, _ := strconv.ParseUint(hex[0:2], 16, 8)
+	green, _ := strconv.ParseUint(hex[2:4], 16, 8)
+	blue, _ := strconv.ParseUint(hex[4:6], 16, 8)
+	return fmt.Sprintf("%d;%d;%d", red, green, blue)
 }
 
 func usableWidth(width int) int {
