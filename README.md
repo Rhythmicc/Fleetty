@@ -1,57 +1,44 @@
 # GPU SSH Monitor
 
-一个纯 Go 实现的 GPU 服务器 SSH 监控界面。每个 SSH 连接直接运行独立的 Bubble Tea TUI，不依赖 Node.js、xterm、nvitop 或 btop，也不会向连接用户开放 shell。
+GPU SSH Monitor 是一个面向 GPU 服务器的 SSH 监控界面。连接专用 SSH 端口后会直接进入终端仪表盘，不会获得服务器 shell。
 
-## 功能
+它以单一可执行文件运行，适合为运维人员或服务器使用者提供统一、受控的主机状态入口。
 
-- 每秒刷新 CPU、1/5/15 分钟负载、内存和根磁盘使用情况；
-- 显示网络实时收发速率、累计流量和最近 60 秒趋势；
-- 显示 NVIDIA GPU 利用率、显存、核心频率、温度、实时功率与功率上限；
-- 按 CPU 排序显示进程，并以颜色区分运行、睡眠、等待、停止、僵尸和空闲状态；
-- 根据终端宽高自动调整列数、GPU 信息和进程行数；
-- 每个 SSH 会话可独立切换深色或浅色主题；
-- 密码保护的管理模式支持进程过滤、详情查看、`SIGTERM`、重启服务和重启主机；
-- 鼠标和键盘均可操作。
+## 功能概览
 
-普通视图只读取系统状态，不接受任意命令。PID 1 和监控程序自身受到保护，不能从界面终止。
+- CPU 使用率及 1/5/15 分钟负载；
+- 内存与根磁盘容量、使用率；
+- 网络实时收发速率、累计流量和最近 60 秒趋势；
+- NVIDIA GPU 利用率、显存、核心频率、温度和功率；
+- 按 CPU 排序的进程列表及状态颜色；
+- 随终端尺寸自动调整的响应式布局；
+- 每个 SSH 会话独立的深色、浅色主题；
+- 鼠标和键盘操作；
+- 密码保护的管理模式。
 
-## 使用
+管理模式可以查看进程详情、过滤进程、发送 `SIGTERM`、重启监控服务或重启主机。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
 
-```bash
-ssh -p 23234 monitor@example-host
-```
+## 系统要求
 
-常用按键：
+- 使用 systemd 的 Linux；
+- `amd64` 或 `arm64` 架构；
+- root 权限，用于安装和运行服务；
+- NVIDIA GPU 指标需要系统已安装驱动并能执行 `nvidia-smi`。
 
-| 按键 | 功能 |
-| --- | --- |
-| `m` | 进入管理模式 |
-| `t` | 为当前 SSH 会话切换深色/浅色主题 |
-| `r` | 立即刷新 |
-| `q` | 退出 |
-| `/` | 在管理模式中过滤进程 |
-| `↑` / `↓` | 选择进程 |
-| `Enter` | 查看选中进程详情 |
-| `Esc` | 返回上一层 |
+没有 NVIDIA GPU 或 `nvidia-smi` 时，GPU 区域会显示不可用，CPU、内存、磁盘、网络和进程监控仍可正常使用。
 
-鼠标操作依赖 SSH 客户端对终端鼠标协议的支持，键盘操作始终可用。
+## 安装
 
-## 从 GitHub Release 部署
-
-支持 Linux `amd64` 和 `arm64`。服务器需要 systemd；GPU 指标还需要 NVIDIA 驱动提供的 `nvidia-smi`。没有 NVIDIA GPU 时，其余监控功能仍可使用。
-
-以下命令中的版本号需要替换为实际 [Release](https://github.com/Rhythmicc/gpu-ssh-monitor/releases)：
+从 [GitHub Releases](https://github.com/Rhythmicc/gpu-ssh-monitor/releases) 下载当前架构的最新版本：
 
 ```bash
-monitor_version=v0.1.0
-
 case "$(uname -m)" in
   x86_64) monitor_arch=amd64 ;;
   aarch64|arm64) monitor_arch=arm64 ;;
   *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-monitor_release_base="https://github.com/Rhythmicc/gpu-ssh-monitor/releases/download/${monitor_version}"
+monitor_release_base="https://github.com/Rhythmicc/gpu-ssh-monitor/releases/latest/download"
 
 curl -fL \
   -o "/tmp/gpu-ssh-monitor_linux_${monitor_arch}" \
@@ -70,7 +57,7 @@ curl -fL \
 )
 ```
 
-安装二进制和 systemd 服务：
+安装程序和 systemd 服务：
 
 ```bash
 sudo install -d -o root -g root -m 0755 /opt/gpu-ssh-monitor
@@ -87,11 +74,51 @@ sudo systemctl enable --now gpu-ssh-monitor.service
 sudo systemctl status gpu-ssh-monitor.service
 ```
 
-首次启动时会在 `/etc/gpu-ssh-monitor/ssh_host_ed25519` 创建 SSH host key。默认监听 `0.0.0.0:23234`，请按实际网络策略开放或限制该端口。
+服务默认监听 `0.0.0.0:23234`。首次启动时会自动创建 `/etc/gpu-ssh-monitor/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
 
-### 启用管理模式
+如果服务器启用了防火墙，请只向需要访问监控的网络开放 TCP 23234 端口。
 
-未配置密码时，管理模式保持禁用。推荐用 bcrypt 哈希而不是明文密码。Debian/Ubuntu 可以使用 `apache2-utils` 中的 `htpasswd` 生成：
+## 连接与操作
+
+监控端口不会登录系统账户，SSH 用户名只用于标记会话来源；连接后不会获得 shell：
+
+```bash
+ssh -p 23234 monitor@example-host
+```
+
+### 监控页面
+
+| 按键 | 功能 |
+| --- | --- |
+| `m` | 进入管理模式 |
+| `t` | 切换当前会话的深色、浅色主题 |
+| `r` | 立即刷新 |
+| `q` | 退出 |
+
+主题只影响当前 SSH 会话，不会改变其他已连接用户的界面。
+
+只读监控页面不要求管理密码。请使用防火墙或安全组限制 23234 端口的访问范围；管理密码只保护管理模式中的操作。
+
+### 管理模式
+
+| 按键 | 功能 |
+| --- | --- |
+| `/` | 输入进程名、用户或 PID 进行过滤 |
+| `↑` / `↓` | 选择进程 |
+| `Enter` | 查看进程详情 |
+| `t` | 在进程详情页请求终止进程 |
+| `c` | 清除进程过滤条件 |
+| `1` | 重启监控服务 |
+| `2` | 重启主机 |
+| `Esc` | 返回上一层 |
+
+支持鼠标的终端也可以直接点击进程和按钮。若 SSH 客户端不支持终端鼠标协议，请使用键盘操作。
+
+## 启用管理模式
+
+管理模式默认关闭，配置管理密码后才会显示密码入口。推荐使用 bcrypt 哈希，不要保存明文密码。
+
+Debian 或 Ubuntu 可以使用 `apache2-utils` 生成密码哈希；Fedora、RHEL 等系统可安装提供 `htpasswd` 的 `httpd-tools`：
 
 ```bash
 sudo apt-get install apache2-utils
@@ -112,11 +139,32 @@ sudo chmod 0600 /etc/gpu-ssh-monitor/admin.env
 sudo systemctl restart gpu-ssh-monitor.service
 ```
 
-监控服务以 root 运行，才能查看全部进程并执行受控的管理操作。建议限制端口来源、妥善保管管理密码，并保留危险操作的确认步骤。
+监控服务以 root 运行，才能显示全部进程并执行受控管理操作。建议限制监听端口的来源范围，并妥善保管管理密码。
 
-### 升级
+## 配置
 
-下载并校验新版本后替换二进制，再重启服务：
+默认 systemd 配置位于 `/etc/systemd/system/gpu-ssh-monitor.service`，管理配置位于 `/etc/gpu-ssh-monitor/admin.env`。
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SSH_HOST` | `0.0.0.0` | 监听地址 |
+| `SSH_PORT` | `23234` | 监听端口 |
+| `SSH_HOST_KEY_PATH` | `/etc/gpu-ssh-monitor/ssh_host_ed25519` | SSH host key |
+| `DEFAULT_THEME` | `dark` | 新连接的默认主题，可设为 `light` |
+| `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希；为空时禁用管理模式 |
+| `ADMIN_RESTART_MONITOR_CMD` | `systemctl restart gpu-ssh-monitor.service` | 重启监控服务命令 |
+| `ADMIN_REBOOT_CMD` | `systemctl reboot` | 重启主机命令 |
+
+修改 systemd 配置后执行：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart gpu-ssh-monitor.service
+```
+
+## 升级
+
+重新执行安装章节中的下载和校验步骤，然后替换二进制：
 
 ```bash
 sudo install -o root -g root -m 0755 \
@@ -125,40 +173,30 @@ sudo install -o root -g root -m 0755 \
 sudo systemctl restart gpu-ssh-monitor.service
 ```
 
-配置和 SSH host key 都位于 `/etc/gpu-ssh-monitor`，升级二进制不会覆盖它们。
+升级不会覆盖 `/etc/gpu-ssh-monitor` 中的管理配置和 SSH host key。
 
-## 配置
+## 故障排查
 
-systemd 模板位于 [`deploy/gpu-ssh-monitor.service`](deploy/gpu-ssh-monitor.service)。可通过服务环境变量或 `/etc/gpu-ssh-monitor/admin.env` 调整：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `SSH_HOST` | `0.0.0.0` | SSH 监听地址 |
-| `SSH_PORT` | `23234` | SSH 监听端口 |
-| `SSH_HOST_KEY_PATH` | `.ssh/gpu-ssh-monitor_ed25519` | SSH host key 路径；systemd 模板使用 `/etc/gpu-ssh-monitor/ssh_host_ed25519` |
-| `DEFAULT_THEME` | `dark` | 新 SSH 会话的默认主题，可设为 `light` |
-| `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希 |
-| `ADMIN_PASSWORD` | 空 | 兼容用明文密码，不推荐 |
-| `ADMIN_RESTART_MONITOR_CMD` | `systemctl restart gpu-ssh-monitor.service` | 重启监控服务命令 |
-| `ADMIN_REBOOT_CMD` | `systemctl reboot` | 重启主机命令 |
-
-## 从源码构建
-
-需要 Go 1.25 或更高版本：
+查看服务状态和最近日志：
 
 ```bash
-go test ./...
-go vet ./...
-CGO_ENABLED=0 go build -trimpath -o gpu-ssh-monitor ./cmd/wish-monitor
+sudo systemctl status gpu-ssh-monitor.service
+sudo journalctl -u gpu-ssh-monitor.service -n 100 --no-pager
 ```
 
-## 发布 Release
+- 无法连接：检查服务状态、TCP 23234 端口和防火墙规则；
+- GPU 区域不可用：确认 `nvidia-smi` 能以 root 身份正常执行；
+- 管理模式不可用：检查 `/etc/gpu-ssh-monitor/admin.env` 的权限和 `ADMIN_PASSWORD_HASH`；
+- 鼠标无法点击：改用键盘，或检查终端及 SSH 客户端的鼠标协议支持；
+- 界面字符错位：使用支持 Unicode 和等宽字符的终端字体。
 
-推送 `v*` 标签会触发 [Release workflow](.github/workflows/release.yml)。工作流会运行测试和静态检查，构建 Linux `amd64`、`arm64` 二进制，生成 SHA-256 校验文件，并通过 GitHub CLI 创建带自动发布说明的 Release。
+## 卸载
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+sudo systemctl disable --now gpu-ssh-monitor.service
+sudo rm /etc/systemd/system/gpu-ssh-monitor.service
+sudo systemctl daemon-reload
+sudo rm -r /opt/gpu-ssh-monitor
 ```
 
-工作流使用仓库自动提供的 `GITHUB_TOKEN`，不需要额外配置发布密钥。
+如需同时删除管理配置和 SSH host key，再删除 `/etc/gpu-ssh-monitor`。
