@@ -180,6 +180,38 @@ func TestGPUClockAndPowerParsing(t *testing.T) {
 	}
 }
 
+func TestGPULoadStatusAndWideLayout(t *testing.T) {
+	cases := []struct {
+		utilization float64
+		status      string
+	}{
+		{0, "IDLE"},
+		{20, "LIGHT"},
+		{50, "ACTIVE"},
+		{75, "BUSY"},
+		{90, "HIGH"},
+		{99, "MAX"},
+	}
+	for _, tc := range cases {
+		status, _ := gpuLoadStatus(tc.utilization)
+		if status != tc.status {
+			t.Fatalf("utilization %.0f status = %q, want %q", tc.utilization, status, tc.status)
+		}
+	}
+	if bar(20, 10) == bar(90, 10) {
+		t.Fatal("low and high utilization bars should use different colors")
+	}
+
+	model := &monitorModel{snapshot: monitorSnapshot{GPUs: []gpuInfo{
+		{Index: 0, Name: "NVIDIA A100", MemoryTotal: 40 * 1024 * 1024 * 1024},
+		{Index: 1, Name: "NVIDIA TITAN RTX", MemoryTotal: 24 * 1024 * 1024 * 1024},
+	}}}
+	layout := newDashboardLayout(161, 50, 2, false)
+	if height := lipgloss.Height(model.gpuPanel(layout)); height != 7 {
+		t.Fatalf("wide GPU panel height = %d, want two lines per GPU", height)
+	}
+}
+
 func TestGPUMemoryColumnsAreAligned(t *testing.T) {
 	gpus := []gpuInfo{
 		{MemoryUsed: 425 * 1024 * 1024, MemoryTotal: 40 * 1024 * 1024 * 1024},

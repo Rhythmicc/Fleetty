@@ -621,27 +621,34 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 	}
 	lines := []string{sectionStyle.Render("GPU")}
 	memoryUsedWidth, memoryTotalWidth := gpuMemoryWidths(m.snapshot.GPUs)
+	nameWidth := gpuNameWidth(m.snapshot.GPUs, w)
 	for _, gpu := range m.snapshot.GPUs {
 		memory := gpuMemoryText(gpu, memoryUsedWidth, memoryTotalWidth)
+		status, statusStyle := gpuLoadStatus(gpu.Utilization)
+		summary := fmt.Sprintf("%s  %-*s  %s",
+			accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
+			nameWidth, truncate(gpu.Name, nameWidth),
+			statusStyle.Render(fmt.Sprintf("%-6s", status)),
+		)
 		if layout.compactGPU {
 			lines = append(lines,
-				accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index))+"  "+truncate(gpu.Name, w-12),
+				summary,
 				bar(gpu.Utilization, max(8, w-lipgloss.Width(memory)-12))+fmt.Sprintf(" %3.0f%%  %s", gpu.Utilization, memory),
 				dimStyle.Render(gpuTelemetry(gpu, false)),
 			)
 			continue
 		}
-		nameWidth := min(28, max(14, w/5))
 		showPowerLimit := w >= 128
 		telemetry := gpuTelemetry(gpu, showPowerLimit)
-		barWidth := min(42, max(10, w-nameWidth-lipgloss.Width(memory)-lipgloss.Width(telemetry)-22))
-		lines = append(lines, fmt.Sprintf("%s  %-*s  %s %3.0f%%  %s  %s",
-			accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
-			nameWidth, truncate(gpu.Name, nameWidth),
-			bar(gpu.Utilization, barWidth), gpu.Utilization,
-			memory,
-			dimStyle.Render(telemetry),
-		))
+		barWidth := min(42, max(10, w-lipgloss.Width(memory)-lipgloss.Width(telemetry)-22))
+		lines = append(lines,
+			summary,
+			fmt.Sprintf("       %s %3.0f%%  %s  %s",
+				bar(gpu.Utilization, barWidth), gpu.Utilization,
+				memory,
+				dimStyle.Render(telemetry),
+			),
+		)
 	}
 	if len(m.snapshot.GPUs) == 0 {
 		lines = append(lines, dimStyle.Render("No NVIDIA GPU was reported."))
@@ -666,6 +673,31 @@ func gpuMemoryWidths(gpus []gpuInfo) (usedWidth, totalWidth int) {
 
 func gpuMemoryText(gpu gpuInfo, usedWidth, totalWidth int) string {
 	return fmt.Sprintf("MEM %*s/%*s", usedWidth, bytes(gpu.MemoryUsed), totalWidth, bytes(gpu.MemoryTotal))
+}
+
+func gpuNameWidth(gpus []gpuInfo, width int) int {
+	nameWidth := 8
+	for _, gpu := range gpus {
+		nameWidth = max(nameWidth, lipgloss.Width(gpu.Name))
+	}
+	return min(nameWidth, max(8, width-22))
+}
+
+func gpuLoadStatus(utilization float64) (string, lipgloss.Style) {
+	switch {
+	case utilization < 5:
+		return "IDLE", gpuIdleStyle
+	case utilization < 35:
+		return "LIGHT", gpuLightStyle
+	case utilization < 65:
+		return "ACTIVE", gpuActiveStyle
+	case utilization < 85:
+		return "BUSY", gpuBusyStyle
+	case utilization < 95:
+		return "HIGH", gpuHighStyle
+	default:
+		return "MAX", gpuMaxStyle
+	}
 }
 
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
@@ -871,7 +903,7 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 	} else if compactGPU {
 		gpuContentLines += gpuCount * 3
 	} else {
-		gpuContentLines += gpuCount
+		gpuContentLines += gpuCount * 2
 	}
 	gpuLines := gpuContentLines + 2 // rounded border
 	// Header, metric cards, GPU panel, process panel headings/border, and footer.
@@ -1414,6 +1446,12 @@ var (
 	processIdleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#8C91A8"))
 	processDeadStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5370")).Bold(true)
 	processDefaultStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#D7DAE0"))
+	gpuIdleStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#8C91A8"))
+	gpuLightStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
+	gpuActiveStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
+	gpuBusyStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD166")).Bold(true)
+	gpuHighStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF9F43")).Bold(true)
+	gpuMaxStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5370")).Bold(true)
 	compactButtonStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#30374A")).Padding(0, 1)
 	compactDangerButtonStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFF4F2")).Background(lipgloss.Color("#5A3037")).Padding(0, 1)
 )
@@ -1501,7 +1539,8 @@ func bar(value float64, width int) string {
 	if filled > width {
 		filled = width
 	}
-	return accentStyle.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
+	_, loadStyle := gpuLoadStatus(value)
+	return loadStyle.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
 }
 func compactCommandError(err error) string {
 	if errors.Is(err, exec.ErrNotFound) {
