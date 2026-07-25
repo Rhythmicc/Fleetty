@@ -297,8 +297,9 @@ func (m *monitorModel) View() tea.View {
 }
 
 func (m *monitorModel) monitorView() string {
-	w := usableWidth(m.width)
-	header := titleStyle.Render("GPU SSH MONITOR") + dimStyle.Render("  ·  LIVE READ-ONLY VIEW")
+	layout := newDashboardLayout(m.width, m.height, len(m.snapshot.GPUs), m.snapshot.GPUError != "")
+	w := layout.width
+	header := dashboardHeader(w)
 	if m.snapshot.CollectedAt.IsZero() {
 		return strings.Join([]string{header, "", panelStyle(w).Render("Collecting system metrics…")}, "\n")
 	}
@@ -309,26 +310,45 @@ func (m *monitorModel) monitorView() string {
 		{"DISK /", fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal)), fmt.Sprintf("%.1f%% used", percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal))},
 		{"NETWORK", fmt.Sprintf("↓ %s/s", bytes(m.snapshot.NetworkRX)), fmt.Sprintf("↑ %s/s", bytes(m.snapshot.NetworkTX))},
 	}
-	metricRows := renderMetricRows(metrics, w)
-	gpu := m.gpuPanel(w)
-	processes := m.processPanel(w)
+	metricRows := renderMetricRows(metrics, layout)
+	gpu := m.gpuPanel(layout)
+	processes := m.processPanel(layout)
 	footer := helpStyle.Render("[m] management  [r] refresh  [q] quit") + "  " + dimStyle.Render(m.status)
 	if m.loadErr != nil {
 		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
 	}
-	return strings.Join([]string{header, dimStyle.Render("Go-native SSH TUI · no shell, no Node, no xterm"), metricRows, gpu, processes, footer}, "\n")
+	return strings.Join([]string{header, metricRows, gpu, processes, footer}, "\n")
 }
 
-func (m *monitorModel) gpuPanel(w int) string {
+func dashboardHeader(width int) string {
+	title := titleStyle.Render("GPU SSH MONITOR")
+	meta := dimStyle.Render("LIVE  ·  READ-ONLY  ·  2s REFRESH")
+	if width < 68 {
+		return title + "\n" + meta
+	}
+	return title + dimStyle.Render("  /  ") + meta
+}
+
+func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
+	w := layout.width
 	if m.snapshot.GPUError != "" {
 		return panelStyle(w).Render(sectionStyle.Render("GPU") + "\n" + dimStyle.Render("nvidia-smi unavailable: "+m.snapshot.GPUError))
 	}
 	lines := []string{sectionStyle.Render("GPU")}
 	for _, gpu := range m.snapshot.GPUs {
-		lines = append(lines, fmt.Sprintf("%s  %s  %s  %s  %s",
+		if layout.compactGPU {
+			lines = append(lines,
+				accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index))+"  "+truncate(gpu.Name, w-12),
+				bar(gpu.Utilization, max(8, w-43))+fmt.Sprintf(" %3.0f%%  MEM %s/%s", gpu.Utilization, bytes(gpu.MemoryUsed), bytes(gpu.MemoryTotal)),
+			)
+			continue
+		}
+		nameWidth := min(28, max(14, w/5))
+		barWidth := min(42, max(10, w-nameWidth-66))
+		lines = append(lines, fmt.Sprintf("%s  %-*s  %s %3.0f%%  %s  %s",
 			accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
-			truncate(gpu.Name, 24),
-			bar(gpu.Utilization, 16)+fmt.Sprintf(" %3.0f%%", gpu.Utilization),
+			nameWidth, truncate(gpu.Name, nameWidth),
+			bar(gpu.Utilization, barWidth), gpu.Utilization,
 			fmt.Sprintf("MEM %s/%s", bytes(gpu.MemoryUsed), bytes(gpu.MemoryTotal)),
 			dimStyle.Render(fmt.Sprintf("%d°C · %.0fW", gpu.Temperature, gpu.Power)),
 		))
@@ -339,21 +359,15 @@ func (m *monitorModel) gpuPanel(w int) string {
 	return panelStyle(w).Render(strings.Join(lines, "\n"))
 }
 
-func (m *monitorModel) processPanel(w int) string {
-	lines := []string{sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU"), processHeaderStyle.Render("PID       USER          CPU     MEM     RSS       ELAPSED   COMMAND")}
-	maxRows := m.height - 17 - len(m.snapshot.GPUs)
-	if maxRows < 3 {
-		maxRows = 3
-	}
-	if maxRows > 12 {
-		maxRows = 12
-	}
+func (m *monitorModel) processPanel(layout dashboardLayout) string {
+	w := layout.width
+	format := newProcessFormat(w)
+	lines := []string{sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU"), processHeaderStyle.Render(format.header())}
 	for i, p := range m.snapshot.Processes {
-		if i >= maxRows {
+		if i >= layout.processRows {
 			break
 		}
-		commandWidth := max(12, w-65)
-		lines = append(lines, fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, commandWidth)))
+		lines = append(lines, format.row(p))
 	}
 	if len(m.snapshot.Processes) == 0 {
 		lines = append(lines, dimStyle.Render("No process data available."))
@@ -420,15 +434,108 @@ func (m *monitorModel) confirmView() string {
 
 type metricCard struct{ title, value, detail string }
 
-func renderMetricRows(cards []metricCard, width int) string {
-	cardWidth := max(18, (width-3)/2)
-	render := func(c metricCard) string {
-		return metricStyle(cardWidth).Render(sectionStyle.Render(c.title) + "\n" + valueStyle.Render(truncate(c.value, cardWidth-4)) + "\n" + dimStyle.Render(truncate(c.detail, cardWidth-4)))
+type dashboardLayout struct {
+	width       int
+	height      int
+	metricCols  int
+	processRows int
+	compactGPU  bool
+}
+
+func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashboardLayout {
+	if width <= 0 {
+		width = 80
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.JoinHorizontal(lipgloss.Top, render(cards[0]), " ", render(cards[1])),
-		lipgloss.JoinHorizontal(lipgloss.Top, render(cards[2]), " ", render(cards[3])),
-	)
+	if height <= 0 {
+		height = 24
+	}
+	cols := 1
+	switch {
+	case width >= 132:
+		cols = 4
+	case width >= 76:
+		cols = 2
+	}
+	compactGPU := width < 96
+	metricLines := ((4 + cols - 1) / cols) * 4 // two content lines plus border
+	gpuContentLines := 1
+	if gpuUnavailable {
+		gpuContentLines = 2
+	} else if compactGPU {
+		gpuContentLines += gpuCount * 2
+	} else {
+		gpuContentLines += gpuCount
+	}
+	gpuLines := gpuContentLines + 2 // rounded border
+	// Header, metric cards, GPU panel, process panel headings/border, and footer.
+	headerLines := 1
+	if width < 68 {
+		headerLines = 2
+	}
+	reserved := headerLines + metricLines + gpuLines + 4 + 1
+	processRows := max(2, height-reserved)
+	return dashboardLayout{width: width, height: height, metricCols: cols, processRows: processRows, compactGPU: compactGPU}
+}
+
+func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
+	cardWidth := max(16, (layout.width-(layout.metricCols-1))/layout.metricCols)
+	render := func(c metricCard) string {
+		line := valueStyle.Render(truncate(c.value, cardWidth-4)) + "  " + dimStyle.Render(truncate(c.detail, max(6, cardWidth-lipgloss.Width(c.value)-7)))
+		return metricStyle(cardWidth).Render(sectionStyle.Render(c.title) + "\n" + line)
+	}
+	rows := make([]string, 0, (len(cards)+layout.metricCols-1)/layout.metricCols)
+	for start := 0; start < len(cards); start += layout.metricCols {
+		end := min(start+layout.metricCols, len(cards))
+		items := make([]string, 0, end-start)
+		for _, card := range cards[start:end] {
+			items = append(items, render(card))
+		}
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, strings.Join(items, " ")))
+	}
+	return strings.Join(rows, "\n")
+}
+
+type processFormat struct {
+	mode         int
+	commandWidth int
+}
+
+const (
+	processFull = iota
+	processMedium
+	processCompact
+)
+
+func newProcessFormat(width int) processFormat {
+	if width >= 112 {
+		return processFormat{mode: processFull, commandWidth: max(16, width-66)}
+	}
+	if width >= 78 {
+		return processFormat{mode: processMedium, commandWidth: max(14, width-46)}
+	}
+	return processFormat{mode: processCompact, commandWidth: max(10, width-29)}
+}
+
+func (f processFormat) header() string {
+	switch f.mode {
+	case processFull:
+		return "PID       USER          CPU     MEM     RSS       ELAPSED   COMMAND"
+	case processMedium:
+		return "PID       USER          CPU     MEM     RSS       COMMAND"
+	default:
+		return "PID       CPU     MEM     COMMAND"
+	}
+}
+
+func (f processFormat) row(p processInfo) string {
+	switch f.mode {
+	case processFull:
+		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, f.commandWidth))
+	case processMedium:
+		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), truncate(p.Command, f.commandWidth))
+	default:
+		return fmt.Sprintf("%-9d %5.1f%%  %5.1f%%  %s", p.PID, p.CPU, p.Memory, truncate(p.Command, f.commandWidth))
+	}
 }
 
 func actionCard(width int, key, title, detail string, dangerous bool) string {
@@ -737,10 +844,10 @@ func clickableStyle(width int) lipgloss.Style {
 }
 
 func usableWidth(width int) int {
-	if width < 48 {
-		return 48
+	if width <= 0 {
+		return 80
 	}
-	return min(width, 140)
+	return max(36, width)
 }
 func max(a, b int) int {
 	if a > b {

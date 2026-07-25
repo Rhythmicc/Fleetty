@@ -69,6 +69,32 @@ func TestFormattingHelpers(t *testing.T) {
 	}
 }
 
+func TestDashboardLayoutUsesTerminalSize(t *testing.T) {
+	wide := newDashboardLayout(161, 50, 2, false)
+	if wide.width != 161 || wide.metricCols != 4 {
+		t.Fatalf("wide layout = %#v, want full width and four metric columns", wide)
+	}
+	if wide.processRows < 25 {
+		t.Fatalf("wide terminal should use its height for process rows, got %d", wide.processRows)
+	}
+	narrow := newDashboardLayout(70, 24, 1, false)
+	if narrow.metricCols != 1 || !narrow.compactGPU {
+		t.Fatalf("narrow layout = %#v, want one metric column and compact GPU", narrow)
+	}
+}
+
+func TestProcessFormatRespondsToWidth(t *testing.T) {
+	if got := newProcessFormat(140).mode; got != processFull {
+		t.Fatalf("wide mode = %d, want full", got)
+	}
+	if got := newProcessFormat(90).mode; got != processMedium {
+		t.Fatalf("medium mode = %d, want medium", got)
+	}
+	if got := newProcessFormat(60).mode; got != processCompact {
+		t.Fatalf("compact mode = %d, want compact", got)
+	}
+}
+
 func testKey(s string) tea.KeyMsg { return tea.KeyPressMsg{Code: keyCode(s), Text: keyText(s)} }
 
 func keyCode(s string) rune {
