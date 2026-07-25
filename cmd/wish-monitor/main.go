@@ -253,6 +253,10 @@ func dashboardMiddleware(dashboard *dashboardDaemon, admin *adminController) wis
 			inputs := make(chan byte, 64)
 			go watchSessionInput(session, inputs)
 			adminSession := newAdminSession(admin, session, output, conn)
+			_, windowChanges, hasPTY := session.Pty()
+			if !hasPTY {
+				windowChanges = nil
+			}
 
 			signals := make(chan ssh.Signal, 8)
 			session.Signals(signals)
@@ -289,6 +293,12 @@ func dashboardMiddleware(dashboard *dashboardDaemon, admin *adminController) wis
 						_ = session.Exit(1)
 					}
 					return
+				case window, ok := <-windowChanges:
+					if !ok {
+						windowChanges = nil
+						continue
+					}
+					adminSession.Resize(window.Width)
 				}
 			}
 		}
@@ -449,11 +459,25 @@ type adminSession struct {
 }
 
 func newAdminSession(controller *adminController, session ssh.Session, output *pausableWriter, conn net.Conn) *adminSession {
+	width := 130
+	if pty, _, ok := session.Pty(); ok && pty.Window.Width > 0 {
+		width = pty.Window.Width
+	}
 	return &adminSession{
-		model:   &adminModel{controller: controller},
+		model:   &adminModel{controller: controller, width: width},
 		session: session,
 		output:  output,
 		conn:    conn,
+	}
+}
+
+func (a *adminSession) Resize(width int) {
+	if width <= 0 {
+		return
+	}
+	a.model.width = width
+	if a.model.mode != adminModeMonitor {
+		a.draw()
 	}
 }
 
@@ -571,6 +595,7 @@ type adminModel struct {
 	processStartTime uint64
 	processOutput    string
 	processTask      processTask
+	width            int
 }
 
 var (
@@ -587,6 +612,10 @@ var (
 	adminDangerPanelStyle = lipgloss.NewStyle().
 				Border(lipgloss.NormalBorder()).
 				BorderForeground(lipgloss.Color("#F9E2AF")).
+				Padding(0, 2)
+	adminInfoPanelStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("#CBA6F7")).
 				Padding(0, 2)
 	adminDestructivePanelStyle = lipgloss.NewStyle().
 					Border(lipgloss.NormalBorder()).
@@ -779,14 +808,14 @@ func (m *adminModel) View() tea.View {
 	switch m.mode {
 	case adminModeDisabled:
 		body := adminDangerStyle.Render("Management mode is disabled.") + "\n\n" + adminMutedStyle.Render("Set ADMIN_PASSWORD_HASH (recommended) or ADMIN_PASSWORD.") + "\n\n" + renderKeyHints("any", "return to monitor")
-		return newAdminView(adminScreen("MANAGEMENT MODE", "ACCESS NOT CONFIGURED", body, false, false))
+		return newAdminView(m.adminScreen("MANAGEMENT MODE", "ACCESS NOT CONFIGURED", body, false, false))
 	case adminModePassword:
 		body := adminLabelStyle.Render("Administrator password") + "\n" + adminMutedStyle.Render("The live dashboard is paused until you exit.") + "\n\n"
 		if m.status != "" {
 			body += adminDangerStyle.Render(m.status) + "\n\n"
 		}
 		body += adminValueStyle.Render("Password: ") + adminTitleStyle.Render(strings.Repeat("•", len(m.password))) + "\n\n" + renderKeyHints("esc", "cancel", "ctrl-c", "exit")
-		return newAdminView(adminScreen("MANAGEMENT MODE", "SECURE ACCESS", body, false, false))
+		return newAdminView(m.adminScreen("MANAGEMENT MODE", "SECURE ACCESS", body, false, false))
 	case adminModeMenu:
 		var body strings.Builder
 		body.WriteString(adminMutedStyle.Render("Fixed administrative actions configured on this host."))
@@ -800,44 +829,42 @@ func (m *adminModel) View() tea.View {
 		}
 		body.WriteString("\n")
 		body.WriteString(renderKeyHints("q", "return to monitor"))
-		return newAdminView(adminScreen("MANAGEMENT MODE", "ADMIN CONSOLE", body.String(), false, false))
+		return newAdminView(m.adminScreen("MANAGEMENT MODE", "ADMIN CONSOLE", body.String(), false, false))
 	case adminModeConfirm:
 		body := adminDangerStyle.Render("Confirm administrative action") + "\n\n" + adminValueStyle.Render(m.selected.label) + "\n\n" + renderKeyHints("y", "confirm", "any key", "cancel")
-		return newAdminView(adminScreen("MANAGEMENT MODE", "CONFIRM ACTION", body, false, true))
+		return newAdminView(m.adminScreen("MANAGEMENT MODE", "CONFIRM ACTION", body, false, true))
 	case adminModeProcessList:
 		var body strings.Builder
 		if m.status != "" {
 			body.WriteString(adminDangerStyle.Render(m.status))
 			body.WriteString("\n\n")
 		}
-		body.WriteString(renderProcessTable(m.processOutput))
-		body.WriteString("\n")
-		body.WriteString(renderKeyHints("r", "refresh", "d", "PID details", "t", "terminate PID", "q", "back"))
-		return newAdminView(adminScreen("PROCESS MANAGEMENT", "LIVE PROCESS VIEW", body.String(), true, false))
+		body.WriteString(m.renderProcessWorkspace())
+		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "LIVE PROCESS VIEW", body.String(), true, false))
 	case adminModeProcessDetailPID:
 		body := adminLabelStyle.Render("Inspect a process") + "\n" + adminMutedStyle.Render("Enter a numeric PID to view its current details.") + "\n\n" + adminValueStyle.Render("PID: ") + adminTitleStyle.Render(string(m.processPID))
 		if m.status != "" {
 			body += "\n\n" + adminDangerStyle.Render(m.status)
 		}
 		body += "\n\n" + renderKeyHints("enter", "inspect", "esc", "cancel")
-		return newAdminView(adminScreen("PROCESS MANAGEMENT", "PROCESS DETAILS", body, false, false))
+		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "PROCESS DETAILS", body, false, false))
 	case adminModeProcessDetail:
 		body := renderProcessDetails(m.processOutput)
 		if m.status != "" {
 			body = adminDangerStyle.Render(m.status) + "\n\n" + body
 		}
 		body += "\n\n" + renderKeyHints("any key", "return to process list")
-		return newAdminView(adminScreen("PROCESS MANAGEMENT", "PROCESS DETAILS", body, true, false))
+		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "PROCESS DETAILS", body, true, false))
 	case adminModeProcessTerminatePID:
 		body := adminDangerStyle.Render("Terminate with SIGTERM") + "\n" + adminMutedStyle.Render("The selected process receives a graceful termination request.") + "\n\n" + adminValueStyle.Render("PID: ") + adminTitleStyle.Render(string(m.processPID))
 		if m.status != "" {
 			body += "\n\n" + adminDangerStyle.Render(m.status)
 		}
 		body += "\n\n" + renderKeyHints("enter", "review process", "esc", "cancel")
-		return newAdminView(adminScreen("PROCESS MANAGEMENT", "TERMINATE PROCESS", body, false, true))
+		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "TERMINATE PROCESS", body, false, true))
 	case adminModeProcessTerminateConfirm:
 		body := renderProcessDetails(m.processOutput) + "\n\n" + adminDestructiveStyle.Render(fmt.Sprintf("Send SIGTERM to PID %d?", m.processPIDValue)) + "\n\n" + renderKeyHints("y", "terminate", "any key", "cancel")
-		return newAdminView(adminScreen("PROCESS MANAGEMENT", "CONFIRM TERMINATION", body, true, true))
+		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "CONFIRM TERMINATION", body, true, true))
 	}
 	return tea.NewView("")
 }
@@ -847,19 +874,33 @@ func newAdminView(content string) tea.View {
 	return tea.NewView(strings.ReplaceAll(content, "\n", "\r\n"))
 }
 
-func adminScreen(title, context, body string, wide, destructive bool) string {
-	header := adminTitleStyle.Render("GPU SSH MONITOR") + "  " + adminMutedStyle.Render("/ "+context) + "\n" + adminLabelStyle.Render(title) + "\n" + adminMutedStyle.Render(strings.Repeat("─", 84))
+func (m *adminModel) adminScreen(title, context, body string, wide, destructive bool) string {
+	width := m.panelWidth(wide)
+	header := adminTitleStyle.Render("GPU SSH MONITOR") + "  " + adminMutedStyle.Render("/ "+context) + "\n" + adminLabelStyle.Render(title) + "\n" + adminMutedStyle.Render(strings.Repeat("─", width))
 	style := adminPanelStyle
 	if wide {
-		style = adminWidePanelStyle
+		style = adminWidePanelStyle.Width(width)
 	}
 	if destructive {
 		style = adminDestructivePanelStyle
 		if wide {
-			style = style.Width(118)
+			style = style.Width(width)
 		}
 	}
-	return header + "\n\n" + style.Render(body)
+	if !wide {
+		width = min(width, 82)
+		style = style.Width(width)
+	}
+	content := header + "\n\n" + style.Render(body)
+	return lipgloss.PlaceHorizontal(m.width, lipgloss.Center, content)
+}
+
+func (m *adminModel) panelWidth(wide bool) int {
+	width := m.width - 4
+	if !wide {
+		width = min(width, 78)
+	}
+	return max(width, 64)
 }
 
 func renderKeyHints(values ...string) string {
@@ -871,11 +912,36 @@ func renderKeyHints(values ...string) string {
 }
 
 func renderProcessTable(value string) string {
+	return renderProcessTableLimit(value, 12)
+}
+
+func renderProcessTableLimit(value string, limit int) string {
 	lines := strings.Split(strings.TrimSuffix(value, "\r\n"), "\r\n")
 	if len(lines) == 0 || lines[0] == "" {
 		return adminMutedStyle.Render("No processes returned.")
 	}
+	if len(lines) > limit+1 {
+		lines = lines[:limit+1]
+	}
 	return adminTableHeaderStyle.Render(lines[0]) + "\n" + adminValueStyle.Render(strings.Join(lines[1:], "\n"))
+}
+
+func (m *adminModel) renderProcessWorkspace() string {
+	width := m.panelWidth(true)
+	leftWidth := max(54, width*3/5-5)
+	rightWidth := max(34, width-leftWidth-9)
+	leftBody := adminLabelStyle.Render("PROCESSES  /  TOP CPU") + "\n\n" + renderProcessTable(m.processOutput)
+	rightBody := adminLabelStyle.Render("PROCESS INSPECTION") + "\n\n" +
+		adminMutedStyle.Render("Inspect any live PID on demand.") + "\n\n" +
+		renderKeyHints("d", "enter PID and view details") + "\n\n" +
+		adminLabelStyle.Render("SAFE TERMINATION") + "\n\n" +
+		adminDangerStyle.Render("SIGTERM only") + "\n" +
+		adminMutedStyle.Render("PID 1 and this monitor are protected.\nPID reuse is checked before sending a signal.") + "\n\n" +
+		renderKeyHints("t", "review and terminate a PID")
+	left := adminPanelStyle.Width(leftWidth).Render(leftBody)
+	right := adminInfoPanelStyle.Width(rightWidth).Render(rightBody)
+	footer := "\n\n" + renderKeyHints("r", "refresh", "d", "PID details", "t", "terminate PID", "q", "back")
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right) + footer
 }
 
 func renderProcessDetails(value string) string {
