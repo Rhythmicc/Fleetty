@@ -471,7 +471,7 @@ func (m *monitorModel) clampProcessCursor() {
 }
 
 func (m *monitorModel) adminVisibleProcessRows() int {
-	return max(3, m.height-9)
+	return max(3, m.height-10)
 }
 
 func (m *monitorModel) visibleAdminProcessCount() int {
@@ -703,7 +703,11 @@ func gpuLoadStatus(utilization float64) (string, lipgloss.Style) {
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	w := layout.width
 	format := newProcessFormat(w)
-	lines := []string{sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU · colored by STAT"), processHeaderStyle.Render(format.header())}
+	lines := []string{
+		sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU"),
+		processLegend(w),
+		processHeaderStyle.Render(format.header()),
+	}
 	for i, p := range m.snapshot.Processes {
 		if i >= layout.processRows {
 			break
@@ -744,7 +748,8 @@ func (m *monitorModel) adminView() string {
 	}
 	format := newProcessFormat(w)
 	table := []string{
-		sectionStyle.Render("PROCESS MANAGER") + "  " + dimStyle.Render(fmt.Sprintf("%d / %d processes · rows %d-%d · colored by STAT", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end)),
+		sectionStyle.Render("PROCESS MANAGER") + "  " + dimStyle.Render(fmt.Sprintf("%d / %d processes · rows %d-%d", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end)),
+		processLegend(w),
 		processHeaderStyle.Render(format.header()),
 	}
 	for i := m.processOffset; i < end; i++ {
@@ -871,7 +876,7 @@ func (m *monitorModel) processTerminateConfirmView() string {
 
 type metricCard struct{ title, value, detail string }
 
-const adminProcessRowStart = 7
+const adminProcessRowStart = 8
 
 type dashboardLayout struct {
 	width       int
@@ -911,7 +916,7 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 	if width < 68 {
 		headerLines = 2
 	}
-	reserved := headerLines + metricLines + gpuLines + 4 + 1
+	reserved := headerLines + metricLines + gpuLines + 5 + 1
 	processRows := max(2, height-reserved)
 	return dashboardLayout{width: width, height: height, metricCols: cols, processRows: processRows, compactGPU: compactGPU}
 }
@@ -953,34 +958,61 @@ const (
 
 func newProcessFormat(width int) processFormat {
 	if width >= 112 {
-		return processFormat{mode: processFull, commandWidth: max(16, width-72)}
+		return processFormat{mode: processFull, commandWidth: max(16, width-66)}
 	}
 	if width >= 78 {
-		return processFormat{mode: processMedium, commandWidth: max(14, width-52)}
+		return processFormat{mode: processMedium, commandWidth: max(14, width-56)}
 	}
-	return processFormat{mode: processCompact, commandWidth: max(10, width-35)}
+	return processFormat{mode: processCompact, commandWidth: max(10, width-32)}
 }
 
 func (f processFormat) header() string {
 	switch f.mode {
 	case processFull:
-		return fmt.Sprintf("%-9s %-13s %-5s %6s  %6s  %-8s  %-8s  %s", "PID", "USER", "STAT", "CPU", "MEM", "RSS", "ELAPSED", "COMMAND")
+		return fmt.Sprintf("%-9s %-13s %6s  %6s  %-8s  %-8s  %s", "PID", "USER", "CPU", "MEM", "RSS", "ELAPSED", "COMMAND")
 	case processMedium:
-		return fmt.Sprintf("%-9s %-13s %-5s %6s  %6s  %-8s  %s", "PID", "USER", "STAT", "CPU", "MEM", "RSS", "COMMAND")
+		return fmt.Sprintf("%-9s %-13s %6s  %6s  %-8s  %s", "PID", "USER", "CPU", "MEM", "RSS", "COMMAND")
 	default:
-		return fmt.Sprintf("%-9s %-5s %6s  %6s  %s", "PID", "STAT", "CPU", "MEM", "COMMAND")
+		return fmt.Sprintf("%-9s %6s  %6s  %s", "PID", "CPU", "MEM", "COMMAND")
 	}
 }
 
 func (f processFormat) row(p processInfo) string {
 	switch f.mode {
 	case processFull:
-		return fmt.Sprintf("%-9d %-13s %-5s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), truncate(p.State, 5), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, f.commandWidth))
+		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, f.commandWidth))
 	case processMedium:
-		return fmt.Sprintf("%-9d %-13s %-5s %5.1f%%  %5.1f%%  %-8s  %s", p.PID, truncate(p.User, 12), truncate(p.State, 5), p.CPU, p.Memory, bytes(p.RSS), truncate(p.Command, f.commandWidth))
+		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), truncate(p.Command, f.commandWidth))
 	default:
-		return fmt.Sprintf("%-9d %-5s %5.1f%%  %5.1f%%  %s", p.PID, truncate(p.State, 5), p.CPU, p.Memory, truncate(p.Command, f.commandWidth))
+		return fmt.Sprintf("%-9d %5.1f%%  %5.1f%%  %s", p.PID, p.CPU, p.Memory, truncate(p.Command, f.commandWidth))
 	}
+}
+
+func processLegend(width int) string {
+	items := []struct {
+		state string
+		full  string
+		short string
+	}{
+		{state: "R", full: "RUNNING", short: "RUN"},
+		{state: "S", full: "SLEEPING", short: "SLEEP"},
+		{state: "D", full: "WAITING", short: "WAIT"},
+		{state: "T", full: "STOPPED", short: "STOP"},
+		{state: "Z", full: "ZOMBIE", short: "ZOMBIE"},
+		{state: "I", full: "IDLE", short: "IDLE"},
+	}
+	parts := []string{dimStyle.Render("STATE")}
+	for _, item := range items {
+		label := item.state
+		switch {
+		case width >= 96:
+			label += " " + item.full
+		case width >= 58:
+			label += " " + item.short
+		}
+		parts = append(parts, processStateStyle(item.state).Render(label))
+	}
+	return strings.Join(parts, dimStyle.Render(" · "))
 }
 
 func processStateStyle(state string) lipgloss.Style {

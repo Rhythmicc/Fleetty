@@ -257,9 +257,12 @@ func TestProcessColumnsAreAligned(t *testing.T) {
 		PID: 42, User: "alice", State: "R+", CPU: 12.3, Memory: 4.5,
 		RSS: 10 * 1024 * 1024, Elapsed: 65, Command: "trainer",
 	})
-	for _, field := range []string{"STAT", "RSS", "ELAPSED", "COMMAND"} {
+	if strings.Contains(header, "STAT") || strings.Contains(row, "R+") {
+		t.Fatalf("process state should not occupy a table column\nheader: %q\nrow:    %q", header, row)
+	}
+	for _, field := range []string{"RSS", "ELAPSED", "COMMAND"} {
 		if strings.Index(header, field) != strings.Index(row, map[string]string{
-			"STAT": "R+", "RSS": "10.0 MiB", "ELAPSED": "1m05s", "COMMAND": "trainer",
+			"RSS": "10.0 MiB", "ELAPSED": "1m05s", "COMMAND": "trainer",
 		}[field]) {
 			t.Fatalf("%s is not aligned\nheader: %q\nrow:    %q", field, header, row)
 		}
@@ -269,6 +272,24 @@ func TestProcessColumnsAreAligned(t *testing.T) {
 	}
 	if strings.Index(header, "MEM")+len("MEM") != strings.Index(row, "4.5%")+len("4.5%") {
 		t.Fatalf("MEM is not right-aligned\nheader: %q\nrow:    %q", header, row)
+	}
+}
+
+func TestProcessLegendAdaptsToWidth(t *testing.T) {
+	wide := processLegend(120)
+	for _, label := range []string{"RUNNING", "SLEEPING", "WAITING", "STOPPED", "ZOMBIE", "IDLE"} {
+		if !strings.Contains(wide, label) {
+			t.Fatalf("wide legend does not contain %q: %q", label, wide)
+		}
+	}
+	compact := processLegend(50)
+	if strings.Contains(compact, "RUNNING") {
+		t.Fatalf("compact legend should use state letters only: %q", compact)
+	}
+	for _, state := range []string{"R", "S", "D", "T", "Z", "I"} {
+		if !strings.Contains(compact, state) {
+			t.Fatalf("compact legend does not contain state %q: %q", state, compact)
+		}
 	}
 }
 
