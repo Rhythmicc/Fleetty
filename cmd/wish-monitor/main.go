@@ -5,15 +5,13 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -23,23 +21,31 @@ import (
 	"charm.land/wish/v2"
 	"charm.land/wish/v2/accesscontrol"
 	"charm.land/wish/v2/activeterm"
+	bubblewish "charm.land/wish/v2/bubbletea"
 	"charm.land/wish/v2/logging"
 	"github.com/charmbracelet/ssh"
 	"golang.org/x/crypto/bcrypt"
 )
 
+const refreshInterval = 2 * time.Second
+
 func main() {
 	host := envString("SSH_HOST", "0.0.0.0")
 	port := envString("SSH_PORT", "23234")
 	hostKeyPath := envString("SSH_HOST_KEY_PATH", ".ssh/gpu-ssh-monitor_ed25519")
-	dashboard := newDashboardDaemon()
 	admin := newAdminController()
 
 	server, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(hostKeyPath),
 		wish.WithMiddleware(
-			dashboardMiddleware(dashboard, admin),
+			bubblewish.Middleware(func(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
+				pty, _, ok := sess.Pty()
+				if !ok {
+					return nil, nil
+				}
+				return newMonitorModel(admin, sess, pty.Window.Width, pty.Window.Height), nil
+			}),
 			activeterm.Middleware(),
 			accesscontrol.Middleware(),
 			logging.Middleware(),
@@ -51,347 +57,398 @@ func main() {
 
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
-	log.Info("Starting SSH monitor", "host", host, "port", port)
+	log.Info("Starting Go SSH monitor", "host", host, "port", port)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 			log.Error("Could not start SSH server", "error", err)
-			done <- nil
+			done <- syscall.SIGTERM
 		}
 	}()
 
 	<-done
 	log.Info("Stopping SSH monitor")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 		log.Error("Could not stop SSH server", "error", err)
 	}
-	dashboard.stop()
 }
 
-type dashboardDaemon struct {
-	mu          sync.Mutex
-	workdir     string
-	scriptPath  string
-	command     string
-	socketPath  string
-	cmd         *exec.Cmd
-	done        chan error
-	lastStartAt time.Time
-	active      int
+// monitorModel is deliberately read-only: it never starts a shell or proxies
+// terminal programs. Every SSH session owns one small collector and Bubble Tea
+// program, so the monitor has no daemon process besides this Go binary.
+type monitorModel struct {
+	collector *metricsCollector
+	admin     *adminController
+	user      string
+	remote    string
+	width     int
+	height    int
+	snapshot  monitorSnapshot
+	loadErr   error
+	screen    screen
+	password  string
+	selected  *adminAction
+	status    string
+	busy      bool
 }
 
-func newDashboardDaemon() *dashboardDaemon {
-	workdir := envString("DASHBOARD_WORKDIR", mustGetwd())
-	return &dashboardDaemon{
-		workdir:    workdir,
-		scriptPath: envString("DASHBOARD_SCRIPT", filepath.Join(workdir, "ssh-dashboard.cjs")),
-		command:    envString("DASHBOARD_CMD", envString("NODE_CMD", "node")),
-		socketPath: envString("SSH_DASHBOARD_SOCKET", filepath.Join(os.TempDir(), "gpu-ssh-monitor.sock")),
-	}
-}
-
-func (d *dashboardDaemon) ensureStarted() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if d.isRunning() && d.socketReady(100*time.Millisecond) {
-		return nil
-	}
-	if d.cmd != nil {
-		d.stopLocked()
-	}
-
-	if since := time.Since(d.lastStartAt); since > 0 && since < time.Second {
-		time.Sleep(time.Second - since)
-	}
-	d.lastStartAt = time.Now()
-
-	_ = os.Remove(d.socketPath)
-	cmd := exec.Command(d.command, d.scriptPath, "--server")
-	cmd.Dir = d.workdir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(),
-		"TERM=xterm-256color",
-		"COLORTERM=truecolor",
-		"SSH_DASHBOARD_SOCKET="+d.socketPath,
-	)
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	d.cmd = cmd
-	d.done = make(chan error, 1)
-	go func() {
-		d.done <- cmd.Wait()
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if d.socketReady(100 * time.Millisecond) {
-			return nil
-		}
-		select {
-		case err := <-d.done:
-			d.cmd = nil
-			d.done = nil
-			return fmt.Errorf("dashboard exited before socket was ready: %w", err)
-		default:
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	d.stopLocked()
-	return fmt.Errorf("dashboard socket did not become ready: %s", d.socketPath)
-}
-
-func (d *dashboardDaemon) isRunning() bool {
-	if d.cmd == nil || d.cmd.Process == nil {
-		return false
-	}
-	select {
-	case <-d.done:
-		d.cmd = nil
-		d.done = nil
-		return false
-	default:
-		return true
-	}
-}
-
-func (d *dashboardDaemon) socketReady(timeout time.Duration) bool {
-	conn, err := net.DialTimeout("unix", d.socketPath, timeout)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
-func (d *dashboardDaemon) dial() (net.Conn, error) {
-	d.clientConnected()
-	if err := d.ensureStarted(); err != nil {
-		d.clientDisconnected()
-		return nil, err
-	}
-	conn, err := net.DialTimeout("unix", d.socketPath, 2*time.Second)
-	if err != nil {
-		d.clientDisconnected()
-		return nil, err
-	}
-	return conn, nil
-}
-
-func (d *dashboardDaemon) clientConnected() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.active++
-}
-
-func (d *dashboardDaemon) clientDisconnected() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.active > 0 {
-		d.active--
-	}
-	if d.active == 0 {
-		d.stopLocked()
-	}
-}
-
-func (d *dashboardDaemon) stop() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.stopLocked()
-}
-
-func (d *dashboardDaemon) stopLocked() {
-	if d.cmd == nil || d.cmd.Process == nil {
-		_ = os.Remove(d.socketPath)
-		return
-	}
-
-	_ = syscall.Kill(-d.cmd.Process.Pid, syscall.SIGTERM)
-	select {
-	case <-d.done:
-	case <-time.After(2 * time.Second):
-		_ = syscall.Kill(-d.cmd.Process.Pid, syscall.SIGKILL)
-		<-d.done
-	}
-	d.cmd = nil
-	d.done = nil
-	_ = os.Remove(d.socketPath)
-}
-
-func dashboardMiddleware(dashboard *dashboardDaemon, admin *adminController) wish.Middleware {
-	return func(next ssh.Handler) ssh.Handler {
-		return func(session ssh.Session) {
-			_ = next
-
-			conn, err := dashboard.dial()
-			if err != nil {
-				_, _ = fmt.Fprintf(session, "failed to connect to dashboard: %v\r\n", err)
-				_ = session.Exit(1)
-				return
-			}
-			defer conn.Close()
-			defer dashboard.clientDisconnected()
-			output := newPausableWriter(session)
-			defer output.Resume()
-
-			copyDone := make(chan error, 1)
-			go func() {
-				_, err := io.Copy(output, conn)
-				copyDone <- err
-			}()
-
-			inputs := make(chan byte, 64)
-			go watchSessionInput(session, inputs)
-			adminSession := newAdminSession(admin, session, output, conn)
-			_, windowChanges, hasPTY := session.Pty()
-			if !hasPTY {
-				windowChanges = nil
-			}
-
-			signals := make(chan ssh.Signal, 8)
-			session.Signals(signals)
-			defer session.Signals(nil)
-			signalDone := make(chan struct{})
-			go watchExitSignals(signals, signalDone)
-
-			for {
-				select {
-				case <-session.Context().Done():
-					_ = conn.Close()
-					return
-				case input, ok := <-inputs:
-					if !ok {
-						continue
-					}
-					action := adminSession.Handle(input)
-					switch action {
-					case actionRefresh:
-						_, _ = conn.Write([]byte("r"))
-					case actionExit:
-						_ = conn.Close()
-						restoreTerminal(session)
-						_ = session.Exit(0)
-						return
-					}
-				case <-signalDone:
-					_ = conn.Close()
-					restoreTerminal(session)
-					_ = session.Exit(0)
-					return
-				case err := <-copyDone:
-					if err != nil {
-						_ = session.Exit(1)
-					}
-					return
-				case window, ok := <-windowChanges:
-					if !ok {
-						windowChanges = nil
-						continue
-					}
-					adminSession.Resize(window.Width)
-				}
-			}
-		}
-	}
-}
-
-type sessionAction int
+type screen int
 
 const (
-	actionExit sessionAction = iota
-	actionRefresh
-	actionNone
+	screenMonitor screen = iota
+	screenPassword
+	screenAdmin
+	screenConfirm
 )
 
-func restoreTerminal(writer io.Writer) {
-	_, _ = writer.Write([]byte("\x1b[?25h\x1b[?1049l"))
-}
-
-func watchExitSignals(signals <-chan ssh.Signal, done chan<- struct{}) {
-	for sig := range signals {
-		if sig == ssh.SIGINT || sig == ssh.SIGTERM || sig == ssh.SIGQUIT || sig == ssh.SIGKILL {
-			close(done)
-			return
-		}
+func newMonitorModel(admin *adminController, sess ssh.Session, width, height int) *monitorModel {
+	remote := "local"
+	if addr := sess.RemoteAddr(); addr != nil {
+		remote = addr.String()
+	}
+	return &monitorModel{
+		collector: newMetricsCollector(),
+		admin:     admin,
+		user:      sess.User(),
+		remote:    remote,
+		width:     width,
+		height:    height,
+		status:    "Live data refreshes every 2 seconds.",
 	}
 }
 
-func watchSessionInput(reader io.Reader, inputs chan<- byte) {
-	defer close(inputs)
-	buf := make([]byte, 32)
-	for {
-		n, err := reader.Read(buf)
-		if err != nil {
-			return
-		}
+func (m *monitorModel) Init() tea.Cmd {
+	return tea.Batch(m.collect(), tick())
+}
 
-		for _, b := range buf[:n] {
-			inputs <- b
-		}
+func tick() tea.Cmd {
+	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+type tickMsg struct{}
+type snapshotMsg struct {
+	snapshot monitorSnapshot
+	err      error
+}
+type actionResultMsg struct {
+	action adminAction
+	output string
+	err    error
+}
+
+func (m *monitorModel) collect() tea.Cmd {
+	return func() tea.Msg {
+		snapshot, err := m.collector.collect()
+		return snapshotMsg{snapshot: snapshot, err: err}
 	}
 }
 
-// pausableWriter stops dashboard frames while an administrative prompt owns the
-// terminal. It deliberately serializes the final frame before the prompt is
-// drawn, so monitor output cannot overwrite a password or confirmation prompt.
-type pausableWriter struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	paused bool
-	writer io.Writer
-}
-
-func newPausableWriter(writer io.Writer) *pausableWriter {
-	result := &pausableWriter{writer: writer}
-	result.cond = sync.NewCond(&result.mu)
-	return result
-}
-
-func (w *pausableWriter) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for w.paused {
-		w.cond.Wait()
+func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+	case snapshotMsg:
+		m.snapshot = msg.snapshot
+		m.loadErr = msg.err
+	case tickMsg:
+		return m, tea.Batch(m.collect(), tick())
+	case actionResultMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("%s failed: %v", msg.action.label, msg.err)
+		} else {
+			m.status = fmt.Sprintf("%s requested%s", msg.action.label, compactOutput(msg.output))
+		}
+		m.screen = screenAdmin
+		m.selected = nil
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
+		}
+	case tea.KeyMsg:
+		return m, m.handleKey(msg)
 	}
-	return w.writer.Write(data)
+	return m, nil
 }
 
-func (w *pausableWriter) Pause() {
-	w.mu.Lock()
-	w.paused = true
-	w.mu.Unlock()
+func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
+	key := msg.String()
+	if key == "ctrl+c" || key == "q" && m.screen == screenMonitor {
+		return tea.Quit
+	}
+
+	switch m.screen {
+	case screenMonitor:
+		switch key {
+		case "m":
+			if !m.admin.enabled() {
+				m.status = "Management mode is disabled: configure ADMIN_PASSWORD_HASH."
+				return nil
+			}
+			m.screen, m.password, m.status = screenPassword, "", "Enter the management password."
+		case "r":
+			m.status = "Refreshing now…"
+			return m.collect()
+		}
+	case screenPassword:
+		switch key {
+		case "esc":
+			m.screen, m.password, m.status = screenMonitor, "", "Management mode cancelled."
+		case "enter":
+			if m.admin.authenticate(m.password) {
+				m.screen, m.password, m.status = screenAdmin, "", "Management mode enabled. Select an action."
+			} else {
+				m.password, m.status = "", "Incorrect password. Try again or press Esc."
+			}
+		case "backspace", "delete":
+			m.password = trimLastRune(m.password)
+		default:
+			if text := msg.Key().Text; text != "" && len([]rune(m.password)) < 128 {
+				m.password += text
+			}
+		}
+	case screenAdmin:
+		switch key {
+		case "esc", "q", "m":
+			m.screen, m.status = screenMonitor, "Returned to read-only monitor."
+		case "1", "2":
+			m.selectAction(int(key[0] - '1'))
+		}
+	case screenConfirm:
+		switch key {
+		case "esc", "n":
+			m.screen, m.selected, m.status = screenAdmin, nil, "Action cancelled."
+		case "y", "enter":
+			if m.selected != nil && !m.busy {
+				m.busy = true
+				m.status = "Running " + m.selected.label + "…"
+				return m.runAction(*m.selected)
+			}
+		}
+	}
+	return nil
 }
 
-func (w *pausableWriter) Resume() {
-	w.mu.Lock()
-	w.paused = false
-	w.cond.Broadcast()
-	w.mu.Unlock()
+func (m *monitorModel) handleClick(x, y int) tea.Cmd {
+	if m.screen == screenAdmin {
+		// Each two-line card has a border, so it occupies four terminal rows.
+		if x >= 2 && y >= 3 && y <= 6 {
+			m.selectAction(0)
+		}
+		if x >= 2 && y >= 8 && y <= 11 {
+			m.selectAction(1)
+		}
+	}
+	if m.screen == screenConfirm {
+		if x >= 2 && y >= 8 && y <= 11 && m.selected != nil && !m.busy {
+			m.busy = true
+			m.status = "Running " + m.selected.label + "…"
+			return m.runAction(*m.selected)
+		}
+		if x >= 2 && y >= 13 && y <= 16 {
+			m.screen, m.selected, m.status = screenAdmin, nil, "Action cancelled."
+		}
+	}
+	return nil
+}
+
+func (m *monitorModel) selectAction(index int) {
+	if index < 0 || index >= len(m.admin.actions) {
+		return
+	}
+	action := m.admin.actions[index]
+	m.selected = &action
+	m.screen = screenConfirm
+	m.status = "Review the confirmation before running this action."
+}
+
+func (m *monitorModel) runAction(action adminAction) tea.Cmd {
+	user, remote := m.user, m.remote
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		output, err := exec.CommandContext(ctx, "sh", "-c", action.command).CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			err = fmt.Errorf("timed out")
+		}
+		log.Info("Management action requested", "action", action.label, "user", user, "remote", remote, "error", err)
+		return actionResultMsg{action: action, output: string(output), err: err}
+	}
+}
+
+func (m *monitorModel) View() tea.View {
+	var body string
+	switch m.screen {
+	case screenPassword:
+		body = m.passwordView()
+	case screenAdmin:
+		body = m.adminView()
+	case screenConfirm:
+		body = m.confirmView()
+	default:
+		body = m.monitorView()
+	}
+	v := tea.NewView(body)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	v.WindowTitle = "GPU SSH Monitor"
+	return v
+}
+
+func (m *monitorModel) monitorView() string {
+	w := usableWidth(m.width)
+	header := titleStyle.Render("GPU SSH MONITOR") + dimStyle.Render("  ·  LIVE READ-ONLY VIEW")
+	if m.snapshot.CollectedAt.IsZero() {
+		return strings.Join([]string{header, "", panelStyle(w).Render("Collecting system metrics…")}, "\n")
+	}
+
+	metrics := []metricCard{
+		{"CPU", fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent), m.snapshot.LoadAverage},
+		{"MEMORY", fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal)), fmt.Sprintf("%.1f%% used", percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal))},
+		{"DISK /", fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal)), fmt.Sprintf("%.1f%% used", percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal))},
+		{"NETWORK", fmt.Sprintf("↓ %s/s", bytes(m.snapshot.NetworkRX)), fmt.Sprintf("↑ %s/s", bytes(m.snapshot.NetworkTX))},
+	}
+	metricRows := renderMetricRows(metrics, w)
+	gpu := m.gpuPanel(w)
+	processes := m.processPanel(w)
+	footer := helpStyle.Render("[m] management  [r] refresh  [q] quit") + "  " + dimStyle.Render(m.status)
+	if m.loadErr != nil {
+		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
+	}
+	return strings.Join([]string{header, dimStyle.Render("Go-native SSH TUI · no shell, no Node, no xterm"), metricRows, gpu, processes, footer}, "\n")
+}
+
+func (m *monitorModel) gpuPanel(w int) string {
+	if m.snapshot.GPUError != "" {
+		return panelStyle(w).Render(sectionStyle.Render("GPU") + "\n" + dimStyle.Render("nvidia-smi unavailable: "+m.snapshot.GPUError))
+	}
+	lines := []string{sectionStyle.Render("GPU")}
+	for _, gpu := range m.snapshot.GPUs {
+		lines = append(lines, fmt.Sprintf("%s  %s  %s  %s  %s",
+			accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
+			truncate(gpu.Name, 24),
+			bar(gpu.Utilization, 16)+fmt.Sprintf(" %3.0f%%", gpu.Utilization),
+			fmt.Sprintf("MEM %s/%s", bytes(gpu.MemoryUsed), bytes(gpu.MemoryTotal)),
+			dimStyle.Render(fmt.Sprintf("%d°C · %.0fW", gpu.Temperature, gpu.Power)),
+		))
+	}
+	if len(m.snapshot.GPUs) == 0 {
+		lines = append(lines, dimStyle.Render("No NVIDIA GPU was reported."))
+	}
+	return panelStyle(w).Render(strings.Join(lines, "\n"))
+}
+
+func (m *monitorModel) processPanel(w int) string {
+	lines := []string{sectionStyle.Render("TOP PROCESSES") + "  " + dimStyle.Render("read-only · sorted by CPU"), processHeaderStyle.Render("PID       USER          CPU     MEM     RSS       ELAPSED   COMMAND")}
+	maxRows := m.height - 17 - len(m.snapshot.GPUs)
+	if maxRows < 3 {
+		maxRows = 3
+	}
+	if maxRows > 12 {
+		maxRows = 12
+	}
+	for i, p := range m.snapshot.Processes {
+		if i >= maxRows {
+			break
+		}
+		commandWidth := max(12, w-65)
+		lines = append(lines, fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, commandWidth)))
+	}
+	if len(m.snapshot.Processes) == 0 {
+		lines = append(lines, dimStyle.Render("No process data available."))
+	}
+	return panelStyle(w).Render(strings.Join(lines, "\n"))
+}
+
+func (m *monitorModel) passwordView() string {
+	w := usableWidth(m.width)
+	masked := strings.Repeat("•", len([]rune(m.password)))
+	if masked == "" {
+		masked = dimStyle.Render("password")
+	}
+	content := strings.Join([]string{
+		titleStyle.Render("MANAGEMENT MODE"),
+		dimStyle.Render("Authentication is required before any host action."),
+		"",
+		"Password: " + inputStyle.Render(masked+" "),
+		"",
+		dimStyle.Render("[enter] continue  [esc] return to monitor"),
+		warningStyle.Render(m.status),
+	}, "\n")
+	return centeredPanel(w, content)
+}
+
+func (m *monitorModel) adminView() string {
+	w := usableWidth(m.width)
+	first, second := m.admin.actions[0], m.admin.actions[1]
+	return strings.Join([]string{
+		titleStyle.Render("MANAGEMENT MODE") + "  " + accentStyle.Render("AUTHORIZED"),
+		dimStyle.Render("Actions are fixed by server configuration. Click a card or press its number."),
+		"",
+		actionCard(w, "1", first.label, first.description, false),
+		"",
+		actionCard(w, "2", second.label, second.description, true),
+		"",
+		helpStyle.Render("[1/2] select  [esc] return to read-only monitor") + "  " + dimStyle.Render(m.status),
+	}, "\n")
+}
+
+func (m *monitorModel) confirmView() string {
+	w := usableWidth(m.width)
+	if m.selected == nil {
+		m.screen = screenAdmin
+		return m.adminView()
+	}
+	confirmLabel := "Confirm action"
+	if m.busy {
+		confirmLabel = "Running…"
+	}
+	return strings.Join([]string{
+		titleStyle.Render("CONFIRM MANAGEMENT ACTION"),
+		warningStyle.Render("This runs on the host immediately: " + m.selected.label),
+		"",
+		panelStyle(w).Render(sectionStyle.Render(m.selected.label) + "\n" + m.selected.description),
+		"",
+		actionCard(w, "Y", confirmLabel, "Click to execute", true),
+		"",
+		actionCard(w, "N", "Cancel", "Return without making a change", false),
+		"",
+		helpStyle.Render("[y/enter] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status),
+	}, "\n")
+}
+
+type metricCard struct{ title, value, detail string }
+
+func renderMetricRows(cards []metricCard, width int) string {
+	cardWidth := max(18, (width-3)/2)
+	render := func(c metricCard) string {
+		return metricStyle(cardWidth).Render(sectionStyle.Render(c.title) + "\n" + valueStyle.Render(truncate(c.value, cardWidth-4)) + "\n" + dimStyle.Render(truncate(c.detail, cardWidth-4)))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.JoinHorizontal(lipgloss.Top, render(cards[0]), " ", render(cards[1])),
+		lipgloss.JoinHorizontal(lipgloss.Top, render(cards[2]), " ", render(cards[3])),
+	)
+}
+
+func actionCard(width int, key, title, detail string, dangerous bool) string {
+	style := clickableStyle(width)
+	label := accentStyle.Render("["+key+"] ") + title
+	if dangerous {
+		label = dangerStyle.Render("["+key+"] ") + title
+	}
+	return style.Render(label + "\n" + dimStyle.Render(detail))
+}
+
+func centeredPanel(width int, content string) string {
+	return "\n" + panelStyle(min(68, width)).Render(content)
 }
 
 type adminAction struct {
-	key     byte
-	label   string
-	command string
-	kind    adminActionKind
+	label       string
+	description string
+	command     string
 }
-
-type adminActionKind int
-
-const (
-	adminActionCommand adminActionKind = iota
-	adminActionProcessManager
-)
 
 type adminController struct {
 	password     string
@@ -400,684 +457,376 @@ type adminController struct {
 }
 
 func newAdminController() *adminController {
-	controller := &adminController{
+	return &adminController{
 		password:     os.Getenv("ADMIN_PASSWORD"),
 		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
 		actions: []adminAction{
-			{key: '1', label: "Restart gpu-ssh-monitor service", command: os.Getenv("ADMIN_RESTART_MONITOR_CMD"), kind: adminActionCommand},
-			{key: '2', label: "Reboot this machine", command: os.Getenv("ADMIN_REBOOT_CMD"), kind: adminActionCommand},
-			{key: '3', label: "Power off this machine", command: os.Getenv("ADMIN_POWEROFF_CMD"), kind: adminActionCommand},
-			{key: '4', label: "Manage processes", kind: adminActionProcessManager},
+			{label: "Restart monitor service", description: "Restart the GPU SSH monitor service.", command: envString("ADMIN_RESTART_MONITOR_CMD", "systemctl restart gpu-tui-monitor.service")},
+			{label: "Reboot machine", description: "Restart the entire host. Active workloads will be interrupted.", command: envString("ADMIN_REBOOT_CMD", "systemctl reboot")},
 		},
 	}
-	if controller.actions[0].command == "" {
-		controller.actions[0].command = "systemctl restart gpu-ssh-monitor.service"
-	}
-	if controller.actions[1].command == "" {
-		controller.actions[1].command = "systemctl reboot"
-	}
-	if controller.actions[2].command == "" {
-		controller.actions[2].command = "systemctl poweroff"
-	}
-	return controller
 }
 
-func (a *adminController) enabled() bool {
-	return a.password != "" || a.passwordHash != ""
-}
+func (a *adminController) enabled() bool { return a.password != "" || a.passwordHash != "" }
 
-func (a *adminController) validPassword(password string) bool {
+func (a *adminController) authenticate(password string) bool {
 	if a.passwordHash != "" {
 		return bcrypt.CompareHashAndPassword([]byte(a.passwordHash), []byte(password)) == nil
 	}
-	if a.password == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a.password), []byte(password)) == 1
+	return a.password != "" && subtle.ConstantTimeCompare([]byte(a.password), []byte(password)) == 1
 }
 
-type adminMode int
-
-const (
-	adminModeMonitor adminMode = iota
-	adminModeDisabled
-	adminModePassword
-	adminModeMenu
-	adminModeConfirm
-	adminModeProcessList
-	adminModeProcessDetailPID
-	adminModeProcessDetail
-	adminModeProcessTerminatePID
-	adminModeProcessTerminateConfirm
-)
-
-type adminSession struct {
-	model   *adminModel
-	session ssh.Session
-	output  *pausableWriter
-	conn    net.Conn
+type monitorSnapshot struct {
+	CollectedAt             time.Time
+	CPUPercent              float64
+	LoadAverage             string
+	MemoryUsed, MemoryTotal uint64
+	DiskUsed, DiskTotal     uint64
+	NetworkRX, NetworkTX    uint64
+	GPUs                    []gpuInfo
+	GPUError                string
+	Processes               []processInfo
 }
 
-func newAdminSession(controller *adminController, session ssh.Session, output *pausableWriter, conn net.Conn) *adminSession {
-	width := 130
-	if pty, _, ok := session.Pty(); ok && pty.Window.Width > 0 {
-		width = pty.Window.Width
-	}
-	return &adminSession{
-		model:   &adminModel{controller: controller, width: width},
-		session: session,
-		output:  output,
-		conn:    conn,
-	}
+type gpuInfo struct {
+	Index                   int
+	Name                    string
+	Utilization             float64
+	MemoryUsed, MemoryTotal uint64
+	Temperature             int
+	Power                   float64
 }
 
-func (a *adminSession) Resize(width int) {
-	if width <= 0 {
-		return
-	}
-	a.model.width = width
-	if a.model.mode != adminModeMonitor {
-		a.draw()
-	}
+type processInfo struct {
+	PID           int
+	User, Command string
+	CPU, Memory   float64
+	RSS, Elapsed  uint64
 }
 
-func (a *adminSession) Handle(input byte) sessionAction {
-	if input == 0x03 {
-		return actionExit
-	}
-	wasMonitor := a.model.mode == adminModeMonitor
-	_, _ = a.model.Update(keyMessage(input))
-	if a.model.exit {
-		return actionExit
-	}
+type cpuCounters struct{ total, idle uint64 }
 
-	if wasMonitor && a.model.mode != adminModeMonitor {
-		a.output.Pause()
-	}
-	if a.model.pending != nil {
-		a.runPendingAction()
-	}
-	if a.model.processTask != processTaskNone {
-		a.runProcessTask()
-	}
-	if !wasMonitor && a.model.mode == adminModeMonitor {
-		a.leave()
-		return actionNone
-	}
-	if a.model.mode != adminModeMonitor {
-		a.draw()
-	}
-	if wasMonitor && a.model.mode == adminModeMonitor && (input == 'r' || input == 'R') {
-		return actionRefresh
-	}
-	return actionNone
+type metricsCollector struct {
+	previousCPU cpuCounters
+	previousNet netCounters
+	haveCPU     bool
+	haveNet     bool
+	lastNetAt   time.Time
 }
 
-func (a *adminSession) runPendingAction() {
-	action := *a.model.pending
-	a.model.pending = nil
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "/bin/sh", "-c", action.command)
-	command.Stdout = a.session
-	command.Stderr = a.session
-	err := command.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		a.model.status = "Operation timed out."
-	} else if err != nil {
-		a.model.status = fmt.Sprintf("Operation failed: %v", err)
+type netCounters struct{ rx, tx uint64 }
+
+func newMetricsCollector() *metricsCollector { return &metricsCollector{} }
+
+func (c *metricsCollector) collect() (monitorSnapshot, error) {
+	s := monitorSnapshot{CollectedAt: time.Now()}
+	var errs []string
+	if counters, err := readCPUCounters(); err != nil {
+		errs = append(errs, "cpu: "+err.Error())
 	} else {
-		a.model.status = "Operation requested successfully."
-	}
-	log.Info("administrative action requested", "user", a.session.User(), "remote_addr", a.session.RemoteAddr().String(), "action", action.label, "error", err)
-}
-
-func (a *adminSession) runProcessTask() {
-	task := a.model.processTask
-	pid := a.model.processPIDValue
-	a.model.processTask = processTaskNone
-
-	switch task {
-	case processTaskList:
-		processes, err := listProcesses()
-		if err != nil {
-			a.model.status = fmt.Sprintf("Could not list processes: %v", err)
-			return
-		}
-		a.model.processOutput = processes
-	case processTaskDetail:
-		details, startTime, err := processDetails(pid)
-		if err != nil {
-			a.model.status = fmt.Sprintf("Could not inspect PID %d: %v", pid, err)
-			if a.model.mode == adminModeProcessTerminateConfirm {
-				a.model.mode = adminModeProcessList
+		if c.haveCPU {
+			totalDelta := counters.total - c.previousCPU.total
+			idleDelta := counters.idle - c.previousCPU.idle
+			if totalDelta > 0 {
+				s.CPUPercent = 100 * float64(totalDelta-idleDelta) / float64(totalDelta)
 			}
-			return
 		}
-		a.model.processOutput = details
-		a.model.processStartTime = startTime
-	case processTaskTerminate:
-		if err := terminateProcess(pid, a.model.processStartTime); err != nil {
-			a.model.status = fmt.Sprintf("Could not terminate PID %d: %v", pid, err)
-		} else {
-			a.model.status = fmt.Sprintf("SIGTERM sent to PID %d.", pid)
-		}
-		processes, err := listProcesses()
-		if err == nil {
-			a.model.processOutput = processes
-		}
+		c.previousCPU, c.haveCPU = counters, true
 	}
+	if used, total, err := readMemory(); err != nil {
+		errs = append(errs, "memory: "+err.Error())
+	} else {
+		s.MemoryUsed, s.MemoryTotal = used, total
+	}
+	if used, total, err := readDisk(); err != nil {
+		errs = append(errs, "disk: "+err.Error())
+	} else {
+		s.DiskUsed, s.DiskTotal = used, total
+	}
+	if net, err := readNetwork(); err != nil {
+		errs = append(errs, "network: "+err.Error())
+	} else if c.haveNet {
+		delta := time.Since(c.lastNetAt).Seconds()
+		if delta > 0 {
+			s.NetworkRX = uint64(float64(net.rx-c.previousNet.rx) / delta)
+			s.NetworkTX = uint64(float64(net.tx-c.previousNet.tx) / delta)
+		}
+		c.previousNet, c.lastNetAt = net, time.Now()
+	} else {
+		c.previousNet, c.haveNet, c.lastNetAt = net, true, time.Now()
+	}
+	s.LoadAverage = readLoadAverage()
+	s.GPUs, s.GPUError = readGPUs()
+	if processes, err := readProcesses(); err != nil {
+		errs = append(errs, "processes: "+err.Error())
+	} else {
+		s.Processes = processes
+	}
+	if len(errs) > 0 {
+		return s, errors.New(strings.Join(errs, "; "))
+	}
+	return s, nil
 }
 
-func (a *adminSession) draw() {
-	_, _ = io.WriteString(a.session, "\x1b[2J\x1b[H\x1b[?25h"+a.model.View().Content)
+func readCPUCounters() (cpuCounters, error) {
+	b, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return cpuCounters{}, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "cpu" {
+			continue
+		}
+		var c cpuCounters
+		for _, field := range fields[1:] {
+			value, _ := strconv.ParseUint(field, 10, 64)
+			c.total += value
+		}
+		idle, _ := strconv.ParseUint(fields[4], 10, 64)
+		if len(fields) > 5 {
+			iowait, _ := strconv.ParseUint(fields[5], 10, 64)
+			idle += iowait
+		}
+		c.idle = idle
+		return c, nil
+	}
+	return cpuCounters{}, errors.New("cpu line missing")
 }
 
-func (a *adminSession) leave() {
-	a.output.Resume()
-	_, _ = a.conn.Write([]byte("r"))
+func readMemory() (used, total uint64, err error) {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0, err
+	}
+	values := map[string]uint64{}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, _ := strconv.ParseUint(fields[1], 10, 64)
+		values[strings.TrimSuffix(fields[0], ":")] = value * 1024
+	}
+	total = values["MemTotal"]
+	available := values["MemAvailable"]
+	if total == 0 {
+		return 0, 0, errors.New("MemTotal missing")
+	}
+	return total - available, total, nil
 }
 
-// adminModel uses Bubble Tea's Model/Update/View contract. We keep the outer
-// SSH loop as the program driver because the dashboard already owns the same
-// terminal; running a second tea.Program would make the two renderers race.
-type adminModel struct {
-	controller       *adminController
-	mode             adminMode
-	password         []byte
-	attempts         int
-	selected         adminAction
-	pending          *adminAction
-	status           string
-	exit             bool
-	processPID       []byte
-	processPIDValue  int
-	processStartTime uint64
-	processOutput    string
-	processTask      processTask
-	width            int
+func readDisk() (used, total uint64, err error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err != nil {
+		return 0, 0, err
+	}
+	total = stat.Blocks * uint64(stat.Bsize)
+	used = (stat.Blocks - stat.Bavail) * uint64(stat.Bsize)
+	return used, total, nil
+}
+
+func readNetwork() (netCounters, error) {
+	b, err := os.ReadFile("/proc/net/dev")
+	if err != nil {
+		return netCounters{}, err
+	}
+	var total netCounters
+	for _, line := range strings.Split(string(b), "\n") {
+		parts := strings.Split(line, ":")
+		if len(parts) != 2 {
+			continue
+		}
+		iface := strings.TrimSpace(parts[0])
+		if iface == "lo" {
+			continue
+		}
+		fields := strings.Fields(parts[1])
+		if len(fields) < 9 {
+			continue
+		}
+		rx, _ := strconv.ParseUint(fields[0], 10, 64)
+		tx, _ := strconv.ParseUint(fields[8], 10, 64)
+		total.rx += rx
+		total.tx += tx
+	}
+	return total, nil
+}
+
+func readLoadAverage() string {
+	b, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return "load unavailable"
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) < 3 {
+		return "load unavailable"
+	}
+	return "load " + strings.Join(fields[:3], " · ")
+}
+
+func readGPUs() ([]gpuInfo, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return nil, compactCommandError(err)
+	}
+	var gpus []gpuInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) != 7 {
+			continue
+		}
+		index, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+		util, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+		memUsed, _ := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
+		memTotal, _ := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
+		temp, _ := strconv.Atoi(strings.TrimSpace(parts[5]))
+		power, _ := strconv.ParseFloat(strings.TrimSpace(parts[6]), 64)
+		gpus = append(gpus, gpuInfo{Index: index, Name: strings.TrimSpace(parts[1]), Utilization: util, MemoryUsed: memUsed * 1024 * 1024, MemoryTotal: memTotal * 1024 * 1024, Temperature: temp, Power: power})
+	}
+	return gpus, ""
+}
+
+func readProcesses() ([]processInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,user=,pcpu=,pmem=,rss=,etimes=,comm=", "--sort=-pcpu").Output()
+	if err != nil {
+		return nil, err
+	}
+	var processes []processInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			continue
+		}
+		pid, _ := strconv.Atoi(fields[0])
+		cpu, _ := strconv.ParseFloat(fields[2], 64)
+		memory, _ := strconv.ParseFloat(fields[3], 64)
+		rss, _ := strconv.ParseUint(fields[4], 10, 64)
+		elapsed, _ := strconv.ParseUint(fields[5], 10, 64)
+		processes = append(processes, processInfo{PID: pid, User: fields[1], CPU: cpu, Memory: memory, RSS: rss * 1024, Elapsed: elapsed, Command: strings.Join(fields[6:], " ")})
+	}
+	sort.SliceStable(processes, func(i, j int) bool { return processes[i].CPU > processes[j].CPU })
+	return processes, nil
 }
 
 var (
-	adminTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1")).Bold(true)
-	adminLabelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBA6F7")).Bold(true)
-	adminMutedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8"))
-	adminKeyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBA6F7")).Bold(true)
-	adminValueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
-	adminPanelStyle = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#A6E3A1")).
-			Padding(0, 2)
-	adminWidePanelStyle   = adminPanelStyle.Width(118)
-	adminDangerPanelStyle = lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder()).
-				BorderForeground(lipgloss.Color("#F9E2AF")).
-				Padding(0, 2)
-	adminInfoPanelStyle = lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder()).
-				BorderForeground(lipgloss.Color("#CBA6F7")).
-				Padding(0, 2)
-	adminDestructivePanelStyle = lipgloss.NewStyle().
-					Border(lipgloss.NormalBorder()).
-					BorderForeground(lipgloss.Color("#F38BA8")).
-					Padding(0, 2)
-	adminDangerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#F9E2AF")).Bold(true)
-	adminDestructiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8")).Bold(true)
-	adminTableHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1")).Bold(true)
+	titleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
+	sectionStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
+	valueStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Bold(true)
+	accentStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
+	dangerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80")).Bold(true)
+	dimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC"))
+	warningStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD180"))
+	helpStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDB4FF")).Bold(true)
+	processHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC")).Bold(true)
+	inputStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
 )
 
-type processTask int
-
-const (
-	processTaskNone processTask = iota
-	processTaskList
-	processTaskDetail
-	processTaskTerminate
-)
-
-func (m *adminModel) Init() tea.Cmd {
-	return nil
+func panelStyle(width int) lipgloss.Style {
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5B6B8A")).Padding(0, 1).Width(max(20, width-2))
+}
+func metricStyle(width int) lipgloss.Style {
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#3D506F")).Padding(0, 1).Width(width - 2)
+}
+func clickableStyle(width int) lipgloss.Style {
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#B9A4FF")).Padding(0, 1).Width(max(20, width-2))
 }
 
-func (m *adminModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
-	key, ok := message.(tea.KeyMsg)
-	if !ok {
-		return m, nil
+func usableWidth(width int) int {
+	if width < 48 {
+		return 48
 	}
-	input := key.Key().Code
-
-	if m.mode == adminModeMonitor {
-		switch input {
-		case 0x03, 'q', 'Q':
-			m.exit = true
-		case 'm', 'M':
-			m.password = nil
-			m.attempts = 0
-			m.status = ""
-			if m.controller.enabled() {
-				m.mode = adminModePassword
-			} else {
-				m.mode = adminModeDisabled
-			}
-		}
-		return m, nil
-	}
-
-	switch m.mode {
-	case adminModeDisabled:
-		m.mode = adminModeMonitor
-	case adminModePassword:
-		m.updatePassword(input)
-	case adminModeMenu:
-		m.updateMenu(input)
-	case adminModeConfirm:
-		m.updateConfirmation(input)
-	case adminModeProcessList:
-		m.updateProcessList(input)
-	case adminModeProcessDetailPID:
-		m.updateProcessPID(input, false)
-	case adminModeProcessDetail:
-		m.mode = adminModeProcessList
-	case adminModeProcessTerminatePID:
-		m.updateProcessPID(input, true)
-	case adminModeProcessTerminateConfirm:
-		m.updateProcessTermination(input)
-	}
-	return m, nil
+	return min(width, 140)
 }
-
-func (m *adminModel) updatePassword(input rune) {
-	switch input {
-	case 0x03, tea.KeyEscape:
-		m.mode = adminModeMonitor
-	case tea.KeyEnter, '\n':
-		password := string(m.password)
-		m.password = nil
-		if m.controller.validPassword(password) {
-			m.mode = adminModeMenu
-			m.status = ""
-			return
-		}
-		m.attempts++
-		if m.attempts >= 3 {
-			m.mode = adminModeMonitor
-			return
-		}
-		m.status = "Incorrect password."
-	case tea.KeyBackspace, 0x08:
-		if len(m.password) > 0 {
-			m.password = m.password[:len(m.password)-1]
-		}
-	default:
-		if input >= 0x20 && input <= 0x7e && len(m.password) < 256 {
-			m.password = append(m.password, byte(input))
-		}
+func max(a, b int) int {
+	if a > b {
+		return a
 	}
+	return b
 }
-
-func (m *adminModel) updateMenu(input rune) {
-	if input == 0x03 || input == tea.KeyEscape || input == 'q' || input == 'Q' {
-		m.mode = adminModeMonitor
-		return
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-	for _, action := range m.controller.actions {
-		if input == rune(action.key) {
-			if action.kind == adminActionProcessManager {
-				m.status = ""
-				m.processTask = processTaskList
-				m.mode = adminModeProcessList
-				return
-			}
-			m.selected = action
-			m.mode = adminModeConfirm
-			return
-		}
-	}
+	return b
 }
-
-func (m *adminModel) updateConfirmation(input rune) {
-	if input == 'y' || input == 'Y' {
-		selected := m.selected
-		m.pending = &selected
-		m.mode = adminModeMenu
-		return
+func percent(a, b uint64) float64 {
+	if b == 0 {
+		return 0
 	}
-	m.mode = adminModeMenu
+	return 100 * float64(a) / float64(b)
 }
-
-func (m *adminModel) updateProcessList(input rune) {
-	switch input {
-	case 0x03:
-		m.exit = true
-	case tea.KeyEscape, 'q', 'Q':
-		m.mode = adminModeMenu
-	case 'r', 'R':
-		m.status = ""
-		m.processTask = processTaskList
-	case 'd', 'D':
-		m.status = ""
-		m.processPID = nil
-		m.mode = adminModeProcessDetailPID
-	case 't', 'T':
-		m.status = ""
-		m.processPID = nil
-		m.mode = adminModeProcessTerminatePID
+func trimLastRune(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
 	}
+	return string(r[:len(r)-1])
 }
-
-func (m *adminModel) updateProcessPID(input rune, terminate bool) {
-	switch input {
-	case 0x03:
-		m.exit = true
-	case tea.KeyEscape:
-		m.mode = adminModeProcessList
-	case tea.KeyEnter, '\n':
-		pid, err := validateProcessPID(string(m.processPID))
-		if err != nil {
-			m.status = err.Error()
-			return
-		}
-		m.processPIDValue = pid
-		if terminate {
-			m.mode = adminModeProcessTerminateConfirm
-		} else {
-			m.mode = adminModeProcessDetail
-		}
-		m.processTask = processTaskDetail
-	case tea.KeyBackspace, 0x08:
-		if len(m.processPID) > 0 {
-			m.processPID = m.processPID[:len(m.processPID)-1]
-		}
-	default:
-		if input >= '0' && input <= '9' && len(m.processPID) < 10 {
-			m.processPID = append(m.processPID, byte(input))
-		}
+func truncate(s string, width int) string {
+	r := []rune(s)
+	if width <= 1 {
+		return ""
 	}
+	if len(r) <= width {
+		return s
+	}
+	return string(r[:width-1]) + "…"
 }
-
-func (m *adminModel) updateProcessTermination(input rune) {
-	if input == 'y' || input == 'Y' {
-		m.processTask = processTaskTerminate
-		m.mode = adminModeProcessList
-		return
+func bytes(value uint64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%d B", value)
 	}
-	m.mode = adminModeProcessList
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	f := float64(value)
+	i := 0
+	for f >= float64(unit) && i < len(units)-1 {
+		f /= float64(unit)
+		i++
+	}
+	return fmt.Sprintf("%.1f %s", f, units[i])
 }
-
-func (m *adminModel) View() tea.View {
-	switch m.mode {
-	case adminModeDisabled:
-		body := adminDangerStyle.Render("Management mode is disabled.") + "\n\n" + adminMutedStyle.Render("Set ADMIN_PASSWORD_HASH (recommended) or ADMIN_PASSWORD.") + "\n\n" + renderKeyHints("any", "return to monitor")
-		return newAdminView(m.adminScreen("MANAGEMENT MODE", "ACCESS NOT CONFIGURED", body, false, false))
-	case adminModePassword:
-		body := adminLabelStyle.Render("Administrator password") + "\n" + adminMutedStyle.Render("The live dashboard is paused until you exit.") + "\n\n"
-		if m.status != "" {
-			body += adminDangerStyle.Render(m.status) + "\n\n"
-		}
-		body += adminValueStyle.Render("Password: ") + adminTitleStyle.Render(strings.Repeat("•", len(m.password))) + "\n\n" + renderKeyHints("esc", "cancel", "ctrl-c", "exit")
-		return newAdminView(m.adminScreen("MANAGEMENT MODE", "SECURE ACCESS", body, false, false))
-	case adminModeMenu:
-		var body strings.Builder
-		body.WriteString(adminMutedStyle.Render("Fixed administrative actions configured on this host."))
-		body.WriteString("\n\n")
-		if m.status != "" {
-			body.WriteString(adminDangerStyle.Render(m.status))
-			body.WriteString("\n\n")
-		}
-		for _, action := range m.controller.actions {
-			fmt.Fprintf(&body, "  %s  %s\n", adminKeyStyle.Render("["+string(action.key)+"]"), adminValueStyle.Render(action.label))
-		}
-		body.WriteString("\n")
-		body.WriteString(renderKeyHints("q", "return to monitor"))
-		return newAdminView(m.adminScreen("MANAGEMENT MODE", "ADMIN CONSOLE", body.String(), false, false))
-	case adminModeConfirm:
-		body := adminDangerStyle.Render("Confirm administrative action") + "\n\n" + adminValueStyle.Render(m.selected.label) + "\n\n" + renderKeyHints("y", "confirm", "any key", "cancel")
-		return newAdminView(m.adminScreen("MANAGEMENT MODE", "CONFIRM ACTION", body, false, true))
-	case adminModeProcessList:
-		var body strings.Builder
-		if m.status != "" {
-			body.WriteString(adminDangerStyle.Render(m.status))
-			body.WriteString("\n\n")
-		}
-		body.WriteString(m.renderProcessWorkspace())
-		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "LIVE PROCESS VIEW", body.String(), true, false))
-	case adminModeProcessDetailPID:
-		body := adminLabelStyle.Render("Inspect a process") + "\n" + adminMutedStyle.Render("Enter a numeric PID to view its current details.") + "\n\n" + adminValueStyle.Render("PID: ") + adminTitleStyle.Render(string(m.processPID))
-		if m.status != "" {
-			body += "\n\n" + adminDangerStyle.Render(m.status)
-		}
-		body += "\n\n" + renderKeyHints("enter", "inspect", "esc", "cancel")
-		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "PROCESS DETAILS", body, false, false))
-	case adminModeProcessDetail:
-		body := renderProcessDetails(m.processOutput)
-		if m.status != "" {
-			body = adminDangerStyle.Render(m.status) + "\n\n" + body
-		}
-		body += "\n\n" + renderKeyHints("any key", "return to process list")
-		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "PROCESS DETAILS", body, true, false))
-	case adminModeProcessTerminatePID:
-		body := adminDangerStyle.Render("Terminate with SIGTERM") + "\n" + adminMutedStyle.Render("The selected process receives a graceful termination request.") + "\n\n" + adminValueStyle.Render("PID: ") + adminTitleStyle.Render(string(m.processPID))
-		if m.status != "" {
-			body += "\n\n" + adminDangerStyle.Render(m.status)
-		}
-		body += "\n\n" + renderKeyHints("enter", "review process", "esc", "cancel")
-		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "TERMINATE PROCESS", body, false, true))
-	case adminModeProcessTerminateConfirm:
-		body := renderProcessDetails(m.processOutput) + "\n\n" + adminDestructiveStyle.Render(fmt.Sprintf("Send SIGTERM to PID %d?", m.processPIDValue)) + "\n\n" + renderKeyHints("y", "terminate", "any key", "cancel")
-		return newAdminView(m.adminScreen("PROCESS MANAGEMENT", "CONFIRM TERMINATION", body, true, true))
+func elapsed(seconds uint64) string {
+	d := time.Duration(seconds) * time.Second
+	if d >= 24*time.Hour {
+		return fmt.Sprintf("%dd%dh", int(d.Hours()/24), int(d.Hours())%24)
 	}
-	return tea.NewView("")
+	if d >= time.Hour {
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 }
-
-func newAdminView(content string) tea.View {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	return tea.NewView(strings.ReplaceAll(content, "\n", "\r\n"))
+func bar(value float64, width int) string {
+	filled := int(value / 100 * float64(width))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	return accentStyle.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
 }
-
-func (m *adminModel) adminScreen(title, context, body string, wide, destructive bool) string {
-	width := m.panelWidth(wide)
-	header := adminTitleStyle.Render("GPU SSH MONITOR") + "  " + adminMutedStyle.Render("/ "+context) + "\n" + adminLabelStyle.Render(title) + "\n" + adminMutedStyle.Render(strings.Repeat("─", width))
-	style := adminPanelStyle
-	if wide {
-		style = adminWidePanelStyle.Width(width)
+func compactCommandError(err error) string {
+	if errors.Is(err, exec.ErrNotFound) {
+		return "command not found"
 	}
-	if destructive {
-		style = adminDestructivePanelStyle
-		if wide {
-			style = style.Width(width)
-		}
-	}
-	if !wide {
-		width = min(width, 82)
-		style = style.Width(width)
-	}
-	content := header + "\n\n" + style.Render(body)
-	return lipgloss.PlaceHorizontal(m.width, lipgloss.Center, content)
+	return "not available"
 }
-
-func (m *adminModel) panelWidth(wide bool) int {
-	width := m.width - 4
-	if !wide {
-		width = min(width, 78)
+func compactOutput(output string) string {
+	output = strings.TrimSpace(strings.ReplaceAll(output, "\n", " "))
+	if output == "" {
+		return "."
 	}
-	return max(width, 64)
+	return ": " + truncate(output, 70)
 }
-
-func renderKeyHints(values ...string) string {
-	var hints []string
-	for index := 0; index+1 < len(values); index += 2 {
-		hints = append(hints, adminKeyStyle.Render("["+values[index]+"]")+" "+adminMutedStyle.Render(values[index+1]))
-	}
-	return strings.Join(hints, "   ")
-}
-
-func renderProcessTable(value string) string {
-	return renderProcessTableLimit(value, 12)
-}
-
-func renderProcessTableLimit(value string, limit int) string {
-	lines := strings.Split(strings.TrimSuffix(value, "\r\n"), "\r\n")
-	if len(lines) == 0 || lines[0] == "" {
-		return adminMutedStyle.Render("No processes returned.")
-	}
-	if len(lines) > limit+1 {
-		lines = lines[:limit+1]
-	}
-	return adminTableHeaderStyle.Render(lines[0]) + "\n" + adminValueStyle.Render(strings.Join(lines[1:], "\n"))
-}
-
-func (m *adminModel) renderProcessWorkspace() string {
-	width := m.panelWidth(true)
-	leftWidth := max(54, width*3/5-5)
-	rightWidth := max(34, width-leftWidth-9)
-	leftBody := adminLabelStyle.Render("PROCESSES  /  TOP CPU") + "\n\n" + renderProcessTable(m.processOutput)
-	rightBody := adminLabelStyle.Render("PROCESS INSPECTION") + "\n\n" +
-		adminMutedStyle.Render("Inspect any live PID on demand.") + "\n\n" +
-		renderKeyHints("d", "enter PID and view details") + "\n\n" +
-		adminLabelStyle.Render("SAFE TERMINATION") + "\n\n" +
-		adminDangerStyle.Render("SIGTERM only") + "\n" +
-		adminMutedStyle.Render("PID 1 and this monitor are protected.\nPID reuse is checked before sending a signal.") + "\n\n" +
-		renderKeyHints("t", "review and terminate a PID")
-	left := adminPanelStyle.Width(leftWidth).Render(leftBody)
-	right := adminInfoPanelStyle.Width(rightWidth).Render(rightBody)
-	footer := "\n\n" + renderKeyHints("r", "refresh", "d", "PID details", "t", "terminate PID", "q", "back")
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right) + footer
-}
-
-func renderProcessDetails(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return adminMutedStyle.Render("Loading process details…")
-	}
-	return adminValueStyle.Render(value)
-}
-
-func keyMessage(input byte) tea.KeyPressMsg {
-	key := tea.Key{Code: rune(input)}
-	switch input {
-	case '\r', '\n':
-		key.Code = tea.KeyEnter
-	case 0x08, 0x7f:
-		key.Code = tea.KeyBackspace
-	case 0x1b:
-		key.Code = tea.KeyEscape
-	default:
-		if input >= 0x20 && input <= 0x7e {
-			key.Text = string(rune(input))
-		}
-	}
-	return tea.KeyPressMsg(key)
-}
-
-func listProcesses() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,ppid=,user=,stat=,etimes=,%cpu=,%mem=,comm=", "--sort=-%cpu").Output()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", errors.New("process listing timed out")
-	}
-	if err != nil {
-		return "", err
-	}
-	lines := strings.Split(strings.TrimSpace(sanitizeTerminalText(string(output))), "\n")
-	if len(lines) > 25 {
-		lines = lines[:25]
-	}
-	return "  PID  PPID USER       STAT ELAPSED %CPU %MEM COMMAND\r\n" + strings.Join(lines, "\r\n") + "\r\n", nil
-}
-
-func processDetails(pid int) (string, uint64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,user=,group=,lstart=,etime=,stat=,%cpu=,%mem=,args=").Output()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", 0, errors.New("process lookup timed out")
-	}
-	if err != nil {
-		return "", 0, err
-	}
-	details := strings.TrimSpace(sanitizeTerminalText(string(output)))
-	if details == "" {
-		return "", 0, fmt.Errorf("PID %d no longer exists", pid)
-	}
-	startTime, err := processStartTime(pid)
-	if err != nil {
-		return "", 0, err
-	}
-	return details, startTime, nil
-}
-
-func validateProcessPID(value string) (int, error) {
-	pid, err := strconv.Atoi(value)
-	if err != nil || pid < 2 {
-		return 0, errors.New("enter a PID greater than 1")
-	}
-	if pid == os.Getpid() {
-		return 0, errors.New("the monitor service cannot terminate itself")
-	}
-	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, fmt.Errorf("PID %d does not exist", pid)
-		}
-		return 0, err
-	}
-	return pid, nil
-}
-
-func terminateProcess(pid int, expectedStartTime uint64) error {
-	if _, err := validateProcessPID(strconv.Itoa(pid)); err != nil {
-		return err
-	}
-	currentStartTime, err := processStartTime(pid)
-	if err != nil {
-		return err
-	}
-	if expectedStartTime == 0 || currentStartTime != expectedStartTime {
-		return errors.New("PID was reused; refresh its details before terminating it")
-	}
-	return syscall.Kill(pid, syscall.SIGTERM)
-}
-
-func processStartTime(pid int) (uint64, error) {
-	contents, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if err != nil {
-		return 0, err
-	}
-	closingParenthesis := strings.LastIndex(string(contents), ")")
-	if closingParenthesis == -1 {
-		return 0, errors.New("could not read process start time")
-	}
-	fields := strings.Fields(string(contents[closingParenthesis+1:]))
-	if len(fields) <= 19 {
-		return 0, errors.New("could not read process start time")
-	}
-	startTime, err := strconv.ParseUint(fields[19], 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return startTime, nil
-}
-
-func sanitizeTerminalText(value string) string {
-	var result strings.Builder
-	for _, char := range value {
-		if char == '\n' || char == '\r' || char == '\t' || char >= 0x20 && char != 0x7f {
-			result.WriteRune(char)
-		}
-	}
-	return result.String()
-}
-
-func envString(key string, fallback string) string {
-	if value := os.Getenv(key); value != "" {
+func envString(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
 	}
 	return fallback
-}
-
-func mustGetwd() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "."
-	}
-	return wd
 }

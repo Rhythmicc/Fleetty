@@ -1,85 +1,91 @@
 package main
 
-import "testing"
+import (
+	"testing"
 
-func TestAdminModelPasswordAndConfirmation(t *testing.T) {
-	controller := &adminController{
+	tea "charm.land/bubbletea/v2"
+)
+
+func TestAdminAuthenticationAndSelection(t *testing.T) {
+	admin := &adminController{
 		password: "correct horse battery staple",
-		actions:  []adminAction{{key: '1', label: "Restart monitor", command: "true"}},
+		actions: []adminAction{
+			{label: "Restart monitor service", command: "true"},
+			{label: "Reboot machine", command: "true"},
+		},
 	}
-	model := &adminModel{controller: controller}
-
-	model.Update(keyMessage('m'))
-	if model.mode != adminModePassword {
-		t.Fatalf("mode after m = %v, want password prompt", model.mode)
+	m := &monitorModel{admin: admin, screen: screenMonitor}
+	m.handleKey(testKey("m"))
+	if m.screen != screenPassword {
+		t.Fatalf("screen after m = %v, want password", m.screen)
 	}
-	for _, input := range []byte("correct horse battery staple") {
-		model.Update(keyMessage(input))
+	for _, r := range "correct horse battery staple" {
+		m.handleKey(testKey(string(r)))
 	}
-	model.Update(keyMessage('\r'))
-	if model.mode != adminModeMenu {
-		t.Fatalf("mode after correct password = %v, want menu", model.mode)
+	m.handleKey(testKey("enter"))
+	if m.screen != screenAdmin {
+		t.Fatalf("screen after password = %v, want admin", m.screen)
 	}
-
-	model.Update(keyMessage('1'))
-	if model.mode != adminModeConfirm {
-		t.Fatalf("mode after selecting action = %v, want confirmation", model.mode)
-	}
-	model.Update(keyMessage('y'))
-	if model.pending == nil || model.pending.command != "true" {
-		t.Fatalf("confirmed action was not queued: %#v", model.pending)
+	m.handleKey(testKey("2"))
+	if m.screen != screenConfirm || m.selected == nil || m.selected.label != "Reboot machine" {
+		t.Fatalf("selection = screen %v action %#v", m.screen, m.selected)
 	}
 }
 
-func TestAdminModelDisabledAndIncorrectPassword(t *testing.T) {
-	disabled := &adminModel{controller: &adminController{}}
-	disabled.Update(keyMessage('m'))
-	if disabled.mode != adminModeDisabled {
-		t.Fatalf("disabled mode = %v, want disabled prompt", disabled.mode)
-	}
-
-	model := &adminModel{controller: &adminController{password: "secret"}}
-	model.Update(keyMessage('m'))
-	model.Update(keyMessage('x'))
-	model.Update(keyMessage('\r'))
-	if model.mode != adminModePassword || model.status != "Incorrect password." {
-		t.Fatalf("incorrect password state = mode %v, status %q", model.mode, model.status)
+func TestDisabledManagementMode(t *testing.T) {
+	m := &monitorModel{admin: &adminController{}, screen: screenMonitor}
+	m.handleKey(testKey("m"))
+	if m.screen != screenMonitor || m.status == "" {
+		t.Fatalf("disabled management should remain on monitor, got screen=%v status=%q", m.screen, m.status)
 	}
 }
 
-func TestAdminModelProcessManagerNavigation(t *testing.T) {
-	controller := &adminController{
-		password: "secret",
-		actions:  []adminAction{{key: '4', label: "Manage processes", kind: adminActionProcessManager}},
+func TestManagementCardsCanBeClicked(t *testing.T) {
+	m := &monitorModel{
+		admin: &adminController{actions: []adminAction{
+			{label: "Restart monitor service", command: "true"},
+			{label: "Reboot machine", command: "true"},
+		}},
+		screen: screenAdmin,
 	}
-	model := &adminModel{controller: controller, mode: adminModeMenu}
-
-	model.Update(keyMessage('4'))
-	if model.mode != adminModeProcessList || model.processTask != processTaskList {
-		t.Fatalf("process manager = mode %v, task %v", model.mode, model.processTask)
-	}
-
-	model.processTask = processTaskNone // Simulate the session completing the list request.
-	model.Update(keyMessage('d'))
-	if model.mode != adminModeProcessDetailPID {
-		t.Fatalf("detail prompt mode = %v", model.mode)
-	}
-	model.Update(keyMessage(0x1b))
-	if model.mode != adminModeProcessList {
-		t.Fatalf("escape from detail prompt = %v", model.mode)
-	}
-
-	model.Update(keyMessage('t'))
-	if model.mode != adminModeProcessTerminatePID {
-		t.Fatalf("terminate prompt mode = %v", model.mode)
+	m.handleClick(4, 8)
+	if m.screen != screenConfirm || m.selected == nil || m.selected.label != "Reboot machine" {
+		t.Fatalf("click should select reboot, got screen=%v action=%#v", m.screen, m.selected)
 	}
 }
 
-func TestProcessInputSafety(t *testing.T) {
-	if _, err := validateProcessPID("1"); err == nil {
-		t.Fatal("PID 1 should be rejected")
+func TestFormattingHelpers(t *testing.T) {
+	if got := bytes(1024 * 1024 * 1536); got != "1.5 GiB" {
+		t.Fatalf("bytes = %q", got)
 	}
-	if got := sanitizeTerminalText("safe\x1b[2J\ntext\x00"); got != "safe[2J\ntext" {
-		t.Fatalf("sanitized process text = %q", got)
+	if got := elapsed(3661); got != "1h01m" {
+		t.Fatalf("elapsed = %q", got)
 	}
+	if got := truncate("abcdef", 4); got != "abc…" {
+		t.Fatalf("truncate = %q", got)
+	}
+	if got := trimLastRune("a界"); got != "a" {
+		t.Fatalf("trimLastRune = %q", got)
+	}
+}
+
+func testKey(s string) tea.KeyMsg { return tea.KeyPressMsg{Code: keyCode(s), Text: keyText(s)} }
+
+func keyCode(s string) rune {
+	switch s {
+	case "enter":
+		return tea.KeyEnter
+	case "esc":
+		return tea.KeyEscape
+	case "backspace":
+		return tea.KeyBackspace
+	}
+	return []rune(s)[0]
+}
+
+func keyText(s string) string {
+	if s == "enter" || s == "esc" || s == "backspace" {
+		return ""
+	}
+	return s
 }
