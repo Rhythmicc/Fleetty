@@ -625,23 +625,31 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 			lines = append(lines,
 				accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index))+"  "+truncate(gpu.Name, w-12),
 				bar(gpu.Utilization, max(8, w-43))+fmt.Sprintf(" %3.0f%%  MEM %s/%s", gpu.Utilization, bytes(gpu.MemoryUsed), bytes(gpu.MemoryTotal)),
+				dimStyle.Render(gpuTelemetry(gpu, false)),
 			)
 			continue
 		}
 		nameWidth := min(28, max(14, w/5))
-		barWidth := min(42, max(10, w-nameWidth-66))
+		barWidth := min(42, max(10, w-nameWidth-86))
 		lines = append(lines, fmt.Sprintf("%s  %-*s  %s %3.0f%%  %s  %s",
 			accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
 			nameWidth, truncate(gpu.Name, nameWidth),
 			bar(gpu.Utilization, barWidth), gpu.Utilization,
 			fmt.Sprintf("MEM %s/%s", bytes(gpu.MemoryUsed), bytes(gpu.MemoryTotal)),
-			dimStyle.Render(fmt.Sprintf("%d°C · %.0fW", gpu.Temperature, gpu.Power)),
+			dimStyle.Render(gpuTelemetry(gpu, w >= 128)),
 		))
 	}
 	if len(m.snapshot.GPUs) == 0 {
 		lines = append(lines, dimStyle.Render("No NVIDIA GPU was reported."))
 	}
 	return panelStyle(w).Render(strings.Join(lines, "\n"))
+}
+
+func gpuTelemetry(gpu gpuInfo, showPowerLimit bool) string {
+	if showPowerLimit && gpu.PowerLimit > 0 {
+		return fmt.Sprintf("CLK %d MHz · PWR %.0f/%.0f W · %d°C", gpu.ClockMHz, gpu.Power, gpu.PowerLimit, gpu.Temperature)
+	}
+	return fmt.Sprintf("CLK %d MHz · PWR %.0f W · %d°C", gpu.ClockMHz, gpu.Power, gpu.Temperature)
 }
 
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
@@ -845,7 +853,7 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 	if gpuUnavailable {
 		gpuContentLines = 2
 	} else if compactGPU {
-		gpuContentLines += gpuCount * 2
+		gpuContentLines += gpuCount * 3
 	} else {
 		gpuContentLines += gpuCount
 	}
@@ -1030,7 +1038,8 @@ type gpuInfo struct {
 	Utilization             float64
 	MemoryUsed, MemoryTotal uint64
 	Temperature             int
-	Power                   float64
+	ClockMHz                int
+	Power, PowerLimit       float64
 }
 
 type processInfo struct {
@@ -1225,14 +1234,18 @@ func readLoadAverage() string {
 func readGPUs() ([]gpuInfo, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits").Output()
+	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw,power.limit", "--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil, compactCommandError(err)
 	}
+	return parseGPUs(output), ""
+}
+
+func parseGPUs(output []byte) []gpuInfo {
 	var gpus []gpuInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		parts := strings.Split(line, ",")
-		if len(parts) != 7 {
+		if len(parts) != 9 {
 			continue
 		}
 		index, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
@@ -1240,10 +1253,16 @@ func readGPUs() ([]gpuInfo, string) {
 		memUsed, _ := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
 		memTotal, _ := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
 		temp, _ := strconv.Atoi(strings.TrimSpace(parts[5]))
-		power, _ := strconv.ParseFloat(strings.TrimSpace(parts[6]), 64)
-		gpus = append(gpus, gpuInfo{Index: index, Name: strings.TrimSpace(parts[1]), Utilization: util, MemoryUsed: memUsed * 1024 * 1024, MemoryTotal: memTotal * 1024 * 1024, Temperature: temp, Power: power})
+		clockMHz, _ := strconv.Atoi(strings.TrimSpace(parts[6]))
+		power, _ := strconv.ParseFloat(strings.TrimSpace(parts[7]), 64)
+		powerLimit, _ := strconv.ParseFloat(strings.TrimSpace(parts[8]), 64)
+		gpus = append(gpus, gpuInfo{
+			Index: index, Name: strings.TrimSpace(parts[1]), Utilization: util,
+			MemoryUsed: memUsed * 1024 * 1024, MemoryTotal: memTotal * 1024 * 1024,
+			Temperature: temp, ClockMHz: clockMHz, Power: power, PowerLimit: powerLimit,
+		})
 	}
-	return gpus, ""
+	return gpus
 }
 
 func readProcesses() ([]processInfo, error) {

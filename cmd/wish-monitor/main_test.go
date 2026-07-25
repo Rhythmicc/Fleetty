@@ -166,6 +166,20 @@ func TestDashboardLayoutUsesTerminalSize(t *testing.T) {
 	}
 }
 
+func TestGPUClockAndPowerParsing(t *testing.T) {
+	gpus := parseGPUs([]byte("0, NVIDIA A100-PCIE-40GB, 82, 1024, 40960, 55, 1410, 70.64, 250.00\n"))
+	if len(gpus) != 1 {
+		t.Fatalf("parsed GPUs = %#v", gpus)
+	}
+	gpu := gpus[0]
+	if gpu.ClockMHz != 1410 || gpu.Power != 70.64 || gpu.PowerLimit != 250 {
+		t.Fatalf("GPU telemetry = %#v", gpu)
+	}
+	if got := gpuTelemetry(gpu, true); got != "CLK 1410 MHz · PWR 71/250 W · 55°C" {
+		t.Fatalf("GPU telemetry text = %q", got)
+	}
+}
+
 func TestMetricCardsJoinHorizontally(t *testing.T) {
 	cards := []metricCard{
 		{"CPU", "1%", "load 0.1"},
