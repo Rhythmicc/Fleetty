@@ -634,7 +634,7 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 			lines = append(lines,
 				summary,
 				bar(gpu.Utilization, max(8, w-lipgloss.Width(memory)-12))+fmt.Sprintf(" %3.0f%%  %s", gpu.Utilization, memory),
-				dimStyle.Render(gpuTelemetry(gpu, false)),
+				statusStyle.Render(gpuTelemetry(gpu, false)),
 			)
 			continue
 		}
@@ -646,7 +646,7 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 			fmt.Sprintf("       %s %3.0f%%  %s  %s",
 				bar(gpu.Utilization, barWidth), gpu.Utilization,
 				memory,
-				dimStyle.Render(telemetry),
+				statusStyle.Render(telemetry),
 			),
 		)
 	}
