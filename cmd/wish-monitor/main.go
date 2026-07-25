@@ -79,19 +79,26 @@ func main() {
 // terminal programs. Every SSH session owns one small collector and Bubble Tea
 // program, so the monitor has no daemon process besides this Go binary.
 type monitorModel struct {
-	collector *metricsCollector
-	admin     *adminController
-	user      string
-	remote    string
-	width     int
-	height    int
-	snapshot  monitorSnapshot
-	loadErr   error
-	screen    screen
-	password  string
-	selected  *adminAction
-	status    string
-	busy      bool
+	collector       *metricsCollector
+	admin           *adminController
+	user            string
+	remote          string
+	width           int
+	height          int
+	snapshot        monitorSnapshot
+	loadErr         error
+	screen          screen
+	password        string
+	filter          string
+	filtering       bool
+	cursor          int
+	processOffset   int
+	selectedAction  *adminAction
+	selectedProcess *processInfo
+	processDetail   *processDetail
+	detailErr       error
+	status          string
+	busy            bool
 }
 
 type screen int
@@ -101,6 +108,8 @@ const (
 	screenPassword
 	screenAdmin
 	screenConfirm
+	screenProcessDetail
+	screenProcessTerminateConfirm
 )
 
 func newMonitorModel(admin *adminController, sess ssh.Session, width, height int) *monitorModel {
@@ -137,6 +146,15 @@ type actionResultMsg struct {
 	output string
 	err    error
 }
+type processDetailMsg struct {
+	pid    int
+	detail processDetail
+	err    error
+}
+type processTerminateResultMsg struct {
+	pid int
+	err error
+}
 
 func (m *monitorModel) collect() tea.Cmd {
 	return func() tea.Msg {
@@ -152,6 +170,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotMsg:
 		m.snapshot = msg.snapshot
 		m.loadErr = msg.err
+		m.clampProcessCursor()
 	case tickMsg:
 		return m, tea.Batch(m.collect(), tick())
 	case actionResultMsg:
@@ -162,7 +181,23 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("%s requested%s", msg.action.label, compactOutput(msg.output))
 		}
 		m.screen = screenAdmin
-		m.selected = nil
+		m.selectedAction = nil
+	case processDetailMsg:
+		if m.selectedProcess != nil && m.selectedProcess.PID == msg.pid {
+			m.processDetail = &msg.detail
+			m.detailErr = msg.err
+		}
+	case processTerminateResultMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Could not terminate PID %d: %v", msg.pid, msg.err)
+			m.screen = screenProcessDetail
+		} else {
+			m.status = fmt.Sprintf("SIGTERM sent to PID %d.", msg.pid)
+			m.screen = screenAdmin
+			m.selectedProcess, m.processDetail, m.detailErr = nil, nil, nil
+			return m, m.collect()
+		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
@@ -172,6 +207,8 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		if m.screen == screenPassword {
 			m.appendPassword(msg.Content)
+		} else if m.screen == screenAdmin && m.filtering {
+			m.appendFilter(msg.Content)
 		}
 	}
 	return m, nil
@@ -202,7 +239,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.screen, m.password, m.status = screenMonitor, "", "Management mode cancelled."
 		case "enter":
 			if m.admin.authenticate(m.password) {
-				m.screen, m.password, m.status = screenAdmin, "", "Management mode enabled. Select an action."
+				m.screen, m.password, m.status = screenAdmin, "", "Management mode enabled. Filter or select a process."
 			} else {
 				m.password, m.status = "", "Incorrect password. Try again or press Esc."
 			}
@@ -217,21 +254,86 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.appendPassword(text)
 		}
 	case screenAdmin:
+		if m.filtering {
+			switch key {
+			case "esc":
+				m.filtering = false
+				m.status = "Filter editing cancelled."
+			case "enter":
+				m.filtering = false
+				m.cursor, m.processOffset = 0, 0
+				m.status = fmt.Sprintf("Filter applied: %q", m.filter)
+			case "backspace", "delete":
+				m.filter = trimLastRune(m.filter)
+				m.cursor, m.processOffset = 0, 0
+			default:
+				text := msg.Key().Text
+				if text == "" && len([]rune(key)) == 1 {
+					text = key
+				}
+				m.appendFilter(text)
+			}
+			return nil
+		}
 		switch key {
 		case "esc", "q", "m":
 			m.screen, m.status = screenMonitor, "Returned to read-only monitor."
 		case "1", "2":
 			m.selectAction(int(key[0] - '1'))
+		case "/":
+			m.filtering = true
+			m.status = "Type a process name, user, or PID."
+		case "c":
+			m.filter, m.cursor, m.processOffset, m.status = "", 0, 0, "Process filter cleared."
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+				m.clampProcessCursor()
+			}
+		case "down", "j":
+			if m.cursor+1 < len(m.filteredProcesses()) {
+				m.cursor++
+				m.clampProcessCursor()
+			}
+		case "enter":
+			return m.openProcess(m.cursor)
+		case "r":
+			return m.collect()
 		}
 	case screenConfirm:
 		switch key {
 		case "esc", "n":
-			m.screen, m.selected, m.status = screenAdmin, nil, "Action cancelled."
+			m.screen, m.selectedAction, m.status = screenAdmin, nil, "Action cancelled."
 		case "y", "enter":
-			if m.selected != nil && !m.busy {
+			if m.selectedAction != nil && !m.busy {
 				m.busy = true
-				m.status = "Running " + m.selected.label + "…"
-				return m.runAction(*m.selected)
+				m.status = "Running " + m.selectedAction.label + "…"
+				return m.runAction(*m.selectedAction)
+			}
+		}
+	case screenProcessDetail:
+		switch key {
+		case "esc", "q":
+			m.screen, m.status = screenAdmin, "Returned to process manager."
+		case "r":
+			if m.selectedProcess != nil {
+				return m.loadProcessDetail(m.selectedProcess.PID)
+			}
+		case "t":
+			if m.selectedProcessCanTerminate() {
+				m.screen = screenProcessTerminateConfirm
+				m.status = "Confirm before sending SIGTERM."
+			}
+		}
+	case screenProcessTerminateConfirm:
+		switch key {
+		case "esc", "n":
+			m.screen, m.status = screenProcessDetail, "Process termination cancelled."
+		case "y", "enter":
+			if m.selectedProcess != nil && !m.busy {
+				m.busy = true
+				m.status = fmt.Sprintf("Sending SIGTERM to PID %d…", m.selectedProcess.PID)
+				return m.terminateProcess(m.selectedProcess.PID, m.processDetail.StartTimeTicks)
 			}
 		}
 	}
@@ -255,24 +357,57 @@ func (m *monitorModel) appendPassword(text string) {
 	m.password += string(accepted)
 }
 
+func (m *monitorModel) appendFilter(text string) {
+	for _, r := range text {
+		if !unicode.IsControl(r) && len([]rune(m.filter)) < 80 {
+			m.filter += string(r)
+		}
+	}
+	m.cursor, m.processOffset = 0, 0
+}
+
 func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 	if m.screen == screenAdmin {
-		// Each two-line card has a border, so it occupies four terminal rows.
-		if x >= 2 && y >= 3 && y <= 6 {
-			m.selectAction(0)
-		}
-		if x >= 2 && y >= 8 && y <= 11 {
-			m.selectAction(1)
+		if y == 2 {
+			firstLabel, secondLabel := m.adminActionLabels()
+			firstWidth := compactButtonWidth("1", firstLabel)
+			if x < firstWidth {
+				m.selectAction(0)
+			} else if x > firstWidth && x < firstWidth+compactButtonWidth("2", secondLabel)+1 {
+				m.selectAction(1)
+			}
+		} else if y == 3 {
+			m.filtering = true
+			m.status = "Type a process name, user, or PID."
+		} else if y >= adminProcessRowStart && y < adminProcessRowStart+m.visibleAdminProcessCount() {
+			return m.openProcess(m.processOffset + y - adminProcessRowStart)
 		}
 	}
 	if m.screen == screenConfirm {
-		if x >= 2 && y >= 8 && y <= 11 && m.selected != nil && !m.busy {
+		if x >= 2 && y >= 8 && y <= 11 && m.selectedAction != nil && !m.busy {
 			m.busy = true
-			m.status = "Running " + m.selected.label + "…"
-			return m.runAction(*m.selected)
+			m.status = "Running " + m.selectedAction.label + "…"
+			return m.runAction(*m.selectedAction)
 		}
 		if x >= 2 && y >= 13 && y <= 16 {
-			m.screen, m.selected, m.status = screenAdmin, nil, "Action cancelled."
+			m.screen, m.selectedAction, m.status = screenAdmin, nil, "Action cancelled."
+		}
+	}
+	if m.screen == screenProcessDetail && y == 2 && x < compactButtonWidth("T", "Terminate process") {
+		if m.selectedProcessCanTerminate() {
+			m.screen = screenProcessTerminateConfirm
+			m.status = "Confirm before sending SIGTERM."
+		}
+	}
+	if m.screen == screenProcessTerminateConfirm && y == 2 {
+		confirmWidth := compactButtonWidth("Y", "Send SIGTERM")
+		if x < confirmWidth && m.selectedProcess != nil && !m.busy {
+			m.busy = true
+			m.status = fmt.Sprintf("Sending SIGTERM to PID %d…", m.selectedProcess.PID)
+			return m.terminateProcess(m.selectedProcess.PID, m.processDetail.StartTimeTicks)
+		}
+		if x > confirmWidth {
+			m.screen, m.status = screenProcessDetail, "Process termination cancelled."
 		}
 	}
 	return nil
@@ -283,9 +418,116 @@ func (m *monitorModel) selectAction(index int) {
 		return
 	}
 	action := m.admin.actions[index]
-	m.selected = &action
+	m.selectedAction = &action
 	m.screen = screenConfirm
 	m.status = "Review the confirmation before running this action."
+}
+
+func (m *monitorModel) filteredProcesses() []processInfo {
+	query := strings.ToLower(strings.TrimSpace(m.filter))
+	if query == "" {
+		return m.snapshot.Processes
+	}
+	filtered := make([]processInfo, 0, len(m.snapshot.Processes))
+	for _, process := range m.snapshot.Processes {
+		searchable := strings.ToLower(fmt.Sprintf("%d %s %s", process.PID, process.User, process.Command))
+		if strings.Contains(searchable, query) {
+			filtered = append(filtered, process)
+		}
+	}
+	return filtered
+}
+
+func (m *monitorModel) clampProcessCursor() {
+	processes := m.filteredProcesses()
+	if len(processes) == 0 {
+		m.cursor, m.processOffset = 0, 0
+		return
+	}
+	if m.cursor >= len(processes) {
+		m.cursor = len(processes) - 1
+	}
+	rows := m.adminVisibleProcessRows()
+	if m.cursor < m.processOffset {
+		m.processOffset = m.cursor
+	}
+	if m.cursor >= m.processOffset+rows {
+		m.processOffset = m.cursor - rows + 1
+	}
+	maxOffset := max(0, len(processes)-rows)
+	if m.processOffset > maxOffset {
+		m.processOffset = maxOffset
+	}
+}
+
+func (m *monitorModel) adminVisibleProcessRows() int {
+	return max(3, m.height-9)
+}
+
+func (m *monitorModel) visibleAdminProcessCount() int {
+	return min(m.adminVisibleProcessRows(), max(0, len(m.filteredProcesses())-m.processOffset))
+}
+
+func (m *monitorModel) adminActionLabels() (string, string) {
+	if usableWidth(m.width) < 54 {
+		return "Restart", "Reboot"
+	}
+	return m.admin.actions[0].label, m.admin.actions[1].label
+}
+
+func (m *monitorModel) openProcess(index int) tea.Cmd {
+	processes := m.filteredProcesses()
+	if index < 0 || index >= len(processes) {
+		return nil
+	}
+	process := processes[index]
+	m.cursor = index
+	m.selectedProcess = &process
+	m.processDetail, m.detailErr = nil, nil
+	m.screen = screenProcessDetail
+	m.status = fmt.Sprintf("Loading details for PID %d…", process.PID)
+	return m.loadProcessDetail(process.PID)
+}
+
+func (m *monitorModel) loadProcessDetail(pid int) tea.Cmd {
+	return func() tea.Msg {
+		detail, err := readProcessDetail(pid)
+		return processDetailMsg{pid: pid, detail: detail, err: err}
+	}
+}
+
+func (m *monitorModel) terminateProcess(pid int, expectedStartTicks uint64) tea.Cmd {
+	user, remote := m.user, m.remote
+	return func() tea.Msg {
+		if !canTerminatePID(pid) {
+			return processTerminateResultMsg{pid: pid, err: errors.New("protected process")}
+		}
+		currentStartTicks, err := readProcessStartTicks(pid)
+		if err != nil {
+			return processTerminateResultMsg{pid: pid, err: errors.New("process no longer exists")}
+		}
+		if expectedStartTicks == 0 || currentStartTicks != expectedStartTicks {
+			return processTerminateResultMsg{pid: pid, err: errors.New("process identity changed; reload details")}
+		}
+		process, err := os.FindProcess(pid)
+		if err == nil {
+			err = process.Signal(syscall.SIGTERM)
+		}
+		log.Info("Process termination requested", "pid", pid, "signal", "SIGTERM", "user", user, "remote", remote, "error", err)
+		return processTerminateResultMsg{pid: pid, err: err}
+	}
+}
+
+func canTerminatePID(pid int) bool {
+	return pid > 1 && pid != os.Getpid()
+}
+
+func (m *monitorModel) selectedProcessCanTerminate() bool {
+	return m.selectedProcess != nil &&
+		m.processDetail != nil &&
+		m.detailErr == nil &&
+		m.processDetail.StartTimeTicks != 0 &&
+		canTerminatePID(m.selectedProcess.PID)
 }
 
 func (m *monitorModel) runAction(action adminAction) tea.Cmd {
@@ -311,6 +553,10 @@ func (m *monitorModel) View() tea.View {
 		body = m.adminView()
 	case screenConfirm:
 		body = m.confirmView()
+	case screenProcessDetail:
+		body = m.processDetailView()
+	case screenProcessTerminateConfirm:
+		body = m.processTerminateConfirmView()
 	default:
 		body = m.monitorView()
 	}
@@ -420,22 +666,55 @@ func (m *monitorModel) passwordView() string {
 
 func (m *monitorModel) adminView() string {
 	w := usableWidth(m.width)
-	first, second := m.admin.actions[0], m.admin.actions[1]
+	processes := m.filteredProcesses()
+	rows := m.adminVisibleProcessRows()
+	end := min(len(processes), m.processOffset+rows)
+	if m.processOffset > end {
+		m.processOffset = 0
+	}
+	format := newProcessFormat(w)
+	table := []string{
+		sectionStyle.Render("PROCESS MANAGER") + "  " + dimStyle.Render(fmt.Sprintf("%d / %d processes · rows %d-%d", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end)),
+		processHeaderStyle.Render(format.header()),
+	}
+	for i := m.processOffset; i < end; i++ {
+		row := format.row(processes[i])
+		if i == m.cursor && !m.filtering {
+			row = selectedRowStyle.Render(row)
+		}
+		table = append(table, row)
+	}
+	if len(processes) == 0 {
+		table = append(table, warningStyle.Render("No processes match this filter."))
+	}
+
+	filterValue := m.filter
+	if filterValue == "" {
+		filterValue = "process name, user, or PID"
+	}
+	if m.filtering {
+		filterValue += "█"
+	}
+	filterLine := accentStyle.Render("FILTER /") + " " + inputStyle.Width(max(12, w-14)).Render(truncate(filterValue, max(8, w-18)))
+	firstLabel, secondLabel := m.adminActionLabels()
+	actions := lipgloss.JoinHorizontal(lipgloss.Top,
+		compactButton("1", firstLabel, false),
+		" ",
+		compactButton("2", secondLabel, true),
+	)
 	return strings.Join([]string{
 		titleStyle.Render("MANAGEMENT MODE") + "  " + accentStyle.Render("AUTHORIZED"),
-		dimStyle.Render("Actions are fixed by server configuration. Click a card or press its number."),
-		"",
-		actionCard(w, "1", first.label, first.description, false),
-		"",
-		actionCard(w, "2", second.label, second.description, true),
-		"",
-		helpStyle.Render("[1/2] select  [esc] return to read-only monitor") + "  " + dimStyle.Render(m.status),
+		dimStyle.Render(truncate("Click a process for details. Host actions remain fixed and require confirmation.", w)),
+		actions,
+		filterLine,
+		panelStyle(w).Render(strings.Join(table, "\n")),
+		helpStyle.Render("[/] filter  [↑/↓] select  [enter/click] details  [c] clear  [esc] monitor") + "  " + dimStyle.Render(m.status),
 	}, "\n")
 }
 
 func (m *monitorModel) confirmView() string {
 	w := usableWidth(m.width)
-	if m.selected == nil {
+	if m.selectedAction == nil {
 		m.screen = screenAdmin
 		return m.adminView()
 	}
@@ -445,9 +724,9 @@ func (m *monitorModel) confirmView() string {
 	}
 	return strings.Join([]string{
 		titleStyle.Render("CONFIRM MANAGEMENT ACTION"),
-		warningStyle.Render("This runs on the host immediately: " + m.selected.label),
+		warningStyle.Render("This runs on the host immediately: " + m.selectedAction.label),
 		"",
-		panelStyle(w).Render(sectionStyle.Render(m.selected.label) + "\n" + m.selected.description),
+		panelStyle(w).Render(sectionStyle.Render(m.selectedAction.label) + "\n" + m.selectedAction.description),
 		"",
 		actionCard(w, "Y", confirmLabel, "Click to execute", true),
 		"",
@@ -457,7 +736,70 @@ func (m *monitorModel) confirmView() string {
 	}, "\n")
 }
 
+func (m *monitorModel) processDetailView() string {
+	w := usableWidth(m.width)
+	if m.selectedProcess == nil {
+		m.screen = screenAdmin
+		return m.adminView()
+	}
+	pid := m.selectedProcess.PID
+	action := compactButton("T", "Terminate process", true)
+	if !m.selectedProcessCanTerminate() {
+		action = dimStyle.Render("Termination unavailable until details are loaded, or for protected processes")
+	}
+	body := "Loading process details…"
+	if m.detailErr != nil {
+		body = warningStyle.Render("Unable to read process details: " + m.detailErr.Error())
+	} else if m.processDetail != nil {
+		d := m.processDetail
+		body = strings.Join([]string{
+			sectionStyle.Render(fmt.Sprintf("%s  PID %d", d.Name, d.PID)),
+			fmt.Sprintf("%s %d    %s %d    %s %s    %s %d", dimStyle.Render("PPID"), d.PPID, dimStyle.Render("UID"), d.UID, dimStyle.Render("USER"), d.User, dimStyle.Render("THREADS"), d.Threads),
+			fmt.Sprintf("%s %s    %s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("STATE"), d.State, dimStyle.Render("CPU"), d.CPU, dimStyle.Render("MEM"), d.Memory, dimStyle.Render("RSS"), bytes(d.RSS)),
+			fmt.Sprintf("%s %s", dimStyle.Render("ELAPSED"), elapsed(d.Elapsed)),
+			"",
+			dimStyle.Render("COMMAND") + "  " + truncate(d.CommandLine, max(12, w-14)),
+			dimStyle.Render("EXEC") + "     " + truncate(d.Executable, max(12, w-14)),
+			dimStyle.Render("CWD") + "      " + truncate(d.CWD, max(12, w-14)),
+		}, "\n")
+	}
+	return strings.Join([]string{
+		titleStyle.Render("PROCESS DETAILS") + "  " + accentStyle.Render(fmt.Sprintf("PID %d", pid)),
+		dimStyle.Render("Inspect the selected process before taking action."),
+		action + "  " + compactButton("Esc", "Back to process manager", false),
+		panelStyle(w).Render(body),
+		helpStyle.Render("[t/click] terminate  [r] reload  [esc] back") + "  " + dimStyle.Render(m.status),
+	}, "\n")
+}
+
+func (m *monitorModel) processTerminateConfirmView() string {
+	w := usableWidth(m.width)
+	if m.selectedProcess == nil {
+		m.screen = screenAdmin
+		return m.adminView()
+	}
+	p := m.selectedProcess
+	confirm := compactButton("Y", "Send SIGTERM", true)
+	if m.busy {
+		confirm = compactButton("…", "Sending SIGTERM", true)
+	}
+	return strings.Join([]string{
+		titleStyle.Render("CONFIRM PROCESS TERMINATION"),
+		warningStyle.Render(fmt.Sprintf("PID %d (%s) will receive SIGTERM.", p.PID, p.Command)),
+		confirm + "  " + compactButton("N", "Cancel", false),
+		panelStyle(w).Render(strings.Join([]string{
+			sectionStyle.Render(fmt.Sprintf("PID %d", p.PID)),
+			fmt.Sprintf("%s %s", dimStyle.Render("USER"), p.User),
+			fmt.Sprintf("%s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("CPU"), p.CPU, dimStyle.Render("MEM"), p.Memory, dimStyle.Render("RSS"), bytes(p.RSS)),
+			dimStyle.Render("COMMAND") + "  " + truncate(p.Command, max(12, w-14)),
+		}, "\n")),
+		helpStyle.Render("[y/enter/click] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status),
+	}, "\n")
+}
+
 type metricCard struct{ title, value, detail string }
+
+const adminProcessRowStart = 7
 
 type dashboardLayout struct {
 	width       int
@@ -513,9 +855,12 @@ func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 		end := min(start+layout.metricCols, len(cards))
 		items := make([]string, 0, end-start)
 		for _, card := range cards[start:end] {
+			if len(items) > 0 {
+				items = append(items, " ")
+			}
 			items = append(items, render(card))
 		}
-		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, strings.Join(items, " ")))
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, items...))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -570,6 +915,20 @@ func actionCard(width int, key, title, detail string, dangerous bool) string {
 		label = dangerStyle.Render("["+key+"] ") + title
 	}
 	return style.Render(label + "\n" + dimStyle.Render(detail))
+}
+
+func compactButton(key, label string, dangerous bool) string {
+	style := compactButtonStyle
+	keyStyle := accentStyle
+	if dangerous {
+		style = compactDangerButtonStyle
+		keyStyle = dangerStyle
+	}
+	return style.Render(keyStyle.Render("["+key+"]") + " " + label)
+}
+
+func compactButtonWidth(key, label string) int {
+	return lipgloss.Width(compactButton(key, label, false))
 }
 
 func centeredPanel(width int, content string) string {
@@ -634,6 +993,17 @@ type processInfo struct {
 	User, Command string
 	CPU, Memory   float64
 	RSS, Elapsed  uint64
+}
+
+type processDetail struct {
+	PID, PPID, UID, Threads int
+	User, State, Name       string
+	CPU, Memory             float64
+	RSS, Elapsed            uint64
+	CommandLine             string
+	Executable              string
+	CWD                     string
+	StartTimeTicks          uint64
 }
 
 type cpuCounters struct{ total, idle uint64 }
@@ -844,23 +1214,110 @@ func readProcesses() ([]processInfo, error) {
 		if fields[6] == "ps" {
 			continue
 		}
-		processes = append(processes, processInfo{PID: pid, User: fields[1], CPU: cpu, Memory: memory, RSS: rss * 1024, Elapsed: elapsed, Command: strings.Join(fields[6:], " ")})
+		processes = append(processes, processInfo{
+			PID: pid, User: sanitizeTerminalText(fields[1]), CPU: cpu, Memory: memory,
+			RSS: rss * 1024, Elapsed: elapsed, Command: sanitizeTerminalText(strings.Join(fields[6:], " ")),
+		})
 	}
 	sort.SliceStable(processes, func(i, j int) bool { return processes[i].CPU > processes[j].CPU })
 	return processes, nil
 }
 
+func readProcessDetail(pid int) (processDetail, error) {
+	if pid <= 0 {
+		return processDetail{}, errors.New("invalid PID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,uid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,nlwp=,comm=").Output()
+	if err != nil {
+		return processDetail{}, fmt.Errorf("process no longer exists")
+	}
+	fields := strings.Fields(strings.TrimSpace(string(output)))
+	if len(fields) < 11 {
+		return processDetail{}, errors.New("incomplete process information")
+	}
+	detail := processDetail{}
+	detail.PID, _ = strconv.Atoi(fields[0])
+	detail.PPID, _ = strconv.Atoi(fields[1])
+	detail.UID, _ = strconv.Atoi(fields[2])
+	detail.User = sanitizeTerminalText(fields[3])
+	detail.State = sanitizeTerminalText(fields[4])
+	detail.CPU, _ = strconv.ParseFloat(fields[5], 64)
+	detail.Memory, _ = strconv.ParseFloat(fields[6], 64)
+	rss, _ := strconv.ParseUint(fields[7], 10, 64)
+	detail.RSS = rss * 1024
+	detail.Elapsed, _ = strconv.ParseUint(fields[8], 10, 64)
+	detail.Threads, _ = strconv.Atoi(fields[9])
+	detail.Name = sanitizeTerminalText(strings.Join(fields[10:], " "))
+
+	procRoot := fmt.Sprintf("/proc/%d", pid)
+	if commandLine, readErr := os.ReadFile(procRoot + "/cmdline"); readErr == nil {
+		detail.CommandLine = sanitizeTerminalText(strings.ReplaceAll(string(commandLine), "\x00", " "))
+	}
+	if detail.CommandLine == "" {
+		detail.CommandLine = detail.Name
+	}
+	if executable, readErr := os.Readlink(procRoot + "/exe"); readErr == nil {
+		detail.Executable = sanitizeTerminalText(executable)
+	} else {
+		detail.Executable = "unavailable"
+	}
+	if cwd, readErr := os.Readlink(procRoot + "/cwd"); readErr == nil {
+		detail.CWD = sanitizeTerminalText(cwd)
+	} else {
+		detail.CWD = "unavailable"
+	}
+	detail.StartTimeTicks, _ = readProcessStartTicks(pid)
+	return detail, nil
+}
+
+func readProcessStartTicks(pid int) (uint64, error) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	return parseProcessStartTicks(stat)
+}
+
+func parseProcessStartTicks(stat []byte) (uint64, error) {
+	// The command name in field 2 may contain spaces. Everything after its
+	// closing parenthesis starts at field 3; starttime is field 22.
+	closing := strings.LastIndexByte(string(stat), ')')
+	if closing < 0 || closing+2 >= len(stat) {
+		return 0, errors.New("invalid process stat")
+	}
+	fields := strings.Fields(string(stat[closing+2:]))
+	if len(fields) <= 19 {
+		return 0, errors.New("incomplete process stat")
+	}
+	return strconv.ParseUint(fields[19], 10, 64)
+}
+
+func sanitizeTerminalText(value string) string {
+	var safe strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		if !unicode.IsControl(r) {
+			safe.WriteRune(r)
+		}
+	}
+	return safe.String()
+}
+
 var (
-	titleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
-	sectionStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
-	valueStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Bold(true)
-	accentStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
-	dangerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80")).Bold(true)
-	dimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC"))
-	warningStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD180"))
-	helpStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDB4FF")).Bold(true)
-	processHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC")).Bold(true)
-	inputStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
+	titleStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
+	sectionStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
+	valueStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Bold(true)
+	accentStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
+	dangerStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80")).Bold(true)
+	dimStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC"))
+	warningStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD180"))
+	helpStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDB4FF")).Bold(true)
+	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC")).Bold(true)
+	inputStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
+	selectedRowStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true)
+	compactButtonStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#30374A")).Padding(0, 1)
+	compactDangerButtonStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFF4F2")).Background(lipgloss.Color("#5A3037")).Padding(0, 1)
 )
 
 func panelStyle(width int) lipgloss.Style {

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestAdminAuthenticationAndSelection(t *testing.T) {
@@ -27,8 +29,8 @@ func TestAdminAuthenticationAndSelection(t *testing.T) {
 		t.Fatalf("screen after password = %v, want admin", m.screen)
 	}
 	m.handleKey(testKey("2"))
-	if m.screen != screenConfirm || m.selected == nil || m.selected.label != "Reboot machine" {
-		t.Fatalf("selection = screen %v action %#v", m.screen, m.selected)
+	if m.screen != screenConfirm || m.selectedAction == nil || m.selectedAction.label != "Reboot machine" {
+		t.Fatalf("selection = screen %v action %#v", m.screen, m.selectedAction)
 	}
 }
 
@@ -61,9 +63,69 @@ func TestManagementCardsCanBeClicked(t *testing.T) {
 		}},
 		screen: screenAdmin,
 	}
-	m.handleClick(4, 8)
-	if m.screen != screenConfirm || m.selected == nil || m.selected.label != "Reboot machine" {
-		t.Fatalf("click should select reboot, got screen=%v action=%#v", m.screen, m.selected)
+	firstWidth := compactButtonWidth("1", "Restart monitor service")
+	m.handleClick(firstWidth+2, 2)
+	if m.screen != screenConfirm || m.selectedAction == nil || m.selectedAction.label != "Reboot machine" {
+		t.Fatalf("click should select reboot, got screen=%v action=%#v", m.screen, m.selectedAction)
+	}
+}
+
+func TestProcessFilterAndMouseSelection(t *testing.T) {
+	m := &monitorModel{
+		admin:  &adminController{},
+		screen: screenAdmin,
+		snapshot: monitorSnapshot{Processes: []processInfo{
+			{PID: 100, User: "root", Command: "python trainer.py"},
+			{PID: 200, User: "alice", Command: "sshd"},
+		}},
+	}
+	m.handleKey(testKey("/"))
+	_, _ = m.Update(tea.PasteMsg{Content: "train"})
+	m.handleKey(testKey("enter"))
+	filtered := m.filteredProcesses()
+	if len(filtered) != 1 || filtered[0].PID != 100 {
+		t.Fatalf("filtered processes = %#v", filtered)
+	}
+	m.handleClick(4, adminProcessRowStart)
+	if m.screen != screenProcessDetail || m.selectedProcess == nil || m.selectedProcess.PID != 100 {
+		t.Fatalf("process selection = screen %v process %#v", m.screen, m.selectedProcess)
+	}
+}
+
+func TestProcessSelectionScrollsWithTerminalHeight(t *testing.T) {
+	processes := make([]processInfo, 12)
+	for i := range processes {
+		processes[i] = processInfo{PID: 100 + i, Command: "worker"}
+	}
+	m := &monitorModel{height: 12, screen: screenAdmin, snapshot: monitorSnapshot{Processes: processes}}
+	for range 6 {
+		m.handleKey(testKey("down"))
+	}
+	if m.cursor != 6 || m.processOffset == 0 {
+		t.Fatalf("cursor=%d offset=%d, want a scrolled selection", m.cursor, m.processOffset)
+	}
+}
+
+func TestProtectedProcessesCannotBeTerminated(t *testing.T) {
+	if canTerminatePID(1) {
+		t.Fatal("PID 1 must be protected")
+	}
+	if canTerminatePID(os.Getpid()) {
+		t.Fatal("monitor process must be protected")
+	}
+	if got := sanitizeTerminalText("safe\x1b[2J\ntext"); got != "safe[2Jtext" {
+		t.Fatalf("sanitized text = %q", got)
+	}
+}
+
+func TestProcessStartTicksParserHandlesSpacesInName(t *testing.T) {
+	stat := []byte("123 (worker process) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242")
+	got, err := parseProcessStartTicks(stat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 424242 {
+		t.Fatalf("start ticks = %d", got)
 	}
 }
 
@@ -93,6 +155,19 @@ func TestDashboardLayoutUsesTerminalSize(t *testing.T) {
 	narrow := newDashboardLayout(70, 24, 1, false)
 	if narrow.metricCols != 1 || !narrow.compactGPU {
 		t.Fatalf("narrow layout = %#v, want one metric column and compact GPU", narrow)
+	}
+}
+
+func TestMetricCardsJoinHorizontally(t *testing.T) {
+	cards := []metricCard{
+		{"CPU", "1%", "load 0.1"},
+		{"MEMORY", "2 GiB", "10% used"},
+		{"DISK", "3 GiB", "20% used"},
+		{"NETWORK", "1 KiB/s", "2 KiB/s"},
+	}
+	rendered := renderMetricRows(cards, dashboardLayout{width: 161, metricCols: 4})
+	if height := lipgloss.Height(rendered); height != 4 {
+		t.Fatalf("metric cards height = %d, want one four-line row", height)
 	}
 }
 
