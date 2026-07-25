@@ -32,6 +32,19 @@ func TestAdminAuthenticationAndSelection(t *testing.T) {
 	}
 }
 
+func TestPasswordPasteAndLegacyKeyInput(t *testing.T) {
+	m := &monitorModel{admin: &adminController{password: "p@ss word"}, screen: screenPassword}
+	_, _ = m.Update(tea.PasteMsg{Content: "p@ss word\n"})
+	if m.password != "p@ss word" {
+		t.Fatalf("pasted password = %q", m.password)
+	}
+	m.password = ""
+	m.handleKey(tea.KeyPressMsg{Code: 'x'}) // Legacy terminals can omit Key.Text.
+	if m.password != "x" {
+		t.Fatalf("legacy key input = %q", m.password)
+	}
+}
+
 func TestDisabledManagementMode(t *testing.T) {
 	m := &monitorModel{admin: &adminController{}, screen: screenMonitor}
 	m.handleKey(testKey("m"))

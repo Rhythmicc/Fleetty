@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -166,8 +167,12 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
 		}
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m, m.handleKey(msg)
+	case tea.PasteMsg:
+		if m.screen == screenPassword {
+			m.appendPassword(msg.Content)
+		}
 	}
 	return m, nil
 }
@@ -204,9 +209,12 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "backspace", "delete":
 			m.password = trimLastRune(m.password)
 		default:
-			if text := msg.Key().Text; text != "" && len([]rune(m.password)) < 128 {
-				m.password += text
+			text := msg.Key().Text
+			// Some legacy SSH terminals provide Code/String but leave Text empty.
+			if text == "" && len([]rune(key)) == 1 {
+				text = key
 			}
+			m.appendPassword(text)
 		}
 	case screenAdmin:
 		switch key {
@@ -228,6 +236,23 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *monitorModel) appendPassword(text string) {
+	if text == "" || len([]rune(m.password)) >= 128 {
+		return
+	}
+	var accepted []rune
+	for _, r := range text {
+		if !unicode.IsControl(r) {
+			accepted = append(accepted, r)
+		}
+	}
+	remaining := 128 - len([]rune(m.password))
+	if len(accepted) > remaining {
+		accepted = accepted[:remaining]
+	}
+	m.password += string(accepted)
 }
 
 func (m *monitorModel) handleClick(x, y int) tea.Cmd {
@@ -387,7 +412,7 @@ func (m *monitorModel) passwordView() string {
 		"",
 		"Password: " + inputStyle.Render(masked+" "),
 		"",
-		dimStyle.Render("[enter] continue  [esc] return to monitor"),
+		dimStyle.Render("Type or paste password  ·  [enter] continue  [esc] return"),
 		warningStyle.Render(m.status),
 	}, "\n")
 	return centeredPanel(w, content)
