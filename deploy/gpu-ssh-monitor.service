@@ -1,5 +1,5 @@
 [Unit]
-Description=Go-native read-only GPU SSH terminal monitor
+Description=Go-native read-only machine SSH terminal monitor
 After=network-online.target
 Wants=network-online.target
 
