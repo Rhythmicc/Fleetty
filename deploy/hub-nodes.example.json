@@ -1,14 +1,17 @@
 {
+  "name": "Machine Hub",
   "refresh_seconds": 1,
   "nodes": [
     {
       "name": "server-1",
+      "profile": "gpu",
       "description": "Training node",
       "address": "192.0.2.10:23234",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     },
     {
       "name": "server-2",
+      "profile": "gpu",
       "description": "Inference node",
       "address": "192.0.2.11:23234",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"

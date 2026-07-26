@@ -25,6 +25,7 @@ const (
 )
 
 type hubConfig struct {
+	Name                string          `json:"name,omitempty"`
 	RefreshSeconds      int             `json:"refresh_seconds,omitempty"`
 	InsecureSkipHostKey bool            `json:"insecure_skip_host_key,omitempty"`
 	Nodes               []hubNodeConfig `json:"nodes"`
@@ -34,6 +35,7 @@ type hubNodeConfig struct {
 	Name                string `json:"name"`
 	Address             string `json:"address"`
 	Description         string `json:"description,omitempty"`
+	Profile             string `json:"profile,omitempty"`
 	HostKey             string `json:"host_key,omitempty"`
 	InsecureSkipHostKey bool   `json:"-"`
 }
@@ -54,11 +56,20 @@ func loadHubConfig(path string) (*hubConfig, error) {
 	if len(config.Nodes) == 0 {
 		return nil, errors.New("hub configuration has no nodes")
 	}
+	config.Name = sanitizeTerminalText(config.Name)
+	if config.Name == "" {
+		config.Name = "Machine Hub"
+	}
 	seen := make(map[string]struct{}, len(config.Nodes))
 	for index := range config.Nodes {
 		node := &config.Nodes[index]
 		node.Name = sanitizeTerminalText(node.Name)
 		node.Description = sanitizeTerminalText(node.Description)
+		rawProfile := strings.TrimSpace(node.Profile)
+		node.Profile = normalizeMachineProfile(rawProfile)
+		if rawProfile != "" && node.Profile == "" {
+			return nil, fmt.Errorf("hub node %q has invalid profile %q", node.Name, rawProfile)
+		}
 		node.Address = strings.TrimSpace(node.Address)
 		node.HostKey = strings.TrimSpace(node.HostKey)
 		node.InsecureSkipHostKey = config.InsecureSkipHostKey
@@ -74,6 +85,13 @@ func loadHubConfig(path string) (*hubConfig, error) {
 		}
 	}
 	return &config, nil
+}
+
+func (c hubConfig) displayName() string {
+	if name := sanitizeTerminalText(c.Name); name != "" {
+		return name
+	}
+	return "Machine Hub"
 }
 
 func (c hubConfig) refreshInterval() time.Duration {
@@ -397,7 +415,7 @@ func (m *hubModel) nodeAt(x, y int) (int, bool) {
 func (m *hubModel) View() tea.View {
 	if m.detail != nil {
 		view := m.detail.View()
-		view.WindowTitle = "GPU Monitor Hub · " + m.config.Nodes[m.cursor].Name
+		view.WindowTitle = m.config.displayName() + " · " + m.config.Nodes[m.cursor].Name
 		return view
 	}
 	body := m.hubView()
@@ -407,7 +425,7 @@ func (m *hubModel) View() tea.View {
 	view := tea.NewView(body)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	view.WindowTitle = "GPU Monitor Hub"
+	view.WindowTitle = m.config.displayName()
 	view.BackgroundColor, view.ForegroundColor = viewColors(m.colorMode)
 	return view
 }
@@ -420,7 +438,7 @@ func (m *hubModel) hubView() string {
 			online++
 		}
 	}
-	title := titleStyle.Render("GPU MONITOR HUB") + "  " + liveBadgeStyle.Render(fmt.Sprintf("%d/%d ONLINE", online, len(m.config.Nodes)))
+	title := titleStyle.Render(m.config.displayName()) + "  " + liveBadgeStyle.Render(fmt.Sprintf("%d/%d ONLINE", online, len(m.config.Nodes)))
 	meta := dimStyle.Render(fmt.Sprintf("%ds  ·  %s", int(m.config.refreshInterval().Seconds()), strings.ToUpper(m.colorMode.String())))
 	headerGap := max(2, width-lipgloss.Width(title)-lipgloss.Width(meta))
 	header := title + strings.Repeat(" ", headerGap) + meta
@@ -503,6 +521,17 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 	} else if !state.Snapshot.CollectedAt.IsZero() {
 		meta = fmt.Sprintf("%dms", state.Latency.Milliseconds())
 		snapshot := state.Snapshot
+		profile := snapshot.Profile
+		if profile == "" {
+			profile = node.Profile
+		}
+		if profile == machineProfileNAS {
+			content = renderNASHubCard(snapshot)
+			if state.Warning != "" {
+				content[4] = warningStyle.Render(truncate(state.Warning, width-4))
+			}
+			return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+		}
 		memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
 		disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
 		gpuUtil, gpuMemoryUsed, gpuMemoryTotal, maxTemperature := hubGPUStats(snapshot.GPUs)
@@ -531,6 +560,55 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		content[0] = strings.TrimSpace(content[0])
 	}
 	return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+}
+
+func renderNASHubCard(snapshot monitorSnapshot) []string {
+	filesystems := snapshot.Filesystems
+	if len(filesystems) == 0 {
+		filesystems = []filesystemInfo{{Mount: "/", Used: snapshot.DiskUsed, Total: snapshot.DiskTotal}}
+	}
+	worst := filesystems[0]
+	worstUsage := percent(worst.Used, worst.Total)
+	for _, filesystem := range filesystems[1:] {
+		if usage := percent(filesystem.Used, filesystem.Total); usage > worstUsage {
+			worst, worstUsage = filesystem, usage
+		}
+	}
+	storageStyle := dimStyle
+	if worstUsage >= 95 {
+		storageStyle = dangerStyle
+	} else if worstUsage >= 85 {
+		storageStyle = warningStyle
+	}
+	healthyHTTP := 0
+	for _, service := range snapshot.Services {
+		if service.Healthy {
+			healthyHTTP++
+		}
+	}
+	runningContainers := 0
+	for _, container := range snapshot.Containers {
+		if container.Running {
+			runningContainers++
+		}
+	}
+	containerHealth := healthCount(runningContainers, len(snapshot.Containers))
+	if snapshot.DockerError != "" {
+		containerHealth = dangerStyle.Render("unavailable")
+	}
+	return []string{
+		fmt.Sprintf("%s %s/s   %s %s/s",
+			networkRXStyle.Render("↓"), bytes(snapshot.NetworkRX),
+			networkTXStyle.Render("↑"), bytes(snapshot.NetworkTX)),
+		dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s", bytes(snapshot.NetworkRXTotal), bytes(snapshot.NetworkTXTotal))),
+		fmt.Sprintf("%s %d  %s",
+			diskTitleStyle.Render("DISK"), len(filesystems),
+			storageStyle.Render(fmt.Sprintf("MAX %.1f%% %s", worstUsage, truncate(worst.Mount, 12)))),
+		fmt.Sprintf("%s %s   %s %s",
+			processTitleStyle.Render("HTTP"), healthCount(healthyHTTP, len(snapshot.Services)),
+			accentStyle.Render("CTR"), containerHealth),
+		dimStyle.Render("Enter or click to open NAS details"),
+	}
 }
 
 func hubAge(duration time.Duration) string {

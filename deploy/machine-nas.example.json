@@ -1,0 +1,23 @@
+{
+  "name": "Storage NAS",
+  "profile": "nas",
+  "network_interfaces": [
+    "eno1"
+  ],
+  "mounts": [
+    "/",
+    "/mnt/storage-1",
+    "/mnt/storage-2"
+  ],
+  "docker": true,
+  "http_checks": [
+    {
+      "name": "Web console",
+      "url": "http://127.0.0.1/"
+    },
+    {
+      "name": "Metrics",
+      "url": "http://127.0.0.1:3000/"
+    }
+  ]
+}

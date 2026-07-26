@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -110,7 +113,7 @@ func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
 			{ID: 0, label: "Safe test action", command: "true"},
 		},
 	}
-	service := newNodeRPCService(admin)
+	service := newNodeRPCService(admin, machineConfig{Profile: machineProfileGPU})
 
 	denied := service.Handle(nodeRPCRequest{
 		Version:   nodeRPCVersion,
@@ -154,6 +157,7 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 
 	configPath := t.TempDir() + "/nodes.json"
 	configJSON := `{
+		"name": "Test Machine Hub",
 		"refresh_seconds": 3,
 		"nodes": [
 			{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:first"},
@@ -171,6 +175,9 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	}
 	if config.refreshInterval() != 3*time.Second || len(config.Nodes) != 4 {
 		t.Fatalf("unexpected hub config: %#v", config)
+	}
+	if config.displayName() != "Test Machine Hub" {
+		t.Fatalf("hub display name = %q", config.displayName())
 	}
 
 	model := &hubModel{
@@ -218,6 +225,89 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	}
 	if !strings.Contains(model.status, "offline") {
 		t.Fatalf("offline selection status = %q", model.status)
+	}
+}
+
+func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	configPath := t.TempDir() + "/machine.json"
+	configJSON := fmt.Sprintf(`{
+		"name": "Test NAS",
+		"profile": "nas",
+		"network_interfaces": ["eth0", "eth0"],
+		"mounts": ["/", "/"],
+		"docker": true,
+		"http_checks": [{"name": "API", "url": %q}]
+	}`, server.URL)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadMachineConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Profile != machineProfileNAS || config.Name != "Test NAS" {
+		t.Fatalf("unexpected machine config: %#v", config)
+	}
+	if len(config.NetworkInterfaces) != 1 || len(config.Mounts) != 1 {
+		t.Fatalf("machine config should remove duplicates: %#v", config)
+	}
+	services := checkHTTPServices(config.HTTPChecks)
+	if len(services) != 1 || !services[0].Healthy || services[0].Detail != "204" {
+		t.Fatalf("unexpected HTTP health result: %#v", services)
+	}
+
+	now := time.Now()
+	model := &monitorModel{
+		profile:  machineProfileNAS,
+		nodeName: "Test NAS",
+		snapshot: monitorSnapshot{
+			CollectedAt: now, Profile: machineProfileNAS, NodeName: "Test NAS",
+			CPUPercent: 12, LoadAverage: "load 0.1 · 0.2 · 0.3",
+			MemoryUsed: 4 << 30, MemoryTotal: 8 << 30,
+			NetworkRX: 10 << 20, NetworkTX: 20 << 20,
+			NetworkRXTotal: 20 << 40, NetworkTXTotal: 80 << 40,
+			NetworkInterfaces: []networkInterfaceInfo{{
+				Name: "eth0", RX: 10 << 20, TX: 20 << 20,
+				RXTotal: 20 << 40, TXTotal: 80 << 40, RXDrops: 2,
+			}},
+			Filesystems: []filesystemInfo{
+				{Mount: "/", Used: 100 << 30, Total: 1 << 40},
+				{Mount: "/mnt/NAS01", Used: 99 << 30, Total: 100 << 30},
+				{Mount: "/mnt/NAS02", Used: 90 << 30, Total: 100 << 30},
+				{Mount: "/mnt/NAS03", Used: 50 << 30, Total: 100 << 30},
+				{Mount: "/mnt/NAS04", Used: 25 << 30, Total: 100 << 30},
+			},
+			Services:   []serviceHealth{{Name: "API", Healthy: true, Detail: "200"}},
+			Containers: []containerInfo{{Name: "web", Running: true, State: "running"}},
+		},
+		cpuHistory:       []float64{10, 12},
+		networkRXHistory: []float64{1 << 20, 10 << 20},
+		networkTXHistory: []float64{2 << 20, 20 << 20},
+		colorMode:        colorModeDark,
+	}
+	for _, size := range []struct{ width, height int }{{140, 30}, {80, 24}, {50, 24}} {
+		model.width, model.height = size.width, size.height
+		rendered := model.monitorView()
+		if got := lipgloss.Height(rendered); got > size.height {
+			t.Fatalf("%dx%d NAS height = %d\n%s", size.width, size.height, got, rendered)
+		}
+		for index, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d NAS line %d width = %d\n%q", size.width, size.height, index, got, line)
+			}
+		}
+	}
+
+	hubCard := strings.Join(renderNASHubCard(model.snapshot), "\n")
+	for _, expected := range []string{"TOTAL", "DISK", "HTTP", "CTR"} {
+		if !strings.Contains(hubCard, expected) {
+			t.Fatalf("NAS Hub card missing %q: %s", expected, hubCard)
+		}
 	}
 }
 

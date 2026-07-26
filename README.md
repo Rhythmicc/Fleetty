@@ -1,6 +1,6 @@
 # GPU SSH Monitor
 
-GPU SSH Monitor 是一个面向 GPU 服务器的 SSH 监控界面。连接专用 SSH 端口后会直接进入终端仪表盘，不会获得服务器 shell。
+GPU SSH Monitor 是一个面向计算服务器和存储节点的 SSH 监控界面。连接专用 SSH 端口后会直接进入终端仪表盘，不会获得服务器 shell。
 
 它以单一可执行文件运行，适合为运维人员或服务器使用者提供统一、受控的主机状态入口。
 
@@ -15,7 +15,8 @@ GPU SSH Monitor 是一个面向 GPU 服务器的 SSH 监控界面。连接专用
 - 每个 SSH 会话独立的深色、浅色主题；
 - 鼠标和键盘操作；
 - 密码保护的管理模式；
-- 可选的多服务器 Hub 首页。
+- 可选的多服务器 Hub 首页；
+- 面向 NAS 的网络、存储、Docker 和 HTTP 服务监控页面。
 
 管理模式可以查看进程详情、过滤进程、发送 `SIGTERM`、重启监控服务或重启主机。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
 
@@ -115,9 +116,47 @@ ssh -p 23234 monitor@example-host
 
 支持鼠标的终端也可以直接点击进程和按钮。若 SSH 客户端不支持终端鼠标协议，请使用键盘操作。
 
+## NAS 监控页面
+
+将节点配置为 `nas` 后，默认页面会改为存储服务器视图，重点展示指定物理网卡的实时吞吐、累计流量、错误与丢包，各挂载点的容量告警，以及 Docker 容器和 HTTP 服务的健康状态。管理模式仍然可以查看和终止进程、重启监控服务或重启主机。
+
+下载 NAS 配置示例并按实际环境修改：
+
+```bash
+monitor_release_base="https://github.com/Rhythmicc/gpu-ssh-monitor/releases/latest/download"
+curl -fLO "${monitor_release_base}/machine-nas.example.json"
+
+sudo install -o root -g root -m 0600 \
+  machine-nas.example.json \
+  /etc/gpu-ssh-monitor/machine.json
+printf '%s\n' \
+  'MACHINE_CONFIG_FILE=/etc/gpu-ssh-monitor/machine.json' |
+  sudo tee /etc/gpu-ssh-monitor/machine.env >/dev/null
+sudo chmod 0600 /etc/gpu-ssh-monitor/machine.env
+sudo systemctl restart gpu-ssh-monitor.service
+```
+
+配置示例：
+
+```json
+{
+  "name": "Storage NAS",
+  "profile": "nas",
+  "network_interfaces": ["eno1"],
+  "mounts": ["/", "/mnt/storage-1", "/mnt/storage-2"],
+  "docker": true,
+  "http_checks": [
+    {"name": "Web console", "url": "http://127.0.0.1/"},
+    {"name": "Metrics", "url": "http://127.0.0.1:3000/"}
+  ]
+}
+```
+
+服务以 root 运行时可以只读访问 Docker 容器列表。HTTP 检查由节点本机发起，因此可以检查只监听 `127.0.0.1` 的服务。请只配置可信 URL；监控程序不会读取完整响应正文，也不会读取容器环境变量。
+
 ## 多服务器 Hub
 
-Hub 使用同一个 Go 可执行文件运行，并通过各节点现有的 23234 SSH 端口读取状态。连接 Hub 后会先看到所有服务器的简报，选择服务器即可进入该节点的完整监控和管理界面。
+Hub 使用同一个 Go 可执行文件运行，并通过各节点现有的 23234 SSH 端口读取状态。连接 Hub 后会先看到所有服务器的简报，选择服务器即可进入该节点的完整监控和管理界面。Hub 名称由配置文件中的 `name` 决定，可以为不同实验室或集群分别命名。
 
 Hub 不需要系统 SSH 账户，也不会在磁盘中保存节点管理密码。进入某个节点的管理模式时，密码会通过加密的 SSH 连接发送给该节点即时校验，并且只保留在当前 Hub 会话的内存中。
 
@@ -151,12 +190,21 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
 
 ```json
 {
+  "name": "Machine Hub",
   "refresh_seconds": 1,
   "nodes": [
     {
       "name": "training-1",
+      "profile": "gpu",
       "description": "Training node",
       "address": "192.0.2.10:23234",
+      "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
+    },
+    {
+      "name": "storage-1",
+      "profile": "nas",
+      "description": "Storage and services",
+      "address": "192.0.2.20:23234",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     }
   ]
@@ -232,6 +280,7 @@ sudo systemctl restart gpu-ssh-monitor.service
 | `SSH_PORT` | `23234` | 监听端口 |
 | `SSH_HOST_KEY_PATH` | `/etc/gpu-ssh-monitor/ssh_host_ed25519` | SSH host key |
 | `DEFAULT_THEME` | `dark` | 新连接的默认主题，可设为 `light` |
+| `MACHINE_CONFIG_FILE` | 空 | 节点角色、网卡、挂载点及服务检查 JSON 配置 |
 | `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
 | `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希；为空时禁用管理模式 |
 | `ADMIN_RESTART_MONITOR_CMD` | `systemctl restart gpu-ssh-monitor.service` | 重启监控服务命令 |

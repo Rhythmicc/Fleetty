@@ -1,5 +1,5 @@
 [Unit]
-Description=GPU SSH Monitor Hub
+Description=Machine SSH Monitor Hub
 After=network-online.target
 Wants=network-online.target
 

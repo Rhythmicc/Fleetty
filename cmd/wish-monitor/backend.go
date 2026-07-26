@@ -30,9 +30,9 @@ type localMonitorBackend struct {
 	remote    string
 }
 
-func newLocalMonitorBackend(admin *adminController, user, remote string) *localMonitorBackend {
+func newLocalMonitorBackend(admin *adminController, machine machineConfig, user, remote string) *localMonitorBackend {
 	return &localMonitorBackend{
-		collector: newMetricsCollector(),
+		collector: newMetricsCollector(machine),
 		admin:     admin,
 		user:      user,
 		remote:    remote,

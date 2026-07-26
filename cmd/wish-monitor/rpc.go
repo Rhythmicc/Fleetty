@@ -58,10 +58,10 @@ type nodeRPCService struct {
 	collectMu sync.Mutex
 }
 
-func newNodeRPCService(admin *adminController) *nodeRPCService {
+func newNodeRPCService(admin *adminController, machine machineConfig) *nodeRPCService {
 	return &nodeRPCService{
 		admin:   admin,
-		backend: newLocalMonitorBackend(admin, "hub", "node-rpc"),
+		backend: newLocalMonitorBackend(admin, machine, "hub", "node-rpc"),
 	}
 }
 

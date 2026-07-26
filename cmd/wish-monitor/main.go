@@ -36,8 +36,12 @@ func main() {
 	host := envString("SSH_HOST", "0.0.0.0")
 	port := envString("SSH_PORT", "23234")
 	hostKeyPath := envString("SSH_HOST_KEY_PATH", ".ssh/gpu-ssh-monitor_ed25519")
+	machine, err := loadMachineConfig(os.Getenv("MACHINE_CONFIG_FILE"))
+	if err != nil {
+		log.Fatal("Could not load machine configuration", "error", err)
+	}
 	admin := newAdminController()
-	rpc := newNodeRPCService(admin)
+	rpc := newNodeRPCService(admin, machine)
 	hub, err := loadHubConfig(os.Getenv("HUB_NODES_FILE"))
 	if err != nil {
 		log.Fatal("Could not load hub configuration", "error", err)
@@ -59,7 +63,7 @@ func main() {
 				if hubRuntime != nil {
 					return newHubModel(hubRuntime, sess, pty.Window.Width, pty.Window.Height), nil
 				}
-				return newMonitorModel(admin, sess, pty.Window.Width, pty.Window.Height), nil
+				return newMonitorModel(admin, machine, sess, pty.Window.Width, pty.Window.Height), nil
 			}),
 			activeterm.Middleware(),
 			nodeRPCMiddleware(rpc),
@@ -99,6 +103,7 @@ type monitorModel struct {
 	user             string
 	remote           string
 	nodeName         string
+	profile          string
 	width            int
 	height           int
 	snapshot         monitorSnapshot
@@ -141,16 +146,18 @@ const (
 	screenProcessTerminateConfirm
 )
 
-func newMonitorModel(admin *adminController, sess ssh.Session, width, height int) *monitorModel {
+func newMonitorModel(admin *adminController, machine machineConfig, sess ssh.Session, width, height int) *monitorModel {
 	remote := "local"
 	if addr := sess.RemoteAddr(); addr != nil {
 		remote = addr.String()
 	}
 	return &monitorModel{
-		backend:   newLocalMonitorBackend(admin, sess.User(), remote),
+		backend:   newLocalMonitorBackend(admin, machine, sess.User(), remote),
 		admin:     admin,
 		user:      sess.User(),
 		remote:    remote,
+		nodeName:  machine.Name,
+		profile:   machine.Profile,
 		width:     width,
 		height:    height,
 		status:    "Live data refreshes every second.",
@@ -165,6 +172,7 @@ func newRemoteMonitorModel(node hubNodeConfig, width, height int, mode colorMode
 		user:      "hub",
 		remote:    node.Name,
 		nodeName:  node.Name,
+		profile:   normalizeMachineProfile(node.Profile),
 		width:     width,
 		height:    height,
 		status:    "Remote data refreshes every second. Esc returns to the server list.",
@@ -230,6 +238,9 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotMsg:
 		m.collecting = false
 		m.snapshot = msg.snapshot
+		if msg.snapshot.Profile != "" {
+			m.profile = msg.snapshot.Profile
+		}
 		m.loadErr = msg.err
 		m.cpuHistory = appendHistory(m.cpuHistory, msg.snapshot.CPUPercent, 60)
 		m.networkRXHistory = appendHistory(m.networkRXHistory, float64(msg.snapshot.NetworkRX), 60)
@@ -650,11 +661,17 @@ func (m *monitorModel) View() tea.View {
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = "GPU SSH Monitor"
+	if m.profile == machineProfileNAS {
+		v.WindowTitle = "NAS Monitor"
+	}
 	v.BackgroundColor, v.ForegroundColor = viewColors(m.colorMode)
 	return v
 }
 
 func (m *monitorModel) monitorView() string {
+	if m.profile == machineProfileNAS || m.snapshot.Profile == machineProfileNAS {
+		return m.nasView()
+	}
 	layout := newDashboardLayout(m.width, m.height, len(m.snapshot.GPUs), m.snapshot.GPUError != "")
 	w := layout.width
 	header := dashboardHeader(w, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
@@ -697,7 +714,11 @@ func (m *monitorModel) monitorView() string {
 }
 
 func dashboardHeader(width int, collectedAt time.Time, mode colorMode, nodeName string) string {
-	title := titleStyle.Render("GPU SSH MONITOR")
+	return dashboardHeaderNamed("GPU SSH MONITOR", width, collectedAt, mode, nodeName)
+}
+
+func dashboardHeaderNamed(label string, width int, collectedAt time.Time, mode colorMode, nodeName string) string {
+	title := titleStyle.Render(label)
 	if nodeName != "" {
 		title += dimStyle.Render(" / ") + accentStyle.Render(truncate(nodeName, max(8, width/3)))
 	}
@@ -1263,6 +1284,8 @@ func (a *adminController) authenticate(password string) bool {
 
 type monitorSnapshot struct {
 	CollectedAt             time.Time
+	Profile                 string
+	NodeName                string
 	CPUPercent              float64
 	LoadAverage             string
 	MemoryUsed, MemoryTotal uint64
@@ -1270,6 +1293,11 @@ type monitorSnapshot struct {
 	NetworkRX, NetworkTX    uint64
 	NetworkRXTotal          uint64
 	NetworkTXTotal          uint64
+	NetworkInterfaces       []networkInterfaceInfo
+	Filesystems             []filesystemInfo
+	Services                []serviceHealth
+	Containers              []containerInfo
+	DockerError             string
 	GPUs                    []gpuInfo
 	GPUError                string
 	Processes               []processInfo
@@ -1306,11 +1334,17 @@ type processDetail struct {
 type cpuCounters struct{ total, idle uint64 }
 
 type metricsCollector struct {
-	previousCPU cpuCounters
-	previousNet netCounters
-	haveCPU     bool
-	haveNet     bool
-	lastNetAt   time.Time
+	config             machineConfig
+	previousCPU        cpuCounters
+	previousNet        netCounters
+	previousInterfaces map[string]networkDeviceCounters
+	haveCPU            bool
+	haveNet            bool
+	lastNetAt          time.Time
+	lastServiceAt      time.Time
+	cachedServices     []serviceHealth
+	cachedContainers   []containerInfo
+	cachedDockerError  string
 }
 
 type netCounters struct{ rx, tx uint64 }
@@ -1322,7 +1356,9 @@ func counterDelta(current, previous uint64) uint64 {
 	return current - previous
 }
 
-func newMetricsCollector() *metricsCollector { return &metricsCollector{} }
+func newMetricsCollector(config machineConfig) *metricsCollector {
+	return &metricsCollector{config: config, previousInterfaces: make(map[string]networkDeviceCounters)}
+}
 
 func (c *metricsCollector) collect() (monitorSnapshot, error) {
 	return c.collectWithProcesses(true)
@@ -1357,23 +1393,14 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 	} else {
 		s.DiskUsed, s.DiskTotal = used, total
 	}
-	if net, err := readNetwork(); err != nil {
+	if err := c.collectNetwork(&s); err != nil {
 		errs = append(errs, "network: "+err.Error())
-	} else {
-		s.NetworkRXTotal, s.NetworkTXTotal = net.rx, net.tx
-		if c.haveNet {
-			delta := time.Since(c.lastNetAt).Seconds()
-			if delta > 0 {
-				s.NetworkRX = uint64(float64(counterDelta(net.rx, c.previousNet.rx)) / delta)
-				s.NetworkTX = uint64(float64(counterDelta(net.tx, c.previousNet.tx)) / delta)
-			}
-			c.previousNet, c.lastNetAt = net, time.Now()
-		} else {
-			c.previousNet, c.haveNet, c.lastNetAt = net, true, time.Now()
-		}
 	}
 	s.LoadAverage = readLoadAverage()
-	s.GPUs, s.GPUError = readGPUs()
+	if c.config.Profile == machineProfileGPU {
+		s.GPUs, s.GPUError = readGPUs()
+	}
+	c.collectMachineDetails(&s)
 	if includeProcesses {
 		if processes, err := readProcesses(); err != nil {
 			errs = append(errs, "processes: "+err.Error())
