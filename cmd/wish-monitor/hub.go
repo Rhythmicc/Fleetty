@@ -756,9 +756,9 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 			healthyContainers++
 		}
 	}
-	containerHealth := healthCount(healthyContainers, len(snapshot.Containers))
+	containerHealth := compactHealthCount(healthyContainers, len(snapshot.Containers))
 	if snapshot.DockerError != "" {
-		containerHealth = dangerStyle.Render("unavailable")
+		containerHealth = dangerStyle.Render("ERR")
 	}
 	healthyPM2 := 0
 	for _, process := range snapshot.PM2Processes {
@@ -766,9 +766,9 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 			healthyPM2++
 		}
 	}
-	pm2Health := healthCount(healthyPM2, len(snapshot.PM2Processes))
+	pm2Health := compactHealthCount(healthyPM2, len(snapshot.PM2Processes))
 	if snapshot.PM2Error != "" {
-		pm2Health = dangerStyle.Render("unavailable")
+		pm2Health = dangerStyle.Render("ERR")
 	}
 	return []string{
 		fmt.Sprintf("%s %s/s   %s %s/s",
@@ -779,11 +779,22 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 			diskTitleStyle.Render("DISK"), len(filesystems),
 			storageStyle.Render(fmt.Sprintf("MAX %.1f%% %s", worstUsage, truncate(worst.Mount, 12)))),
 		fmt.Sprintf("%s %s  %s %s  %s %s",
-			processTitleStyle.Render("HTTP"), healthCount(healthyHTTP, len(snapshot.Services)),
+			processTitleStyle.Render("HTTP"), compactHealthCount(healthyHTTP, len(snapshot.Services)),
 			accentStyle.Render("CTR"), containerHealth,
 			gpuTitleStyle.Render("PM2"), pm2Health),
 		dimStyle.Render("Enter or click to open NAS details"),
 	}
+}
+
+func compactHealthCount(healthy, total int) string {
+	label := fmt.Sprintf("%d/%d", healthy, total)
+	if total == 0 {
+		return dimStyle.Render("—")
+	}
+	if healthy == total {
+		return processRunningStyle.Render(label)
+	}
+	return dangerStyle.Render(label)
 }
 
 func hubAge(duration time.Duration) string {
