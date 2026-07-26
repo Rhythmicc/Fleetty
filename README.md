@@ -14,7 +14,8 @@ GPU SSH Monitor 是一个面向 GPU 服务器的 SSH 监控界面。连接专用
 - 随终端尺寸自动调整的响应式布局；
 - 每个 SSH 会话独立的深色、浅色主题；
 - 鼠标和键盘操作；
-- 密码保护的管理模式。
+- 密码保护的管理模式；
+- 可选的多服务器 Hub 首页。
 
 管理模式可以查看进程详情、过滤进程、发送 `SIGTERM`、重启监控服务或重启主机。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
 
@@ -114,6 +115,84 @@ ssh -p 23234 monitor@example-host
 
 支持鼠标的终端也可以直接点击进程和按钮。若 SSH 客户端不支持终端鼠标协议，请使用键盘操作。
 
+## 多服务器 Hub
+
+Hub 使用同一个 Go 可执行文件运行，并通过各节点现有的 23234 SSH 端口读取状态。连接 Hub 后会先看到所有服务器的简报，选择服务器即可进入该节点的完整监控和管理界面。
+
+Hub 不需要系统 SSH 账户，也不会在磁盘中保存节点管理密码。进入某个节点的管理模式时，密码会通过加密的 SSH 连接发送给该节点即时校验，并且只保留在当前 Hub 会话的内存中。
+
+部署 Hub 前，应先将各监控节点升级到相同版本。
+
+### 创建节点配置
+
+先在准备运行 Hub 的服务器上取得各节点的 SSH host key 指纹：
+
+```bash
+ssh-keyscan -p 23234 192.0.2.10 2>/dev/null |
+  ssh-keygen -lf - -E sha256
+```
+
+复制示例配置并填写节点地址与指纹：
+
+```bash
+monitor_release_base="https://github.com/Rhythmicc/gpu-ssh-monitor/releases/latest/download"
+curl -fLO "${monitor_release_base}/hub-nodes.example.json"
+curl -fLO "${monitor_release_base}/gpu-ssh-monitor-hub.service"
+
+sudo install -o root -g root -m 0600 \
+  hub-nodes.example.json \
+  /etc/gpu-ssh-monitor/nodes.json
+sudo editor /etc/gpu-ssh-monitor/nodes.json
+```
+
+配置格式如下：
+
+```json
+{
+  "refresh_seconds": 2,
+  "nodes": [
+    {
+      "name": "training-1",
+      "description": "Training node",
+      "address": "192.0.2.10:23234",
+      "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
+    }
+  ]
+}
+```
+
+`host_key` 用于防止 Hub 连接到被冒充的节点。节点重新生成 SSH host key 后，需要同步更新这里的指纹。
+
+### 安装 Hub 服务
+
+Hub 默认监听 23235，可以和本机的 23234 节点监控服务共存：
+
+```bash
+sudo install -o root -g root -m 0644 \
+  gpu-ssh-monitor-hub.service \
+  /etc/systemd/system/gpu-ssh-monitor-hub.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now gpu-ssh-monitor-hub.service
+sudo systemctl status gpu-ssh-monitor-hub.service
+```
+
+连接 Hub：
+
+```bash
+ssh -p 23235 monitor@hub-host
+```
+
+| 按键 | 功能 |
+| --- | --- |
+| `↑` / `↓` / `←` / `→` | 选择服务器 |
+| `Enter` | 打开所选服务器 |
+| `Esc` | 从服务器详情返回 Hub 首页 |
+| `r` | 立即刷新所有服务器 |
+| `t` | 切换当前会话的深色、浅色主题 |
+| `q` | 退出 |
+
+首页和服务器卡片均支持鼠标点击。
+
 ## 启用管理模式
 
 管理模式默认关闭，配置管理密码后才会显示密码入口。推荐使用 bcrypt 哈希，不要保存明文密码。
@@ -151,6 +230,7 @@ sudo systemctl restart gpu-ssh-monitor.service
 | `SSH_PORT` | `23234` | 监听端口 |
 | `SSH_HOST_KEY_PATH` | `/etc/gpu-ssh-monitor/ssh_host_ed25519` | SSH host key |
 | `DEFAULT_THEME` | `dark` | 新连接的默认主题，可设为 `light` |
+| `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
 | `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希；为空时禁用管理模式 |
 | `ADMIN_RESTART_MONITOR_CMD` | `systemctl restart gpu-ssh-monitor.service` | 重启监控服务命令 |
 | `ADMIN_REBOOT_CMD` | `systemctl reboot` | 重启主机命令 |
@@ -187,6 +267,7 @@ sudo journalctl -u gpu-ssh-monitor.service -n 100 --no-pager
 - 无法连接：检查服务状态、TCP 23234 端口和防火墙规则；
 - GPU 区域不可用：确认 `nvidia-smi` 能以 root 身份正常执行；
 - 管理模式不可用：检查 `/etc/gpu-ssh-monitor/admin.env` 的权限和 `ADMIN_PASSWORD_HASH`；
+- Hub 节点离线：确认 Hub 能访问节点的 TCP 23234 端口，并检查 `host_key` 指纹；
 - 鼠标无法点击：改用键盘，或检查终端及 SSH 客户端的鼠标协议支持；
 - 界面字符错位：使用支持 Unicode 和等宽字符的终端字体。
 
@@ -200,3 +281,5 @@ sudo rm -r /opt/gpu-ssh-monitor
 ```
 
 如需同时删除管理配置和 SSH host key，再删除 `/etc/gpu-ssh-monitor`。
+
+安装了 Hub 时，先执行 `sudo systemctl disable --now gpu-ssh-monitor-hub.service`，并删除对应的 systemd 单元；`nodes.json` 中只包含节点地址和 host key 指纹，可以按需要保留或删除。

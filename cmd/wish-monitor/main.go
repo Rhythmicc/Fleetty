@@ -37,6 +37,15 @@ func main() {
 	port := envString("SSH_PORT", "23234")
 	hostKeyPath := envString("SSH_HOST_KEY_PATH", ".ssh/gpu-ssh-monitor_ed25519")
 	admin := newAdminController()
+	rpc := newNodeRPCService(admin)
+	hub, err := loadHubConfig(os.Getenv("HUB_NODES_FILE"))
+	if err != nil {
+		log.Fatal("Could not load hub configuration", "error", err)
+	}
+	var hubRuntime *hubService
+	if hub != nil {
+		hubRuntime = newHubService(*hub)
+	}
 
 	server, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
@@ -47,10 +56,14 @@ func main() {
 				if !ok {
 					return nil, nil
 				}
+				if hubRuntime != nil {
+					return newHubModel(hubRuntime, sess, pty.Window.Width, pty.Window.Height), nil
+				}
 				return newMonitorModel(admin, sess, pty.Window.Width, pty.Window.Height), nil
 			}),
 			activeterm.Middleware(),
-			accesscontrol.Middleware(),
+			nodeRPCMiddleware(rpc),
+			accesscontrol.Middleware(nodeRPCCommand),
 			logging.Middleware(),
 		),
 	)
@@ -81,10 +94,11 @@ func main() {
 // terminal programs. Every SSH session owns one small collector and Bubble Tea
 // program, so the monitor has no daemon process besides this Go binary.
 type monitorModel struct {
-	collector        *metricsCollector
+	backend          monitorBackend
 	admin            *adminController
 	user             string
 	remote           string
+	nodeName         string
 	width            int
 	height           int
 	snapshot         monitorSnapshot
@@ -101,6 +115,7 @@ type monitorModel struct {
 	detailErr        error
 	status           string
 	busy             bool
+	adminCredential  string
 	collecting       bool
 	cpuHistory       []float64
 	networkRXHistory []float64
@@ -132,7 +147,7 @@ func newMonitorModel(admin *adminController, sess ssh.Session, width, height int
 		remote = addr.String()
 	}
 	return &monitorModel{
-		collector: newMetricsCollector(),
+		backend:   newLocalMonitorBackend(admin, sess.User(), remote),
 		admin:     admin,
 		user:      sess.User(),
 		remote:    remote,
@@ -140,6 +155,20 @@ func newMonitorModel(admin *adminController, sess ssh.Session, width, height int
 		height:    height,
 		status:    "Live data refreshes every second.",
 		colorMode: parseColorMode(os.Getenv("DEFAULT_THEME")),
+	}
+}
+
+func newRemoteMonitorModel(node hubNodeConfig, width, height int, mode colorMode) *monitorModel {
+	return &monitorModel{
+		backend:   newRemoteMonitorBackend(node),
+		admin:     newRemoteAdminController(),
+		user:      "hub",
+		remote:    node.Name,
+		nodeName:  node.Name,
+		width:     width,
+		height:    height,
+		status:    "Remote data refreshes every second. Esc returns to the server list.",
+		colorMode: mode,
 	}
 }
 
@@ -154,6 +183,11 @@ func tick() tea.Cmd {
 type tickMsg struct{}
 type snapshotMsg struct {
 	snapshot monitorSnapshot
+	err      error
+}
+type authenticationResultMsg struct {
+	password string
+	ok       bool
 	err      error
 }
 type actionResultMsg struct {
@@ -173,7 +207,10 @@ type processTerminateResultMsg struct {
 
 func (m *monitorModel) collect() tea.Cmd {
 	return func() tea.Msg {
-		snapshot, err := m.collector.collect()
+		if m.backend == nil {
+			return snapshotMsg{err: errors.New("monitor backend is unavailable")}
+		}
+		snapshot, err := m.backend.Collect()
 		return snapshotMsg{snapshot: snapshot, err: err}
 	}
 }
@@ -198,6 +235,20 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.networkRXHistory = appendHistory(m.networkRXHistory, float64(msg.snapshot.NetworkRX), 60)
 		m.networkTXHistory = appendHistory(m.networkTXHistory, float64(msg.snapshot.NetworkTX), 60)
 		m.clampProcessCursor()
+	case authenticationResultMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.password, m.status = "", "Authentication failed: "+msg.err.Error()
+		} else if msg.ok {
+			credential := ""
+			if _, remote := m.backend.(*remoteMonitorBackend); remote {
+				credential = msg.password
+			}
+			m.screen, m.password, m.adminCredential = screenAdmin, "", credential
+			m.status = "Management mode enabled. Filter or select a process."
+		} else {
+			m.password, m.status = "", "Incorrect password. Try again or press Esc."
+		}
 	case tickMsg:
 		return m, tea.Batch(m.startCollect(), tick())
 	case actionResultMsg:
@@ -270,10 +321,10 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "esc":
 			m.screen, m.password, m.status = screenMonitor, "", "Management mode cancelled."
 		case "enter":
-			if m.admin.authenticate(m.password) {
-				m.screen, m.password, m.status = screenAdmin, "", "Management mode enabled. Filter or select a process."
-			} else {
-				m.password, m.status = "", "Incorrect password. Try again or press Esc."
+			if !m.busy && m.password != "" {
+				m.busy = true
+				m.status = "Authenticating with the selected node…"
+				return m.authenticate(m.password)
 			}
 		case "backspace", "delete":
 			m.password = trimLastRune(m.password)
@@ -309,7 +360,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		switch key {
 		case "esc", "q", "m":
-			m.screen, m.status = screenMonitor, "Returned to read-only monitor."
+			m.screen, m.status, m.adminCredential = screenMonitor, "Returned to read-only monitor.", ""
 		case "1", "2":
 			m.selectAction(int(key[0] - '1'))
 		case "/":
@@ -523,29 +574,20 @@ func (m *monitorModel) openProcess(index int) tea.Cmd {
 
 func (m *monitorModel) loadProcessDetail(pid int) tea.Cmd {
 	return func() tea.Msg {
-		detail, err := readProcessDetail(pid)
+		if m.backend == nil {
+			return processDetailMsg{pid: pid, err: errors.New("monitor backend is unavailable")}
+		}
+		detail, err := m.backend.ProcessDetail(pid, m.adminCredential)
 		return processDetailMsg{pid: pid, detail: detail, err: err}
 	}
 }
 
 func (m *monitorModel) terminateProcess(pid int, expectedStartTicks uint64) tea.Cmd {
-	user, remote := m.user, m.remote
 	return func() tea.Msg {
-		if !canTerminatePID(pid) {
-			return processTerminateResultMsg{pid: pid, err: errors.New("protected process")}
+		if m.backend == nil {
+			return processTerminateResultMsg{pid: pid, err: errors.New("monitor backend is unavailable")}
 		}
-		currentStartTicks, err := readProcessStartTicks(pid)
-		if err != nil {
-			return processTerminateResultMsg{pid: pid, err: errors.New("process no longer exists")}
-		}
-		if expectedStartTicks == 0 || currentStartTicks != expectedStartTicks {
-			return processTerminateResultMsg{pid: pid, err: errors.New("process identity changed; reload details")}
-		}
-		process, err := os.FindProcess(pid)
-		if err == nil {
-			err = process.Signal(syscall.SIGTERM)
-		}
-		log.Info("Process termination requested", "pid", pid, "signal", "SIGTERM", "user", user, "remote", remote, "error", err)
+		err := m.backend.TerminateProcess(pid, expectedStartTicks, m.adminCredential)
 		return processTerminateResultMsg{pid: pid, err: err}
 	}
 }
@@ -563,16 +605,25 @@ func (m *monitorModel) selectedProcessCanTerminate() bool {
 }
 
 func (m *monitorModel) runAction(action adminAction) tea.Cmd {
-	user, remote := m.user, m.remote
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		output, err := exec.CommandContext(ctx, "sh", "-c", action.command).CombinedOutput()
-		if ctx.Err() == context.DeadlineExceeded {
-			err = fmt.Errorf("timed out")
+		if m.backend == nil {
+			return actionResultMsg{action: action, err: errors.New("monitor backend is unavailable")}
 		}
-		log.Info("Management action requested", "action", action.label, "user", user, "remote", remote, "error", err)
-		return actionResultMsg{action: action, output: string(output), err: err}
+		output, err := m.backend.RunAction(action.ID, m.adminCredential)
+		return actionResultMsg{action: action, output: output, err: err}
+	}
+}
+
+func (m *monitorModel) authenticate(password string) tea.Cmd {
+	return func() tea.Msg {
+		if m.backend == nil {
+			if m.admin != nil {
+				return authenticationResultMsg{password: password, ok: m.admin.authenticate(password)}
+			}
+			return authenticationResultMsg{password: password, err: errors.New("monitor backend is unavailable")}
+		}
+		ok, err := m.backend.Authenticate(password)
+		return authenticationResultMsg{password: password, ok: ok, err: err}
 	}
 }
 
@@ -606,7 +657,7 @@ func (m *monitorModel) View() tea.View {
 func (m *monitorModel) monitorView() string {
 	layout := newDashboardLayout(m.width, m.height, len(m.snapshot.GPUs), m.snapshot.GPUError != "")
 	w := layout.width
-	header := dashboardHeader(w, m.snapshot.CollectedAt, m.colorMode)
+	header := dashboardHeader(w, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
 	if m.snapshot.CollectedAt.IsZero() {
 		return strings.Join([]string{header, "", panelStyle(w).Render("Collecting system metrics…")}, "\n")
 	}
@@ -645,8 +696,11 @@ func (m *monitorModel) monitorView() string {
 	return strings.Join([]string{header, metricRows, gpu, processes, footer}, "\n")
 }
 
-func dashboardHeader(width int, collectedAt time.Time, mode colorMode) string {
+func dashboardHeader(width int, collectedAt time.Time, mode colorMode, nodeName string) string {
 	title := titleStyle.Render("GPU SSH MONITOR")
+	if nodeName != "" {
+		title += dimStyle.Render(" / ") + accentStyle.Render(truncate(nodeName, max(8, width/3)))
+	}
 	live := liveBadgeStyle.Render("● LIVE")
 	clock := "--:--:--"
 	if !collectedAt.IsZero() {
@@ -1168,6 +1222,7 @@ func centeredPanel(width int, content string) string {
 }
 
 type adminAction struct {
+	ID          int
 	label       string
 	description string
 	command     string
@@ -1184,10 +1239,17 @@ func newAdminController() *adminController {
 		password:     os.Getenv("ADMIN_PASSWORD"),
 		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
 		actions: []adminAction{
-			{label: "Restart monitor service", description: "Restart the GPU SSH monitor service.", command: envString("ADMIN_RESTART_MONITOR_CMD", "systemctl restart gpu-ssh-monitor.service")},
-			{label: "Reboot machine", description: "Restart the entire host. Active workloads will be interrupted.", command: envString("ADMIN_REBOOT_CMD", "systemctl reboot")},
+			{ID: 0, label: "Restart monitor service", description: "Restart the GPU SSH monitor service.", command: envString("ADMIN_RESTART_MONITOR_CMD", "systemctl restart gpu-ssh-monitor.service")},
+			{ID: 1, label: "Reboot machine", description: "Restart the entire host. Active workloads will be interrupted.", command: envString("ADMIN_REBOOT_CMD", "systemctl reboot")},
 		},
 	}
+}
+
+func newRemoteAdminController() *adminController {
+	admin := newAdminController()
+	admin.password = "remote"
+	admin.passwordHash = ""
+	return admin
 }
 
 func (a *adminController) enabled() bool { return a.password != "" || a.passwordHash != "" }
@@ -1263,6 +1325,14 @@ func counterDelta(current, previous uint64) uint64 {
 func newMetricsCollector() *metricsCollector { return &metricsCollector{} }
 
 func (c *metricsCollector) collect() (monitorSnapshot, error) {
+	return c.collectWithProcesses(true)
+}
+
+func (c *metricsCollector) collectSummary() (monitorSnapshot, error) {
+	return c.collectWithProcesses(false)
+}
+
+func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorSnapshot, error) {
 	s := monitorSnapshot{CollectedAt: time.Now()}
 	var errs []string
 	if counters, err := readCPUCounters(); err != nil {
@@ -1304,10 +1374,12 @@ func (c *metricsCollector) collect() (monitorSnapshot, error) {
 	}
 	s.LoadAverage = readLoadAverage()
 	s.GPUs, s.GPUError = readGPUs()
-	if processes, err := readProcesses(); err != nil {
-		errs = append(errs, "processes: "+err.Error())
-	} else {
-		s.Processes = processes
+	if includeProcesses {
+		if processes, err := readProcesses(); err != nil {
+			errs = append(errs, "processes: "+err.Error())
+		} else {
+			s.Processes = processes
+		}
 	}
 	if len(errs) > 0 {
 		return s, errors.New(strings.Join(errs, "; "))
