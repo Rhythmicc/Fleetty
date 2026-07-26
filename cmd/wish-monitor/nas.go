@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -31,17 +32,16 @@ func (m *monitorModel) nasView() string {
 
 	baseHeight := lipgloss.Height(header) + lipgloss.Height(system) + lipgloss.Height(network) + 1
 	available := max(3, height-baseHeight)
+	filesystemCount := max(1, len(m.snapshot.Filesystems))
+	storageRows := min(filesystemCount, max(1, available-2))
 	serviceRows := 0
-	if available >= 7 {
-		serviceRows = min(2, available-5)
-	}
-	serviceHeight := 0
-	if serviceRows > 0 {
-		serviceHeight = serviceRows + 2
-	}
-	storageRows := max(1, available-serviceHeight-2)
-	if len(m.snapshot.Filesystems) > 0 {
-		storageRows = min(storageRows, len(m.snapshot.Filesystems))
+	if desired := m.nasServiceContentRows(); desired > 0 && available >= 7 {
+		maxServiceRows := available - storageRows - 4
+		if maxServiceRows < 2 {
+			storageRows = max(1, available-6)
+			maxServiceRows = available - storageRows - 4
+		}
+		serviceRows = min(desired, max(2, maxServiceRows))
 	}
 
 	sections := []string{
@@ -156,47 +156,217 @@ func (m *monitorModel) nasServicesPanel(width, rows int) string {
 			healthyHTTP++
 		}
 	}
-	runningContainers := 0
+	healthyContainers := 0
 	for _, container := range m.snapshot.Containers {
-		if container.Running {
-			runningContainers++
+		if dockerContainerHealthy(container) {
+			healthyContainers++
 		}
 	}
-	containerHealth := healthCount(runningContainers, len(m.snapshot.Containers))
+	containerHealth := healthCount(healthyContainers, len(m.snapshot.Containers))
 	if m.snapshot.DockerError != "" {
 		containerHealth = dangerStyle.Render("unavailable")
 	}
+	healthyPM2 := 0
+	for _, process := range m.snapshot.PM2Processes {
+		if strings.EqualFold(process.Status, "online") {
+			healthyPM2++
+		}
+	}
+	pm2Health := healthCount(healthyPM2, len(m.snapshot.PM2Processes))
+	if m.snapshot.PM2Error != "" {
+		pm2Health = dangerStyle.Render("unavailable")
+	}
 	lines := []string{
-		fmt.Sprintf("%s %s   %s %s",
+		fmt.Sprintf("%s %s   %s %s   %s %s",
 			processTitleStyle.Render("HTTP"),
 			healthCount(healthyHTTP, len(m.snapshot.Services)),
 			accentStyle.Render("DOCKER"),
-			containerHealth),
+			containerHealth,
+			gpuTitleStyle.Render("PM2"),
+			pm2Health),
 	}
-	var problems []string
-	for _, service := range m.snapshot.Services {
-		if !service.Healthy {
-			problems = append(problems, service.Name+" "+service.Detail)
+
+	type serviceSection struct {
+		header string
+		rows   []string
+	}
+	var sections []serviceSection
+	if len(m.snapshot.Containers) > 0 || m.snapshot.DockerError != "" {
+		dockerRows := make([]string, 0, len(m.snapshot.Containers))
+		for _, container := range m.snapshot.Containers {
+			dockerRows = append(dockerRows, renderDockerContainerRow(container, width-4))
 		}
-	}
-	for _, container := range m.snapshot.Containers {
-		if !container.Running {
-			problems = append(problems, container.Name+" "+container.State)
+		if m.snapshot.DockerError != "" {
+			dockerRows = []string{dangerStyle.Render("Docker unavailable: " + m.snapshot.DockerError)}
 		}
+		sections = append(sections, serviceSection{
+			header: accentStyle.Render("DOCKER") + dimStyle.Render("  NAME · IMAGE · CPU · MEMORY · NET I/O · PIDS · RESTARTS · PORTS"),
+			rows:   dockerRows,
+		})
 	}
-	if m.snapshot.DockerError != "" {
-		problems = append(problems, "docker "+m.snapshot.DockerError)
+	if len(m.snapshot.PM2Processes) > 0 || m.snapshot.PM2Error != "" {
+		pm2Rows := make([]string, 0, len(m.snapshot.PM2Processes))
+		for _, process := range m.snapshot.PM2Processes {
+			pm2Rows = append(pm2Rows, renderPM2ProcessRow(process, width-4))
+		}
+		if m.snapshot.PM2Error != "" {
+			pm2Rows = []string{dangerStyle.Render("PM2 unavailable: " + m.snapshot.PM2Error)}
+		}
+		sections = append(sections, serviceSection{
+			header: gpuTitleStyle.Render("PM2") + dimStyle.Render("  ID · NAME · PID · CPU · MEMORY · UPTIME · RESTARTS · MODE"),
+			rows:   pm2Rows,
+		})
 	}
-	if len(problems) == 0 {
-		lines = append(lines, processRunningStyle.Render("● All configured services are healthy"))
-	} else {
-		lines = append(lines, dangerStyle.Render("● "+strings.Join(problems, " · ")))
+	if len(m.snapshot.Services) > 0 {
+		httpRows := make([]string, 0, len(m.snapshot.Services))
+		for _, service := range m.snapshot.Services {
+			httpRows = append(httpRows, renderHTTPServiceRow(service, width-4))
+		}
+		sections = append(sections, serviceSection{
+			header: processTitleStyle.Render("HTTP") + dimStyle.Render("  ENDPOINT · RESPONSE · LATENCY"),
+			rows:   httpRows,
+		})
 	}
+
 	rows = max(1, rows)
-	if len(lines) > rows {
-		lines = lines[:rows]
+	remaining := rows - len(lines)
+	included := make([]bool, len(sections))
+	allocated := make([]int, len(sections))
+	for index, section := range sections {
+		cost := 1
+		if len(section.rows) > 0 {
+			cost++
+		}
+		if remaining < cost {
+			continue
+		}
+		included[index] = true
+		allocated[index] = min(1, len(section.rows))
+		remaining -= cost
+	}
+	for remaining > 0 {
+		progress := false
+		for index, section := range sections {
+			if !included[index] || allocated[index] >= len(section.rows) {
+				continue
+			}
+			allocated[index]++
+			remaining--
+			progress = true
+			if remaining == 0 {
+				break
+			}
+		}
+		if !progress {
+			break
+		}
+	}
+	for index, section := range sections {
+		if !included[index] {
+			continue
+		}
+		lines = append(lines, section.header)
+		lines = append(lines, section.rows[:allocated[index]]...)
 	}
 	return btopPanel(width, "SERVICES", "HEALTH", strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
+}
+
+func (m *monitorModel) nasServiceContentRows() int {
+	rows := 1
+	if len(m.snapshot.Containers) > 0 || m.snapshot.DockerError != "" {
+		rows += 1 + max(1, len(m.snapshot.Containers))
+	}
+	if len(m.snapshot.PM2Processes) > 0 || m.snapshot.PM2Error != "" {
+		rows += 1 + max(1, len(m.snapshot.PM2Processes))
+	}
+	if len(m.snapshot.Services) > 0 {
+		rows += 1 + len(m.snapshot.Services)
+	}
+	return rows
+}
+
+func dockerContainerHealthy(container containerInfo) bool {
+	return container.Running && !strings.EqualFold(container.Health, "unhealthy")
+}
+
+func renderDockerContainerRow(container containerInfo, width int) string {
+	state := strings.ToUpper(container.State)
+	style := processStoppedStyle
+	switch {
+	case container.Running && strings.EqualFold(container.Health, "unhealthy"):
+		state, style = "BAD", processZombieStyle
+	case container.Running && strings.EqualFold(container.Health, "starting"):
+		state, style = "START", processWaitingStyle
+	case container.Running:
+		state, style = "UP", processRunningStyle
+	case state == "":
+		state = "DOWN"
+	}
+	image := truncate(container.Image, 18)
+	name := truncate(container.Name, 20)
+	ports := container.Ports
+	if ports == "" {
+		ports = "no ports"
+	}
+	tail := ports
+	if !container.Running && container.Status != "" {
+		tail = container.Status
+	}
+	var line string
+	switch {
+	case width >= 132:
+		line = fmt.Sprintf("%-5s %-18s %-16s CPU %5.1f%%  MEM %s/%s  NET ↓%s ↑%s  BLK ↓%s ↑%s  UP %-7s  PID %d  RST %d  %s",
+			state, truncate(name, 18), truncate(image, 16), container.CPU,
+			bytes(container.MemoryUsed), bytes(container.MemoryLimit),
+			bytes(container.NetworkRX), bytes(container.NetworkTX),
+			bytes(container.BlockRead), bytes(container.BlockWrite),
+			elapsed(container.Uptime), container.PIDs, container.Restarts, tail)
+	case width >= 92:
+		line = fmt.Sprintf("%-5s %-18s CPU %5.1f%%  MEM %s/%s  UP %-7s  RST %2d  %s",
+			state, name, container.CPU, bytes(container.MemoryUsed), bytes(container.MemoryLimit),
+			elapsed(container.Uptime), container.Restarts, tail)
+	case width >= 62:
+		line = fmt.Sprintf("%-5s %-18s CPU %5.1f%%  MEM %-9s  RST %d",
+			state, name, container.CPU, bytes(container.MemoryUsed), container.Restarts)
+	default:
+		line = fmt.Sprintf("%-5s %s · %s", state, name, tail)
+	}
+	return style.Render(truncate(line, width))
+}
+
+func renderPM2ProcessRow(process pm2ProcessInfo, width int) string {
+	state := strings.ToUpper(process.Status)
+	style := processStoppedStyle
+	if strings.EqualFold(process.Status, "online") {
+		state, style = "ONLINE", processRunningStyle
+	} else if strings.EqualFold(process.Status, "launching") {
+		style = processWaitingStyle
+	}
+	name := truncate(process.Name, 26)
+	var line string
+	switch {
+	case width >= 112:
+		line = fmt.Sprintf("%-7s %2d  %-26s PID %-7d CPU %5.1f%%  MEM %-9s  UP %-8s  RST %2d  %s",
+			state, process.ID, name, process.PID, process.CPU, bytes(process.Memory),
+			elapsed(process.Uptime), process.Restarts, process.Mode)
+	case width >= 76:
+		line = fmt.Sprintf("%-7s %2d  %-22s CPU %5.1f%%  MEM %-9s  UP %-8s  RST %d",
+			state, process.ID, name, process.CPU, bytes(process.Memory), elapsed(process.Uptime), process.Restarts)
+	default:
+		line = fmt.Sprintf("%-7s %2d  %s · %s · RST %d",
+			state, process.ID, name, bytes(process.Memory), process.Restarts)
+	}
+	return style.Render(truncate(line, width))
+}
+
+func renderHTTPServiceRow(service serviceHealth, width int) string {
+	state, style := "DOWN", processStoppedStyle
+	if service.Healthy {
+		state, style = "UP", processRunningStyle
+	}
+	line := fmt.Sprintf("%-5s %-28s HTTP %-4s  %s",
+		state, truncate(service.Name, 28), service.Detail, service.Latency.Round(time.Millisecond))
+	return style.Render(truncate(line, width))
 }
 
 func healthCount(healthy, total int) string {

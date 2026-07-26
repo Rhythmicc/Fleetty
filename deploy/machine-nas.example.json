@@ -10,6 +10,7 @@
     "/mnt/storage-2"
   ],
   "docker": true,
+  "pm2_user": "service-account",
   "http_checks": [
     {
       "name": "Web console",

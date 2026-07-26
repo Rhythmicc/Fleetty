@@ -1298,6 +1298,8 @@ type monitorSnapshot struct {
 	Services                []serviceHealth
 	Containers              []containerInfo
 	DockerError             string
+	PM2Processes            []pm2ProcessInfo
+	PM2Error                string
 	GPUs                    []gpuInfo
 	GPUError                string
 	Processes               []processInfo
@@ -1345,6 +1347,8 @@ type metricsCollector struct {
 	cachedServices     []serviceHealth
 	cachedContainers   []containerInfo
 	cachedDockerError  string
+	cachedPM2Processes []pm2ProcessInfo
+	cachedPM2Error     string
 }
 
 type netCounters struct{ rx, tx uint64 }

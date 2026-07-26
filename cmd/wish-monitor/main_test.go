@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -316,6 +317,7 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 		"network_interfaces": ["eth0", "eth0"],
 		"mounts": ["/", "/"],
 		"docker": true,
+		"pm2_user": "ssslab",
 		"http_checks": [{"name": "API", "url": %q}]
 	}`, server.URL)
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -330,6 +332,9 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 	}
 	if len(config.NetworkInterfaces) != 1 || len(config.Mounts) != 1 {
 		t.Fatalf("machine config should remove duplicates: %#v", config)
+	}
+	if config.PM2User != "ssslab" {
+		t.Fatalf("PM2 user = %q, want ssslab", config.PM2User)
 	}
 	services := checkHTTPServices(config.HTTPChecks)
 	if len(services) != 1 || !services[0].Healthy || services[0].Detail != "204" {
@@ -357,8 +362,16 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 				{Mount: "/mnt/NAS03", Used: 50 << 30, Total: 100 << 30},
 				{Mount: "/mnt/NAS04", Used: 25 << 30, Total: 100 << 30},
 			},
-			Services:   []serviceHealth{{Name: "API", Healthy: true, Detail: "200"}},
-			Containers: []containerInfo{{Name: "web", Running: true, State: "running"}},
+			Services: []serviceHealth{{Name: "API", Healthy: true, Detail: "200", Latency: 12 * time.Millisecond}},
+			Containers: []containerInfo{{
+				Name: "web", Image: "nginx:latest", Running: true, State: "running", Health: "healthy",
+				CPU: 1.2, MemoryUsed: 64 << 20, NetworkRX: 2 << 20, NetworkTX: 1 << 20,
+				PIDs: 8, Restarts: 1, Uptime: 3600, Ports: "80→80/tcp",
+			}},
+			PM2Processes: []pm2ProcessInfo{{
+				ID: 0, PID: 1234, Name: "web-console", Status: "online", Mode: "fork",
+				CPU: 0.3, Memory: 48 << 20, Uptime: 7200, Restarts: 2,
+			}},
 		},
 		cpuHistory:       []float64{10, 12},
 		networkRXHistory: []float64{1 << 20, 10 << 20},
@@ -368,6 +381,13 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{140, 30}, {80, 24}, {50, 24}} {
 		model.width, model.height = size.width, size.height
 		rendered := model.monitorView()
+		if size.width == 140 {
+			for _, expected := range []string{"DOCKER", "nginx:latest", "PM2", "web-console"} {
+				if !strings.Contains(rendered, expected) {
+					t.Fatalf("%dx%d NAS view missing %q\n%s", size.width, size.height, expected, rendered)
+				}
+			}
+		}
 		if got := lipgloss.Height(rendered); got > size.height {
 			t.Fatalf("%dx%d NAS height = %d\n%s", size.width, size.height, got, rendered)
 		}
@@ -379,9 +399,129 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 	}
 
 	hubCard := strings.Join(renderNASHubCard(model.snapshot), "\n")
-	for _, expected := range []string{"TOTAL", "DISK", "HTTP", "CTR"} {
+	for _, expected := range []string{"TOTAL", "DISK", "HTTP", "CTR", "PM2"} {
 		if !strings.Contains(hubCard, expected) {
 			t.Fatalf("NAS Hub card missing %q: %s", expected, hubCard)
+		}
+	}
+}
+
+func TestDockerAPICollectionIncludesRuntimeDetails(t *testing.T) {
+	started := time.Now().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/containers/json":
+			_, _ = response.Write([]byte(`[
+				{"Id":"abc","Names":["/web"],"Image":"nginx:latest","State":"running","Status":"Up 2 hours (healthy)","Ports":[{"PrivatePort":80,"PublicPort":8080,"Type":"tcp"}]},
+				{"Id":"def","Names":["/old"],"Image":"busybox","State":"exited","Status":"Exited (0) 1 day ago","Ports":[]}
+			]`))
+		case "/containers/abc/json":
+			_, _ = fmt.Fprintf(response, `{"Name":"/web","RestartCount":3,"State":{"Status":"running","Running":true,"StartedAt":%q,"Health":{"Status":"healthy"}}}`, started)
+		case "/containers/abc/stats":
+			_, _ = response.Write([]byte(`{
+				"cpu_stats":{"cpu_usage":{"total_usage":300,"percpu_usage":[1,1]},"system_cpu_usage":1000,"online_cpus":2},
+				"precpu_stats":{"cpu_usage":{"total_usage":100},"system_cpu_usage":500},
+				"memory_stats":{"usage":104857600,"limit":1073741824,"stats":{"inactive_file":10485760}},
+				"networks":{"eth0":{"rx_bytes":2048,"tx_bytes":4096}},
+				"blkio_stats":{"io_service_bytes_recursive":[{"op":"read","value":8192},{"op":"write","value":16384}]},
+				"pids_stats":{"current":7}
+			}`))
+		case "/containers/def/json":
+			_, _ = response.Write([]byte(`{"Name":"/old","RestartCount":1,"State":{"Status":"exited","Running":false,"StartedAt":"0001-01-01T00:00:00Z"}}`))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	containers, err := readDockerContainersFrom(context.Background(), server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(containers) != 2 || containers[0].Name != "web" || !containers[0].Running {
+		t.Fatalf("unexpected Docker containers: %#v", containers)
+	}
+	web := containers[0]
+	if web.Health != "healthy" || web.Restarts != 3 || web.PIDs != 7 || web.Ports != "8080→80/tcp" {
+		t.Fatalf("missing Docker metadata: %#v", web)
+	}
+	if web.CPU != 80 || web.MemoryUsed != 90<<20 || web.NetworkRX != 2048 || web.BlockWrite != 16384 {
+		t.Fatalf("missing Docker runtime stats: %#v", web)
+	}
+	if containers[1].Name != "old" || containers[1].Running {
+		t.Fatalf("stopped container ordering/state = %#v", containers[1])
+	}
+}
+
+func TestPM2ProcessParser(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	data := []byte(`[
+		{"pid":1234,"name":"web","pm_id":2,"monit":{"cpu":1.5,"memory":50331648},"pm2_env":{"status":"online","namespace":"default","exec_mode":"fork_mode","pm_uptime":1785060000000,"restart_time":4,"unstable_restarts":1}},
+		{"pid":0,"name":"worker","pm_id":1,"monit":{"cpu":0,"memory":0},"pm2_env":{"status":"stopped","namespace":"jobs","exec_mode":"cluster_mode","pm_uptime":0,"restart_time":2,"unstable_restarts":0}}
+	]`)
+	processes, err := parsePM2Processes(data, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 2 || processes[0].ID != 1 || processes[1].ID != 2 {
+		t.Fatalf("PM2 processes should be sorted by id: %#v", processes)
+	}
+	web := processes[1]
+	if web.Status != "online" || web.Mode != "fork" || web.CPU != 1.5 || web.Memory != 48<<20 || web.Restarts != 4 {
+		t.Fatalf("missing PM2 fields: %#v", web)
+	}
+	if web.Uptime != 7200 {
+		t.Fatalf("PM2 uptime = %d, want 7200", web.Uptime)
+	}
+}
+
+func TestNASRichServiceTablesFitLargeTerminal(t *testing.T) {
+	model := &monitorModel{
+		profile:  machineProfileNAS,
+		nodeName: "Service NAS",
+		width:    160,
+		height:   50,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileNAS,
+			MemoryTotal: 8 << 30, DiskTotal: 1 << 40,
+			Filesystems: []filesystemInfo{
+				{Mount: "/", Total: 1 << 40},
+				{Mount: "/mnt/one", Total: 1 << 40},
+				{Mount: "/mnt/two", Total: 1 << 40},
+			},
+		},
+	}
+	for index := 1; index <= 7; index++ {
+		model.snapshot.Containers = append(model.snapshot.Containers, containerInfo{
+			Name: fmt.Sprintf("container-%d", index), Image: "example/image:latest",
+			State: "running", Running: true, CPU: float64(index), MemoryUsed: uint64(index) << 20,
+		})
+	}
+	for index := 1; index <= 4; index++ {
+		model.snapshot.PM2Processes = append(model.snapshot.PM2Processes, pm2ProcessInfo{
+			ID: index, PID: 1000 + index, Name: fmt.Sprintf("pm2-%d", index),
+			Status: "online", CPU: float64(index), Memory: uint64(index) << 20,
+		})
+	}
+	for index := 1; index <= 8; index++ {
+		model.snapshot.Services = append(model.snapshot.Services, serviceHealth{
+			Name: fmt.Sprintf("http-%d", index), Healthy: true, Detail: "200",
+		})
+	}
+
+	rendered := model.monitorView()
+	for _, expected := range []string{"container-7", "pm2-4", "http-8"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("large NAS view missing final service row %q\n%s", expected, rendered)
+		}
+	}
+	if got := lipgloss.Height(rendered); got > model.height {
+		t.Fatalf("large NAS view height = %d, terminal height = %d", got, model.height)
+	}
+	for index, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > model.width {
+			t.Fatalf("large NAS line %d width = %d\n%q", index, got, line)
 		}
 	}
 }

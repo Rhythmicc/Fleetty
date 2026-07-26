@@ -750,15 +750,25 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 			healthyHTTP++
 		}
 	}
-	runningContainers := 0
+	healthyContainers := 0
 	for _, container := range snapshot.Containers {
-		if container.Running {
-			runningContainers++
+		if dockerContainerHealthy(container) {
+			healthyContainers++
 		}
 	}
-	containerHealth := healthCount(runningContainers, len(snapshot.Containers))
+	containerHealth := healthCount(healthyContainers, len(snapshot.Containers))
 	if snapshot.DockerError != "" {
 		containerHealth = dangerStyle.Render("unavailable")
+	}
+	healthyPM2 := 0
+	for _, process := range snapshot.PM2Processes {
+		if strings.EqualFold(process.Status, "online") {
+			healthyPM2++
+		}
+	}
+	pm2Health := healthCount(healthyPM2, len(snapshot.PM2Processes))
+	if snapshot.PM2Error != "" {
+		pm2Health = dangerStyle.Render("unavailable")
 	}
 	return []string{
 		fmt.Sprintf("%s %s/s   %s %s/s",
@@ -768,9 +778,10 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 		fmt.Sprintf("%s %d  %s",
 			diskTitleStyle.Render("DISK"), len(filesystems),
 			storageStyle.Render(fmt.Sprintf("MAX %.1f%% %s", worstUsage, truncate(worst.Mount, 12)))),
-		fmt.Sprintf("%s %s   %s %s",
+		fmt.Sprintf("%s %s  %s %s  %s %s",
 			processTitleStyle.Render("HTTP"), healthCount(healthyHTTP, len(snapshot.Services)),
-			accentStyle.Render("CTR"), containerHealth),
+			accentStyle.Render("CTR"), containerHealth,
+			gpuTitleStyle.Render("PM2"), pm2Health),
 		dimStyle.Render("Enter or click to open NAS details"),
 	}
 }
