@@ -238,6 +238,23 @@ type hubModel struct {
 	detail     *monitorModel
 }
 
+type hubNodeGroup struct {
+	title   string
+	profile string
+	nodes   []int
+}
+
+type hubDisplayRow struct {
+	title   string
+	profile string
+	count   int
+	nodes   []int
+}
+
+type hubPage struct {
+	rows []hubDisplayRow
+}
+
 func newHubModel(service *hubService, _ ssh.Session, width, height int) *hubModel {
 	return &hubModel{
 		service:   service,
@@ -330,21 +347,13 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.startCollect()
 		case "left", "h":
-			if m.cursor > 0 {
-				m.cursor--
-				m.clampCursor()
-			}
+			m.moveCursor(-1)
 		case "right", "l":
-			if m.cursor+1 < len(m.config.Nodes) {
-				m.cursor++
-				m.clampCursor()
-			}
+			m.moveCursor(1)
 		case "up", "k":
-			m.cursor = max(0, m.cursor-m.columns())
-			m.clampCursor()
+			m.moveCursor(-m.columns())
 		case "down", "j":
-			m.cursor = min(len(m.config.Nodes)-1, m.cursor+m.columns())
-			m.clampCursor()
+			m.moveCursor(m.columns())
 		case "enter":
 			return m, m.openSelected()
 		}
@@ -387,42 +396,163 @@ func (m *hubModel) columns() int {
 	}
 }
 
-func (m *hubModel) visibleCapacity() int {
-	rows := max(1, (max(10, m.height)-3)/hubCardHeight)
-	return rows * m.columns()
+func (m *hubModel) nodeGroups() []hubNodeGroup {
+	groups := []hubNodeGroup{
+		{title: "GPU COMPUTE", profile: machineProfileGPU},
+		{title: "NAS & STORAGE", profile: machineProfileNAS},
+		{title: "GENERAL SERVERS", profile: machineProfileGeneral},
+	}
+	for index, node := range m.config.Nodes {
+		profile := normalizeMachineProfile(node.Profile)
+		for groupIndex := range groups {
+			if groups[groupIndex].profile == profile {
+				groups[groupIndex].nodes = append(groups[groupIndex].nodes, index)
+				break
+			}
+		}
+	}
+	filtered := groups[:0]
+	for _, group := range groups {
+		if len(group.nodes) > 0 {
+			filtered = append(filtered, group)
+		}
+	}
+	return filtered
+}
+
+func (m *hubModel) nodeOrder() []int {
+	order := make([]int, 0, len(m.config.Nodes))
+	for _, group := range m.nodeGroups() {
+		order = append(order, group.nodes...)
+	}
+	return order
+}
+
+func (m *hubModel) moveCursor(delta int) {
+	order := m.nodeOrder()
+	if len(order) == 0 {
+		return
+	}
+	position := 0
+	for index, nodeIndex := range order {
+		if nodeIndex == m.cursor {
+			position = index
+			break
+		}
+	}
+	position = min(max(0, position+delta), len(order)-1)
+	m.cursor = order[position]
+	m.clampCursor()
+}
+
+func (m *hubModel) pages() []hubPage {
+	columns := m.columns()
+	heightBudget := max(hubCardHeight+1, max(10, m.height)-2)
+	var pages []hubPage
+	current := hubPage{}
+	usedHeight := 0
+	flush := func() {
+		if len(current.rows) == 0 {
+			return
+		}
+		pages = append(pages, current)
+		current = hubPage{}
+		usedHeight = 0
+	}
+
+	for _, group := range m.nodeGroups() {
+		nodeRows := make([][]int, 0, (len(group.nodes)+columns-1)/columns)
+		for start := 0; start < len(group.nodes); start += columns {
+			end := min(start+columns, len(group.nodes))
+			nodeRows = append(nodeRows, group.nodes[start:end])
+		}
+		for len(nodeRows) > 0 {
+			if len(current.rows) > 0 && heightBudget-usedHeight < hubCardHeight+1 {
+				flush()
+			}
+			current.rows = append(current.rows, hubDisplayRow{
+				title: group.title, profile: group.profile, count: len(group.nodes),
+			})
+			usedHeight++
+			for len(nodeRows) > 0 && heightBudget-usedHeight >= hubCardHeight {
+				current.rows = append(current.rows, hubDisplayRow{nodes: nodeRows[0]})
+				nodeRows = nodeRows[1:]
+				usedHeight += hubCardHeight
+			}
+			if len(nodeRows) > 0 {
+				flush()
+			}
+		}
+	}
+	flush()
+	if len(pages) == 0 {
+		pages = []hubPage{{}}
+	}
+	return pages
 }
 
 func (m *hubModel) clampCursor() {
-	if len(m.config.Nodes) == 0 {
+	order := m.nodeOrder()
+	if len(order) == 0 {
 		m.cursor, m.offset = 0, 0
 		return
 	}
-	m.cursor = min(max(0, m.cursor), len(m.config.Nodes)-1)
-	capacity := m.visibleCapacity()
-	if m.cursor < m.offset {
-		m.offset = (m.cursor / m.columns()) * m.columns()
+	found := false
+	for _, index := range order {
+		if index == m.cursor {
+			found = true
+			break
+		}
 	}
-	if m.cursor >= m.offset+capacity {
-		firstRow := m.cursor/m.columns() - capacity/m.columns() + 1
-		m.offset = max(0, firstRow*m.columns())
+	if !found {
+		m.cursor = order[0]
 	}
-	maxOffset := max(0, ((len(m.config.Nodes)-1)/m.columns()-(capacity/m.columns())+1)*m.columns())
-	m.offset = min(m.offset, maxOffset)
+	pages := m.pages()
+	for pageIndex, page := range pages {
+		for _, row := range page.rows {
+			for _, nodeIndex := range row.nodes {
+				if nodeIndex == m.cursor {
+					m.offset = pageIndex
+					return
+				}
+			}
+		}
+	}
+	m.offset = min(max(0, m.offset), len(pages)-1)
 }
 
 func (m *hubModel) nodeAt(x, y int) (int, bool) {
 	if y < 1 {
 		return 0, false
 	}
-	columns := m.columns()
-	cardWidth := max(20, (usableWidth(m.width)-(columns-1))/columns)
-	column := x / (cardWidth + 1)
-	row := (y - 1) / hubCardHeight
-	if column < 0 || column >= columns || row < 0 {
+	pages := m.pages()
+	if m.offset < 0 || m.offset >= len(pages) {
 		return 0, false
 	}
-	index := m.offset + row*columns + column
-	return index, index >= 0 && index < len(m.config.Nodes)
+	columns := m.columns()
+	cardWidth := max(20, (usableWidth(m.width)-(columns-1))/columns)
+	rowY := 1
+	for _, row := range pages[m.offset].rows {
+		if row.title != "" {
+			if y == rowY {
+				return 0, false
+			}
+			rowY++
+			continue
+		}
+		if y >= rowY && y < rowY+hubCardHeight {
+			if x < 0 {
+				return 0, false
+			}
+			column := x / (cardWidth + 1)
+			if column >= columns || x%(cardWidth+1) >= cardWidth || column >= len(row.nodes) {
+				return 0, false
+			}
+			return row.nodes[column], true
+		}
+		rowY += hubCardHeight
+	}
+	return 0, false
 }
 
 func (m *hubModel) View() tea.View {
@@ -458,12 +588,16 @@ func (m *hubModel) hubView() string {
 
 	columns := m.columns()
 	cardWidth := max(20, (width-(columns-1))/columns)
-	capacity := m.visibleCapacity()
-	end := min(len(m.config.Nodes), m.offset+capacity)
+	pages := m.pages()
+	pageIndex := min(max(0, m.offset), len(pages)-1)
 	var rows []string
-	for start := m.offset; start < end; start += columns {
+	for _, row := range pages[pageIndex].rows {
+		if row.title != "" {
+			rows = append(rows, renderHubSectionTitle(row.title, row.profile, row.count, width))
+			continue
+		}
 		var cards []string
-		for index := start; index < min(end, start+columns); index++ {
+		for _, index := range row.nodes {
 			if len(cards) > 0 {
 				cards = append(cards, " ")
 			}
@@ -475,8 +609,8 @@ func (m *hubModel) hubView() string {
 		rows = []string{panelStyle(width).Render(warningStyle.Render("No servers are configured."))}
 	}
 	rangeText := ""
-	if len(m.config.Nodes) > capacity {
-		rangeText = fmt.Sprintf("  %d-%d/%d", m.offset+1, end, len(m.config.Nodes))
+	if len(pages) > 1 {
+		rangeText = fmt.Sprintf("  PAGE %d/%d", pageIndex+1, len(pages))
 	}
 	footer := strings.Join([]string{
 		keyHint("↑↓←→", "select"),
@@ -491,6 +625,19 @@ func (m *hubModel) hubView() string {
 	}
 	footer = ansi.Truncate(footer, width, "")
 	return strings.Join([]string{header, strings.Join(rows, "\n"), footer}, "\n")
+}
+
+func renderHubSectionTitle(title, profile string, count, width int) string {
+	style := gpuTitleStyle
+	if profile == machineProfileNAS {
+		style = networkRXStyle
+	} else if profile == machineProfileGeneral {
+		style = processTitleStyle
+	}
+	label := style.Render(" " + title + " ")
+	countLabel := dimStyle.Render(fmt.Sprintf("%d NODES ", count))
+	line := strings.Repeat("─", max(0, width-lipgloss.Width(label)-lipgloss.Width(countLabel)))
+	return label + dimStyle.Render(line) + countLabel
 }
 
 func (m *hubModel) renderNodeCard(index, width int) string {

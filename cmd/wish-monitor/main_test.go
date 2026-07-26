@@ -161,9 +161,9 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 		"refresh_seconds": 3,
 		"nodes": [
 			{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:first"},
-			{"name":"node-2","address":"192.0.2.2:23234","host_key":"SHA256:second"},
+			{"name":"node-2","address":"192.0.2.2:23234","profile":"nas","host_key":"SHA256:second"},
 			{"name":"node-3","address":"192.0.2.3:23234","host_key":"SHA256:third"},
-			{"name":"node-4","address":"192.0.2.4:23234","host_key":"SHA256:fourth"}
+			{"name":"node-4","address":"192.0.2.4:23234","profile":"nas","host_key":"SHA256:fourth"}
 		]
 	}`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -209,6 +209,22 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 		model.width, model.height = size.width, size.height
 		model.clampCursor()
 		rendered := model.hubView()
+		if size.width == 140 {
+			for _, section := range []string{"GPU COMPUTE", "NAS & STORAGE"} {
+				if !strings.Contains(rendered, section) {
+					t.Fatalf("%dx%d Hub missing section %q\n%s", size.width, size.height, section, rendered)
+				}
+			}
+			if index, ok := model.nodeAt(0, 2); !ok || index != 0 {
+				t.Fatalf("GPU card click resolved to index=%d ok=%t", index, ok)
+			}
+			if index, ok := model.nodeAt(0, 10); !ok || index != 1 {
+				t.Fatalf("NAS card click resolved to index=%d ok=%t", index, ok)
+			}
+			if _, ok := model.nodeAt(0, 9); ok {
+				t.Fatal("NAS section heading should not be clickable")
+			}
+		}
 		if got := lipgloss.Height(rendered); got > size.height {
 			t.Fatalf("%dx%d Hub height = %d\n%s", size.width, size.height, got, rendered)
 		}
@@ -217,6 +233,16 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 				t.Fatalf("%dx%d Hub line %d width = %d\n%q", size.width, size.height, index, got, line)
 			}
 		}
+	}
+
+	model.width, model.height, model.cursor = 140, 30, 0
+	model.moveCursor(1)
+	if model.cursor != 2 {
+		t.Fatalf("grouped right navigation selected config index %d, want 2", model.cursor)
+	}
+	model.moveCursor(1)
+	if model.cursor != 1 {
+		t.Fatalf("grouped navigation should enter NAS section at config index 1, got %d", model.cursor)
 	}
 
 	model.cursor = 1
