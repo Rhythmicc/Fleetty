@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultHubRefreshInterval = 2 * time.Second
+	defaultHubRefreshInterval = time.Second
 	hubCardHeight             = 7
 )
 

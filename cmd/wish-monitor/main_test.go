@@ -136,6 +136,10 @@ func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
 }
 
 func TestHubConfigAndResponsiveOverview(t *testing.T) {
+	if got := (hubConfig{}).refreshInterval(); got != time.Second {
+		t.Fatalf("default hub refresh interval = %s, want 1s", got)
+	}
+
 	configPath := t.TempDir() + "/nodes.json"
 	configJSON := `{
 		"refresh_seconds": 3,

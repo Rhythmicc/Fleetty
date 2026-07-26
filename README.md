@@ -149,7 +149,7 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
 
 ```json
 {
-  "refresh_seconds": 2,
+  "refresh_seconds": 1,
   "nodes": [
     {
       "name": "training-1",

@@ -1,5 +1,5 @@
 {
-  "refresh_seconds": 2,
+  "refresh_seconds": 1,
   "nodes": [
     {
       "name": "server-1",
