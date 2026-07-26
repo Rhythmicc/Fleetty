@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -139,6 +140,17 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	if got := (hubConfig{}).refreshInterval(); got != time.Second {
 		t.Fatalf("default hub refresh interval = %s, want 1s", got)
 	}
+	for failures, want := range map[int]time.Duration{
+		1: 5 * time.Second,
+		2: 10 * time.Second,
+		3: 20 * time.Second,
+		4: 30 * time.Second,
+		8: 30 * time.Second,
+	} {
+		if got := hubOfflineRetryDelay(failures); got != want {
+			t.Fatalf("offline retry delay after %d failures = %s, want %s", failures, got, want)
+		}
+	}
 
 	configPath := t.TempDir() + "/nodes.json"
 	configJSON := `{
@@ -198,6 +210,47 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 				t.Fatalf("%dx%d Hub line %d width = %d\n%q", size.width, size.height, index, got, line)
 			}
 		}
+	}
+
+	model.cursor = 1
+	if command := model.openSelected(); command != nil || model.detail != nil {
+		t.Fatal("offline node should not open a detail dashboard")
+	}
+	if !strings.Contains(model.status, "offline") {
+		t.Fatalf("offline selection status = %q", model.status)
+	}
+}
+
+func TestNodeRPCTimeoutCoversSSHHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		<-stop
+	}()
+
+	client := newNodeRPCClient(hubNodeConfig{
+		Name:    "sleeping-node",
+		Address: listener.Addr().String(),
+		HostKey: "SHA256:not-reached",
+	})
+	started := time.Now()
+	_, err = client.CallWithTimeout(nodeRPCRequest{Operation: rpcSnapshot}, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("RPC call should time out while waiting for the SSH handshake")
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("RPC handshake timeout took %s", elapsed)
 	}
 }
 

@@ -163,8 +163,12 @@ func newNodeRPCClient(node hubNodeConfig) *nodeRPCClient {
 }
 
 func (c *nodeRPCClient) Call(request nodeRPCRequest) (nodeRPCResponse, error) {
+	return c.CallWithTimeout(request, 20*time.Second)
+}
+
+func (c *nodeRPCClient) CallWithTimeout(request nodeRPCRequest, timeout time.Duration) (nodeRPCResponse, error) {
 	request.Version = nodeRPCVersion
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.call(ctx, request)
 }
@@ -186,7 +190,11 @@ func (c *nodeRPCClient) call(ctx context.Context, request nodeRPCRequest) (nodeR
 		return nodeRPCResponse{}, fmt.Errorf("connect %s: %w", c.node.Name, err)
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(20 * time.Second))
+	deadline := time.Now().Add(20 * time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = connection.SetDeadline(deadline)
 
 	clientConnection, channels, requests, err := gossh.NewClientConn(connection, address, config)
 	if err != nil {

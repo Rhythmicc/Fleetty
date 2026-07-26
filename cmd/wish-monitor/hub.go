@@ -19,6 +19,9 @@ import (
 const (
 	defaultHubRefreshInterval = time.Second
 	hubCardHeight             = 7
+	hubOverviewRPCTimeout     = 900 * time.Millisecond
+	hubOfflineRetryInitial    = 5 * time.Second
+	hubOfflineRetryMaximum    = 30 * time.Second
 )
 
 type hubConfig struct {
@@ -81,11 +84,14 @@ func (c hubConfig) refreshInterval() time.Duration {
 }
 
 type hubNodeState struct {
-	Snapshot monitorSnapshot
-	Error    string
-	Warning  string
-	Latency  time.Duration
-	Checked  time.Time
+	Snapshot            monitorSnapshot
+	Error               string
+	Warning             string
+	Latency             time.Duration
+	Checked             time.Time
+	LastSeen            time.Time
+	NextRetry           time.Time
+	ConsecutiveFailures int
 }
 
 // hubService shares one recent overview snapshot between all connected Hub
@@ -114,7 +120,10 @@ func (s *hubService) collect() []hubNodeState {
 	}
 	s.mu.RUnlock()
 
-	states := collectHubNodeStates(s.config.Nodes)
+	s.mu.RLock()
+	previous := append([]hubNodeState(nil), s.states...)
+	s.mu.RUnlock()
+	states := collectHubNodeStatesWithPrevious(s.config.Nodes, previous, time.Now())
 	s.mu.Lock()
 	s.states = append([]hubNodeState(nil), states...)
 	s.collectedAt = time.Now()
@@ -123,28 +132,72 @@ func (s *hubService) collect() []hubNodeState {
 }
 
 func collectHubNodeStates(nodes []hubNodeConfig) []hubNodeState {
+	return collectHubNodeStatesWithPrevious(nodes, nil, time.Now())
+}
+
+func collectHubNodeStatesWithPrevious(nodes []hubNodeConfig, previous []hubNodeState, now time.Time) []hubNodeState {
 	states := make([]hubNodeState, len(nodes))
 	var wait sync.WaitGroup
 	for index := range nodes {
+		if index < len(previous) {
+			states[index] = previous[index]
+			if states[index].Error != "" && now.Before(states[index].NextRetry) {
+				continue
+			}
+		}
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
 			started := time.Now()
-			response, err := newNodeRPCClient(nodes[index]).Call(nodeRPCRequest{Operation: rpcSnapshot})
-			states[index] = hubNodeState{
-				Latency: time.Since(started),
-				Checked: time.Now(),
-			}
+			response, err := newNodeRPCClient(nodes[index]).CallWithTimeout(
+				nodeRPCRequest{Operation: rpcSnapshot},
+				hubOverviewRPCTimeout,
+			)
+			checked := time.Now()
+			state := states[index]
+			state.Latency = time.Since(started)
+			state.Checked = checked
 			if err != nil {
-				states[index].Error = sanitizeTerminalText(err.Error())
+				state.Error = sanitizeTerminalText(err.Error())
+				state.Warning = ""
+				state.ConsecutiveFailures++
+				state.NextRetry = checked.Add(hubOfflineRetryDelay(state.ConsecutiveFailures))
+				states[index] = state
 				return
 			}
-			states[index].Snapshot = response.Snapshot
-			states[index].Warning = sanitizeTerminalText(response.Warning)
+			state.Snapshot = response.Snapshot
+			state.Error = ""
+			state.Warning = sanitizeTerminalText(response.Warning)
+			state.LastSeen = checked
+			state.NextRetry = time.Time{}
+			state.ConsecutiveFailures = 0
+			states[index] = state
 		}(index)
 	}
 	wait.Wait()
 	return states
+}
+
+func hubOfflineRetryDelay(failures int) time.Duration {
+	delay := hubOfflineRetryInitial
+	for attempt := 1; attempt < failures && delay < hubOfflineRetryMaximum; attempt++ {
+		delay *= 2
+		if delay > hubOfflineRetryMaximum {
+			delay = hubOfflineRetryMaximum
+		}
+	}
+	return delay
+}
+
+func (s *hubService) retryOfflineNow() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.states {
+		if s.states[index].Error != "" {
+			s.states[index].NextRetry = time.Time{}
+		}
+	}
+	s.collectedAt = time.Time{}
 }
 
 type hubSnapshotsMsg struct {
@@ -251,6 +304,9 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toggleColorMode()
 		case "r":
 			m.status = "Refreshing all servers…"
+			if m.service != nil {
+				m.service.retryOfflineNow()
+			}
 			return m, m.startCollect()
 		case "left", "h":
 			if m.cursor > 0 {
@@ -280,6 +336,10 @@ func (m *hubModel) openSelected() tea.Cmd {
 		return nil
 	}
 	node := m.config.Nodes[m.cursor]
+	if m.cursor < len(m.states) && m.states[m.cursor].Error != "" {
+		m.status = fmt.Sprintf("%s is offline. Press r to retry now.", node.Name)
+		return nil
+	}
 	m.detail = newRemoteMonitorModel(node, m.width, m.height, m.colorMode)
 	m.detail.status = fmt.Sprintf("Connected through Hub to %s. Esc returns to the server list.", node.Name)
 	return tea.Batch(m.detail.startCollect(), tick())
@@ -425,12 +485,20 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 	}
 	if state.Error != "" {
 		meta = "OFFLINE"
+		lastSeen := "Never seen online"
+		if !state.LastSeen.IsZero() {
+			lastSeen = "Last seen " + hubAge(time.Since(state.LastSeen)) + " ago"
+		}
+		retry := "retrying now"
+		if remaining := time.Until(state.NextRetry); remaining > 0 {
+			retry = "auto retry in " + hubAge(remaining)
+		}
 		content = []string{
-			dangerStyle.Render("● UNREACHABLE"),
+			dangerStyle.Render("● OFFLINE / UNREACHABLE"),
 			dimStyle.Render(truncate(normalizeNodeAddress(node.Address), width-4)),
+			dimStyle.Render(truncate(lastSeen, width-4)),
 			warningStyle.Render(truncate(state.Error, width-4)),
-			dimStyle.Render(strings.Repeat("·", max(1, width-4))),
-			dimStyle.Render("Press r to retry"),
+			dimStyle.Render(truncate("[r] retry now · "+retry, width-4)),
 		}
 	} else if !state.Snapshot.CollectedAt.IsZero() {
 		meta = fmt.Sprintf("%dms", state.Latency.Milliseconds())
@@ -463,6 +531,21 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		content[0] = strings.TrimSpace(content[0])
 	}
 	return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+}
+
+func hubAge(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	duration = duration.Round(time.Second)
+	switch {
+	case duration < time.Minute:
+		return fmt.Sprintf("%ds", int(duration.Seconds()))
+	case duration < time.Hour:
+		return fmt.Sprintf("%dm%02ds", int(duration.Minutes()), int(duration.Seconds())%60)
+	default:
+		return fmt.Sprintf("%dh%02dm", int(duration.Hours()), int(duration.Minutes())%60)
+	}
 }
 
 func hubGPUStats(gpus []gpuInfo) (maxUtil float64, memoryUsed, memoryTotal uint64, maxTemperature int) {
