@@ -635,7 +635,11 @@ func renderHubSectionTitle(title, profile string, count, width int) string {
 		style = processTitleStyle
 	}
 	label := style.Render(" " + title + " ")
-	countLabel := dimStyle.Render(fmt.Sprintf("%d NODES ", count))
+	unit := "NODES"
+	if count == 1 {
+		unit = "NODE"
+	}
+	countLabel := dimStyle.Render(fmt.Sprintf("%d %s ", count, unit))
 	line := strings.Repeat("─", max(0, width-lipgloss.Width(label)-lipgloss.Width(countLabel)))
 	return label + dimStyle.Render(line) + countLabel
 }
