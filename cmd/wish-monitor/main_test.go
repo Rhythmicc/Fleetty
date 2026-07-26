@@ -511,7 +511,7 @@ func TestNASRichServiceTablesFitLargeTerminal(t *testing.T) {
 	}
 
 	rendered := model.monitorView()
-	for _, expected := range []string{"container-7", "pm2-4", "http-8"} {
+	for _, expected := range []string{"DOCKER", "container-7", "PM2", "pm2-4", "HTTP CHECKS", "http-8", "ATTENTION"} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("large NAS view missing final service row %q\n%s", expected, rendered)
 		}
