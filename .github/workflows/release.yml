@@ -41,9 +41,11 @@ jobs:
               ./cmd/wish-monitor
           done
           cp deploy/gpu-ssh-monitor.service dist/gpu-ssh-monitor.service
+          cp deploy/gpu-ssh-monitor-hub.service dist/gpu-ssh-monitor-hub.service
+          cp deploy/hub-nodes.example.json dist/hub-nodes.example.json
           (
             cd dist
-            sha256sum gpu-ssh-monitor_linux_* gpu-ssh-monitor.service > checksums.txt
+            sha256sum gpu-ssh-monitor_linux_* gpu-ssh-monitor*.service hub-nodes.example.json > checksums.txt
           )
 
       - name: Create GitHub release

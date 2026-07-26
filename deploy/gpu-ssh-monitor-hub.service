@@ -1,0 +1,23 @@
+[Unit]
+Description=GPU SSH Monitor Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gpu-ssh-monitor
+Environment=HOME=/root
+Environment=SSH_HOST=0.0.0.0
+Environment=SSH_PORT=23235
+Environment=SSH_HOST_KEY_PATH=/etc/gpu-ssh-monitor/hub_host_ed25519
+Environment=DEFAULT_THEME=dark
+Environment=HUB_NODES_FILE=/etc/gpu-ssh-monitor/nodes.json
+ExecStart=/opt/gpu-ssh-monitor/gpu-ssh-monitor
+Restart=always
+RestartSec=2
+UMask=0077
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

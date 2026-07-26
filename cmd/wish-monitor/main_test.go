@@ -26,7 +26,11 @@ func TestAdminAuthenticationAndSelection(t *testing.T) {
 	for _, r := range "correct horse battery staple" {
 		m.handleKey(testKey(string(r)))
 	}
-	m.handleKey(testKey("enter"))
+	command := m.handleKey(testKey("enter"))
+	if command == nil {
+		t.Fatal("password submission did not start authentication")
+	}
+	_, _ = m.Update(command())
 	if m.screen != screenAdmin {
 		t.Fatalf("screen after password = %v, want admin", m.screen)
 	}
@@ -95,6 +99,101 @@ func TestDisabledManagementMode(t *testing.T) {
 	m.handleKey(testKey("m"))
 	if m.screen != screenMonitor || m.status == "" {
 		t.Fatalf("disabled management should remain on monitor, got screen=%v status=%q", m.screen, m.status)
+	}
+}
+
+func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
+	admin := &adminController{
+		password: "node-secret",
+		actions: []adminAction{
+			{ID: 0, label: "Safe test action", command: "true"},
+		},
+	}
+	service := newNodeRPCService(admin)
+
+	denied := service.Handle(nodeRPCRequest{
+		Version:   nodeRPCVersion,
+		Operation: rpcRunAction,
+		ActionID:  0,
+		Password:  "wrong",
+	})
+	if denied.Error == "" {
+		t.Fatal("management RPC should reject an incorrect password")
+	}
+	allowed := service.Handle(nodeRPCRequest{
+		Version:   nodeRPCVersion,
+		Operation: rpcRunAction,
+		ActionID:  0,
+		Password:  "node-secret",
+	})
+	if allowed.Error != "" {
+		t.Fatalf("management RPC rejected the correct password: %s", allowed.Error)
+	}
+	incompatible := service.Handle(nodeRPCRequest{Version: nodeRPCVersion + 1, Operation: rpcAuthenticate})
+	if incompatible.Error == "" {
+		t.Fatal("RPC should reject incompatible protocol versions")
+	}
+}
+
+func TestHubConfigAndResponsiveOverview(t *testing.T) {
+	configPath := t.TempDir() + "/nodes.json"
+	configJSON := `{
+		"refresh_seconds": 3,
+		"nodes": [
+			{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:first"},
+			{"name":"node-2","address":"192.0.2.2:23234","host_key":"SHA256:second"},
+			{"name":"node-3","address":"192.0.2.3:23234","host_key":"SHA256:third"},
+			{"name":"node-4","address":"192.0.2.4:23234","host_key":"SHA256:fourth"}
+		]
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadHubConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.refreshInterval() != 3*time.Second || len(config.Nodes) != 4 {
+		t.Fatalf("unexpected hub config: %#v", config)
+	}
+
+	model := &hubModel{
+		config: *config,
+		states: []hubNodeState{
+			{
+				Snapshot: monitorSnapshot{
+					CollectedAt: time.Now(),
+					CPUPercent:  25,
+					MemoryUsed:  16 * 1024 * 1024 * 1024,
+					MemoryTotal: 64 * 1024 * 1024 * 1024,
+					DiskUsed:    100 * 1024 * 1024 * 1024,
+					DiskTotal:   500 * 1024 * 1024 * 1024,
+					GPUs: []gpuInfo{{
+						Name: "GPU", Utilization: 75,
+						MemoryUsed: 8 * 1024 * 1024 * 1024, MemoryTotal: 16 * 1024 * 1024 * 1024,
+						Temperature: 65,
+					}},
+				},
+				Latency: 20 * time.Millisecond,
+			},
+			{Error: "connection refused"},
+			{},
+			{},
+		},
+		status: "test",
+	}
+	for _, size := range []struct{ width, height int }{{140, 30}, {80, 24}, {60, 24}} {
+		model.width, model.height = size.width, size.height
+		model.clampCursor()
+		rendered := model.hubView()
+		if got := lipgloss.Height(rendered); got > size.height {
+			t.Fatalf("%dx%d Hub height = %d\n%s", size.width, size.height, got, rendered)
+		}
+		for index, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d Hub line %d width = %d\n%q", size.width, size.height, index, got, line)
+			}
+		}
 	}
 }
 
