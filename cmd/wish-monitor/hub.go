@@ -274,6 +274,21 @@ func (m *hubModel) startCollect() tea.Cmd {
 }
 
 func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Hub refresh messages belong to the parent model even while a node
+	// dashboard is open. Forwarding either message to the child drops the
+	// refresh timer chain and can leave collecting stuck at true.
+	switch msg := msg.(type) {
+	case hubSnapshotsMsg:
+		m.collecting = false
+		m.states = msg.States
+		if m.detail == nil {
+			m.updateOnlineStatus()
+		}
+		return m, nil
+	case hubTickMsg:
+		return m, tea.Batch(m.startCollect(), hubTick(m.config.refreshInterval()))
+	}
+
 	if m.detail != nil {
 		if key, ok := msg.(tea.KeyPressMsg); ok && m.detail.screen == screenMonitor {
 			if key.String() == "esc" || key.String() == "q" {
@@ -295,18 +310,6 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.clampCursor()
-	case hubSnapshotsMsg:
-		m.collecting = false
-		m.states = msg.States
-		online := 0
-		for _, state := range m.states {
-			if state.Error == "" {
-				online++
-			}
-		}
-		m.status = fmt.Sprintf("%d/%d servers online.", online, len(m.states))
-	case hubTickMsg:
-		return m, tea.Batch(m.startCollect(), hubTick(m.config.refreshInterval()))
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			if index, ok := m.nodeAt(msg.Mouse().X, msg.Mouse().Y); ok {
@@ -347,6 +350,16 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *hubModel) updateOnlineStatus() {
+	online := 0
+	for _, state := range m.states {
+		if state.Error == "" {
+			online++
+		}
+	}
+	m.status = fmt.Sprintf("%d/%d servers online.", online, len(m.states))
 }
 
 func (m *hubModel) openSelected() tea.Cmd {

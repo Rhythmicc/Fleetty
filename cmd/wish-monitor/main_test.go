@@ -228,6 +228,55 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	}
 }
 
+func TestHubRefreshLifecycleSurvivesDetailDashboard(t *testing.T) {
+	model := &hubModel{
+		config: hubConfig{
+			RefreshSeconds: 1,
+			Nodes: []hubNodeConfig{{
+				Name:    "nas",
+				Address: "192.0.2.1:23234",
+			}},
+		},
+		states:     make([]hubNodeState, 1),
+		collecting: true,
+		detail: &monitorModel{
+			screen:    screenMonitor,
+			colorMode: colorModeDark,
+		},
+	}
+
+	snapshot := monitorSnapshot{Profile: machineProfileNAS, CPUPercent: 12.5}
+	updated, command := model.Update(hubSnapshotsMsg{
+		States: []hubNodeState{{Snapshot: snapshot}},
+	})
+	if updated != model || command != nil {
+		t.Fatal("Hub snapshot should be consumed by the parent model")
+	}
+	if model.collecting {
+		t.Fatal("Hub snapshot received in a detail dashboard left collecting stuck")
+	}
+	if got := model.states[0].Snapshot.CPUPercent; got != snapshot.CPUPercent {
+		t.Fatalf("Hub snapshot CPU = %.1f, want %.1f", got, snapshot.CPUPercent)
+	}
+
+	updated, command = model.Update(hubTickMsg{})
+	if updated != model || command == nil {
+		t.Fatal("Hub tick received in a detail dashboard should continue the refresh chain")
+	}
+	if !model.collecting {
+		t.Fatal("Hub tick received in a detail dashboard did not start collection")
+	}
+
+	_, _ = model.Update(hubSnapshotsMsg{States: []hubNodeState{{Snapshot: snapshot}}})
+	updated, command = model.Update(testKey("esc"))
+	if updated != model || model.detail != nil {
+		t.Fatal("Esc should return from the node dashboard to the Hub")
+	}
+	if command == nil || !model.collecting {
+		t.Fatal("returning to the Hub should request an immediate overview refresh")
+	}
+}
+
 func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusNoContent)
