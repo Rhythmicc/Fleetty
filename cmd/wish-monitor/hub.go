@@ -194,6 +194,7 @@ type hubService struct {
 	mu             sync.RWMutex
 	collectMu      sync.Mutex
 	slurmCollectMu sync.Mutex
+	slurmRunners   []slurmCommandRunner
 	states         []hubNodeState
 	slurmStates    []slurmClusterState
 	collectedAt    time.Time
@@ -202,7 +203,8 @@ type hubService struct {
 func newHubService(config hubConfig) *hubService {
 	return &hubService{
 		config: config, states: make([]hubNodeState, len(config.Nodes)),
-		slurmStates: make([]slurmClusterState, len(config.SlurmClusters)),
+		slurmStates:  make([]slurmClusterState, len(config.SlurmClusters)),
+		slurmRunners: make([]slurmCommandRunner, len(config.SlurmClusters)),
 	}
 }
 
@@ -239,7 +241,7 @@ func (s *hubService) collectSlurm() []slurmClusterState {
 	s.mu.RLock()
 	previous := append([]slurmClusterState(nil), s.slurmStates...)
 	s.mu.RUnlock()
-	states := collectSlurmStatesWithPrevious(s.config.SlurmClusters, previous, time.Now())
+	states := collectSlurmStates(s.config.SlurmClusters, previous, time.Now(), s.slurmRunners)
 	s.mu.Lock()
 	s.slurmStates = append([]slurmClusterState(nil), states...)
 	s.mu.Unlock()

@@ -15,6 +15,33 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+type scriptedSlurmRunner struct {
+	calls  int
+	closed int
+}
+
+func (r *scriptedSlurmRunner) Run(_ context.Context, command string, args ...string) ([]byte, error) {
+	r.calls++
+	arguments := strings.Join(args, " ")
+	switch {
+	case command == "sinfo" && strings.Contains(arguments, "--version"):
+		return []byte("slurm-wlm 25.11.2\n"), nil
+	case command == "sinfo" && strings.Contains(arguments, "%N"):
+		return []byte("gpu01\tgpu*\n"), nil
+	case command == "sinfo":
+		return []byte("gpu*\tup\t20:00\t1\tidle\t0/16/0/16\tgpu:test:1\n"), nil
+	case command == "squeue":
+		return []byte("101\tgpu\ttrain\talice\tPENDING\t0:00\t20:00\t1\t\t(Priority)\n"), nil
+	default:
+		return nil, fmt.Errorf("unexpected command %s %s", command, arguments)
+	}
+}
+
+func (r *scriptedSlurmRunner) Close() error {
+	r.closed++
+	return nil
+}
+
 func TestAdminAuthenticationAndSelection(t *testing.T) {
 	admin := &adminController{
 		password: "correct horse battery staple",
@@ -430,6 +457,26 @@ func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
 	if !slurmNodeListContains("gpu[01-04],node7", "gpu03") ||
 		slurmNodeListContains("gpu[01-04]", "gpu05") {
 		t.Fatal("Slurm node-list range matching failed")
+	}
+}
+
+func TestSlurmCollectorReusesPersistentRunner(t *testing.T) {
+	runner := &scriptedSlurmRunner{}
+	runners := []slurmCommandRunner{runner}
+	configs := []slurmClusterConfig{{
+		Name: "remote", Transport: "ssh", RefreshSeconds: 2, TimeoutSeconds: 4,
+	}}
+	now := time.Now()
+	first := collectSlurmStates(configs, nil, now, runners)
+	second := collectSlurmStates(configs, first, now.Add(3*time.Second), runners)
+	if first[0].Error != "" || second[0].Error != "" {
+		t.Fatalf("persistent collection failed: first=%#v second=%#v", first[0], second[0])
+	}
+	if runner.calls != 8 {
+		t.Fatalf("runner calls = %d, want two four-command snapshots", runner.calls)
+	}
+	if runner.closed != 0 || runners[0] != runner {
+		t.Fatalf("healthy runner was not retained: closed=%d runner=%#v", runner.closed, runners[0])
 	}
 }
 

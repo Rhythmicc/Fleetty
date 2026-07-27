@@ -107,6 +107,15 @@ type slurmClusterState struct {
 }
 
 func collectSlurmStatesWithPrevious(configs []slurmClusterConfig, previous []slurmClusterState, now time.Time) []slurmClusterState {
+	return collectSlurmStates(configs, previous, now, nil)
+}
+
+func collectSlurmStates(
+	configs []slurmClusterConfig,
+	previous []slurmClusterState,
+	now time.Time,
+	runners []slurmCommandRunner,
+) []slurmClusterState {
 	states := make([]slurmClusterState, len(configs))
 	var done = make(chan struct{}, len(configs))
 	for index := range configs {
@@ -124,7 +133,13 @@ func collectSlurmStatesWithPrevious(configs []slurmClusterConfig, previous []slu
 		}
 		go func(index int) {
 			started := time.Now()
-			snapshot, err := collectSlurmSnapshot(configs[index])
+			var snapshot slurmSnapshot
+			var err error
+			if runners == nil {
+				snapshot, err = collectSlurmSnapshot(configs[index])
+			} else {
+				snapshot, err = collectSlurmSnapshotPersistent(configs[index], runners, index)
+			}
 			checked := time.Now()
 			state := states[index]
 			state.Latency = time.Since(started)
@@ -155,6 +170,30 @@ func collectSlurmStatesWithPrevious(configs []slurmClusterConfig, previous []slu
 		<-done
 	}
 	return states
+}
+
+func collectSlurmSnapshotPersistent(
+	config slurmClusterConfig,
+	runners []slurmCommandRunner,
+	index int,
+) (slurmSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), config.timeout())
+	defer cancel()
+	runner := runners[index]
+	if runner == nil {
+		var err error
+		runner, err = newSlurmRunner(ctx, config)
+		if err != nil {
+			return slurmSnapshot{}, err
+		}
+		runners[index] = runner
+	}
+	snapshot, err := collectSlurmSnapshotWithRunner(ctx, config, runner)
+	if err != nil {
+		_ = runner.Close()
+		runners[index] = nil
+	}
+	return snapshot, err
 }
 
 type slurmCommandRunner interface {
@@ -261,7 +300,14 @@ func collectSlurmSnapshot(config slurmClusterConfig) (slurmSnapshot, error) {
 		return slurmSnapshot{}, err
 	}
 	defer runner.Close()
+	return collectSlurmSnapshotWithRunner(ctx, config, runner)
+}
 
+func collectSlurmSnapshotWithRunner(
+	ctx context.Context,
+	config slurmClusterConfig,
+	runner slurmCommandRunner,
+) (slurmSnapshot, error) {
 	versionOutput, err := runner.Run(ctx, "sinfo", "--version")
 	if err != nil {
 		return slurmSnapshot{}, err
