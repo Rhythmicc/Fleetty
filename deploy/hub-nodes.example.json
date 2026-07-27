@@ -7,6 +7,8 @@
       "profile": "gpu",
       "description": "Training node",
       "address": "192.0.2.10:23234",
+      "slurm_cluster": "Local GPU Cluster",
+      "slurm_node": "gpu01",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     },
     {
@@ -14,6 +16,8 @@
       "profile": "gpu",
       "description": "Inference node",
       "address": "192.0.2.11:23234",
+      "slurm_cluster": "Remote GPU Cluster",
+      "slurm_node": "gpu02",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     }
   ],

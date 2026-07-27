@@ -304,15 +304,23 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		t.Fatalf("unexpected aggregated Slurm partition: %#v", partitions)
 	}
 	jobs, err := parseSlurmJobs(strings.Join([]string{
-		"101\tgpu\ttrain\talice\tRUNNING\t1:20\t20:00\t1\tgpu01",
-		"102_[1-4]\tgpu\tsweep\tbob\tPENDING\t0:00\t20:00\t1\t(Priority)",
-		"103\tcpu\tcompile\tcarol\tRUNNING\t0:10\t10:00\t1\tcpu01",
+		"101\tgpu\ttrain\talice\tRUNNING\t1:20\t20:00\t1\tgpu01\tgpu01",
+		"102_[1-4]\tgpu\tsweep\tbob\tPENDING\t0:00\t20:00\t1\t\t(Priority)",
+		"103\tcpu\tcompile\tcarol\tRUNNING\t0:10\t10:00\t1\tcpu01\tcpu01",
 	}, "\n"), []string{"gpu"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 2 || jobs[1].Reason != "(Priority)" || jobs[1].Nodes != 1 {
+	if len(jobs) != 2 || jobs[0].NodeList != "gpu01" ||
+		jobs[1].Reason != "(Priority)" || jobs[1].Nodes != 1 {
 		t.Fatalf("unexpected parsed Slurm jobs: %#v", jobs)
+	}
+	nodes, err := parseSlurmNodes("gpu01\tgpu*\ngpu01\tmixed\ngpu02\tcpu\n", []string{"gpu", "mixed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || len(nodes[0].Partitions) != 2 || nodes[0].Partitions[1] != "mixed" {
+		t.Fatalf("unexpected parsed Slurm nodes: %#v", nodes)
 	}
 	if got := shellJoin([]string{"squeue", "-o", "a'b"}); got != "'squeue' '-o' 'a'\"'\"'b'" {
 		t.Fatalf("shell quoting = %q", got)
@@ -360,7 +368,7 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		model.width, model.height, model.slurmOffset = size.width, size.height, 0
 		rendered := model.slurmQueueView()
 		if size.width == 160 {
-			for _, expected := range []string{"SLURM QUEUES", "A100 Cluster", "General GPU", "57612", "613_[0-7%1]", "(Priority)"} {
+			for _, expected := range []string{"SLURM QUEUES", "A100 Cluster", "General GPU", "57612", "NEXT", "613_[0-7%1]", "(Priority)"} {
 				if !strings.Contains(rendered, expected) {
 					t.Fatalf("%dx%d Slurm view missing %q\n%s", size.width, size.height, expected, rendered)
 				}
@@ -381,6 +389,47 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	model.moveSlurmFilter(1)
 	if model.slurmFilter != 0 {
 		t.Fatalf("Slurm filter = %d, want first cluster", model.slurmFilter)
+	}
+}
+
+func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
+	now := time.Now()
+	model := &hubModel{
+		config: hubConfig{
+			Nodes: []hubNodeConfig{{
+				Name: "n2", SlurmCluster: "General GPU", SlurmNode: "node2",
+			}},
+			SlurmClusters: []slurmClusterConfig{{Name: "General GPU"}},
+		},
+		slurmStates: []slurmClusterState{{Snapshot: slurmSnapshot{
+			Name: "General GPU", CollectedAt: now,
+			Nodes: []slurmNode{{Name: "node2", Partitions: []string{"rtx5060"}}},
+			Jobs: []slurmJob{
+				{ID: "90", Partition: "mixed-gpu", State: "PENDING", Reason: "(Priority)"},
+				{ID: "12", Partition: "rtx5060", State: "PENDING", Name: "first", Reason: "(Priority)"},
+				{ID: "101", Partition: "rtx5060", State: "PENDING", Name: "later", Reason: "(Resources)"},
+				{ID: "7", Partition: "rtx5060", State: "RUNNING", Name: "active", NodeList: "node[1-3]"},
+			},
+		}}},
+	}
+	queue := model.nodeSlurmQueue(0)
+	if queue == nil || len(queue.Jobs) != 3 {
+		t.Fatalf("unexpected node queue: %#v", queue)
+	}
+	if queue.Jobs[0].Job.ID != "7" || !queue.Jobs[1].Next ||
+		queue.Jobs[1].Job.ID != "12" || queue.Jobs[2].Job.ID != "101" {
+		t.Fatalf("node queue order/classification = %#v", queue.Jobs)
+	}
+	detail := &monitorModel{width: 120, height: 42, slurmQueue: queue}
+	panel := detail.slurmNodePanel(120, detail.slurmQueueRows())
+	for _, expected := range []string{"NODE QUEUE", "RUNNING", "NEXT", "QUEUED", "active", "first", "later"} {
+		if !strings.Contains(panel, expected) {
+			t.Fatalf("node queue panel missing %q\n%s", expected, panel)
+		}
+	}
+	if !slurmNodeListContains("gpu[01-04],node7", "gpu03") ||
+		slurmNodeListContains("gpu[01-04]", "gpu05") {
+		t.Fatal("Slurm node-list range matching failed")
 	}
 }
 

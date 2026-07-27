@@ -126,6 +126,7 @@ type monitorModel struct {
 	networkRXHistory []float64
 	networkTXHistory []float64
 	colorMode        colorMode
+	slurmQueue       *nodeSlurmQueue
 }
 
 type colorMode int
@@ -705,12 +706,27 @@ func (m *monitorModel) monitorView() string {
 	}
 	metricRows := renderMetricRows(metrics, layout)
 	gpu := m.gpuPanel(layout)
+	slurm := ""
+	if m.slurmQueue != nil {
+		queueRows := m.slurmQueueRows()
+		queueLines := queueRows + 4
+		if m.slurmQueue.Warning != "" {
+			queueLines++
+		}
+		layout.processRows = max(0, layout.processRows-queueLines)
+		slurm = m.slurmNodePanel(layout.width, queueRows)
+	}
 	processes := m.processPanel(layout)
 	footer := renderFooter(w, m.status)
 	if m.loadErr != nil {
 		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
 	}
-	return strings.Join([]string{header, metricRows, gpu, processes, footer}, "\n")
+	sections := []string{header, metricRows, gpu}
+	if slurm != "" {
+		sections = append(sections, slurm)
+	}
+	sections = append(sections, processes, footer)
+	return strings.Join(sections, "\n")
 }
 
 func dashboardHeader(width int, collectedAt time.Time, mode colorMode, nodeName string) string {

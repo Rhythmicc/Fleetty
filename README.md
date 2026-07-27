@@ -200,6 +200,8 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
       "profile": "gpu",
       "description": "Training node",
       "address": "192.0.2.10:23234",
+      "slurm_cluster": "Local GPU Cluster",
+      "slurm_node": "gpu01",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     },
     {
@@ -266,6 +268,29 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
 将输出中的全部有效 `SHA256:` 指纹写入 `host_keys`，以兼容登录节点同时发布 Ed25519、ECDSA 或 RSA Host Key 的情况。只登记一个指纹时，也可以继续使用单值字段 `host_key`。
 
 可选的 `partitions` 只展示指定分区；省略时展示该集群的全部分区和作业。`refresh_seconds` 默认 2 秒，`timeout_seconds` 默认 4 秒。某个 Slurm 源离线时，Hub 会保留最后一次状态并单独退避重试，不影响服务器首页或其他集群。
+
+计算节点可以通过 `slurm_cluster` 和 `slurm_node` 关联到队列数据。`slurm_cluster` 必须与某个集群的 `name` 完全相同，`slurm_node` 使用 `sinfo -N` 显示的节点名：
+
+```json
+{
+  "name": "training-1",
+  "profile": "gpu",
+  "address": "192.0.2.10:23234",
+  "host_key": "SHA256:replace-with-the-node-host-key-fingerprint",
+  "slurm_cluster": "Local GPU Cluster",
+  "slurm_node": "gpu01"
+}
+```
+
+建立关联后，从 Hub 打开的计算节点面板会显示有限条作业：当前节点正在运行的作业、调度顺序中最靠前且分区包含该节点的候选作业，以及少量后续排队作业。独立 Slurm 页面使用相同的颜色语义：
+
+| 状态 | 含义 |
+| --- | --- |
+| `RUNNING` | 已分配到该节点或集群中正在运行 |
+| `NEXT` | 当前队列顺序中最靠前的候选作业 |
+| `QUEUED` | 其余等待调度的作业 |
+
+`NEXT` 表示 Slurm `squeue` 返回顺序中的首个合资格 pending 作业，是便于观察的候选提示；最终调度仍由 Slurm 的优先级、资源、依赖和 backfill 策略决定。
 
 ### 安装 Hub 服务
 

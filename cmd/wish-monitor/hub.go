@@ -37,6 +37,8 @@ type hubNodeConfig struct {
 	Address             string `json:"address"`
 	Description         string `json:"description,omitempty"`
 	Profile             string `json:"profile,omitempty"`
+	SlurmCluster        string `json:"slurm_cluster,omitempty"`
+	SlurmNode           string `json:"slurm_node,omitempty"`
 	HostKey             string `json:"host_key,omitempty"`
 	InsecureSkipHostKey bool   `json:"-"`
 }
@@ -66,6 +68,8 @@ func loadHubConfig(path string) (*hubConfig, error) {
 		node := &config.Nodes[index]
 		node.Name = sanitizeTerminalText(node.Name)
 		node.Description = sanitizeTerminalText(node.Description)
+		node.SlurmCluster = sanitizeTerminalText(node.SlurmCluster)
+		node.SlurmNode = sanitizeTerminalText(node.SlurmNode)
 		rawProfile := strings.TrimSpace(node.Profile)
 		node.Profile = normalizeMachineProfile(rawProfile)
 		if rawProfile != "" && node.Profile == "" {
@@ -127,6 +131,16 @@ func loadHubConfig(path string) (*hubConfig, error) {
 			return nil, fmt.Errorf("Slurm cluster %q has invalid transport %q", cluster.Name, cluster.Transport)
 		}
 		cluster.Partitions = uniqueTerminalValues(cluster.Partitions)
+	}
+	for _, node := range config.Nodes {
+		if (node.SlurmCluster == "") != (node.SlurmNode == "") {
+			return nil, fmt.Errorf("hub node %q requires both slurm_cluster and slurm_node", node.Name)
+		}
+		if node.SlurmCluster != "" {
+			if _, exists := seenClusters[node.SlurmCluster]; !exists {
+				return nil, fmt.Errorf("hub node %q references unknown Slurm cluster %q", node.Name, node.SlurmCluster)
+			}
+		}
 	}
 	return &config, nil
 }
@@ -412,7 +426,9 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.collecting = false
 		m.states = msg.States
 		m.slurmStates = msg.SlurmStates
-		if m.detail == nil {
+		if m.detail != nil {
+			m.detail.slurmQueue = m.nodeSlurmQueue(m.cursor)
+		} else {
 			m.updateOnlineStatus()
 		}
 		return m, nil
@@ -568,6 +584,7 @@ func (m *hubModel) openSelected() tea.Cmd {
 		return nil
 	}
 	m.detail = newRemoteMonitorModel(node, m.width, m.height, m.colorMode)
+	m.detail.slurmQueue = m.nodeSlurmQueue(m.cursor)
 	m.detail.status = fmt.Sprintf("Connected through Hub to %s. Esc returns to the server list.", node.Name)
 	return tea.Batch(m.detail.startCollect(), tick())
 }
