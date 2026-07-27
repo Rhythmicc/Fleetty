@@ -476,7 +476,15 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q":
+			if m.slurmView {
+				m.slurmView = false
+				m.slurmOffset = 0
+				m.status = "Returned to the server overview."
+				return m, nil
+			}
 			return m, tea.Quit
 		case "t", "T":
 			m.toggleColorMode()

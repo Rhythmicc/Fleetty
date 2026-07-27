@@ -417,6 +417,14 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	if model.slurmFilter != 0 {
 		t.Fatalf("Slurm filter = %d, want first cluster", model.slurmFilter)
 	}
+	updated, command := model.Update(testKey("q"))
+	if updated != model || command != nil || model.slurmView {
+		t.Fatalf("q from Slurm queue should return to Hub: view=%t command=%v", model.slurmView, command)
+	}
+	_, command = model.Update(testKey("q"))
+	if command == nil {
+		t.Fatal("q from the Hub overview should quit")
+	}
 }
 
 func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
