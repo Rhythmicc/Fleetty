@@ -260,13 +260,9 @@ func newSlurmRunner(ctx context.Context, config slurmClusterConfig) (slurmComman
 	if config.Transport == "local" {
 		return localSlurmRunner{}, nil
 	}
-	key, err := os.ReadFile(config.IdentityFile)
+	signer, err := loadPrivateKeySigner(config.IdentityFile)
 	if err != nil {
-		return nil, fmt.Errorf("read identity file: %w", err)
-	}
-	signer, err := gossh.ParsePrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("parse identity file: %w", err)
+		return nil, fmt.Errorf("load identity file: %w", err)
 	}
 	hostKeyCallback, err := fixedHostKeysCallback(config.Name, config.HostKeys, config.InsecureSkipHostKey)
 	if err != nil {

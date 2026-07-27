@@ -47,11 +47,15 @@ func (b *localMonitorBackend) Authenticate(password string) (bool, error) {
 	return b.admin.authenticate(password), nil
 }
 
-func (b *localMonitorBackend) ProcessDetail(pid int, _ string) (processDetail, error) {
-	return readProcessDetail(pid)
+func (b *localMonitorBackend) ProcessDetail(pid int, password string) (processDetail, error) {
+	includeSensitive := password != "" && b.admin.authenticate(password)
+	return readProcessDetailWithSensitive(pid, includeSensitive)
 }
 
-func (b *localMonitorBackend) TerminateProcess(pid int, expectedStartTicks uint64, _ string) error {
+func (b *localMonitorBackend) TerminateProcess(pid int, expectedStartTicks uint64, password string) error {
+	if !b.admin.authenticate(password) {
+		return errors.New("management authentication failed")
+	}
 	if !canTerminatePID(pid) {
 		return errors.New("protected process")
 	}
@@ -70,7 +74,10 @@ func (b *localMonitorBackend) TerminateProcess(pid int, expectedStartTicks uint6
 	return err
 }
 
-func (b *localMonitorBackend) RunAction(actionID int, _ string) (string, error) {
+func (b *localMonitorBackend) RunAction(actionID int, password string) (string, error) {
+	if !b.admin.authenticate(password) {
+		return "", errors.New("management authentication failed")
+	}
 	if actionID < 0 || actionID >= len(b.admin.actions) {
 		return "", errors.New("unknown management action")
 	}

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Test and security checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l ./cmd)"
+          test -z "${unformatted}" || {
+            printf 'Files require gofmt:\n%s\n' "${unformatted}"
+            exit 1
+          }
+
+      - name: Test with race detector
+        run: go test -race ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Scan reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Build release architectures
+        shell: bash
+        run: |
+          for monitor_arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${monitor_arch}" \
+              go build -trimpath -o "/tmp/gpu-ssh-monitor_${monitor_arch}" \
+              ./cmd/wish-monitor
+          done

@@ -93,19 +93,19 @@ func (s *nodeRPCService) Handle(request nodeRPCRequest) nodeRPCResponse {
 	case rpcAuthenticate:
 		return nodeRPCResponse{Authorized: s.admin.authenticate(request.Password)}
 	case rpcProcessDetail:
-		detail, err := s.backend.ProcessDetail(request.PID, "")
+		detail, err := s.backend.ProcessDetail(request.PID, request.Password)
 		return responseWithProcessDetail(detail, err)
 	case rpcTerminateProcess:
 		if !s.admin.authenticate(request.Password) {
 			return nodeRPCResponse{Error: "management authentication failed"}
 		}
-		err := s.backend.TerminateProcess(request.PID, request.StartTimeTicks, "")
+		err := s.backend.TerminateProcess(request.PID, request.StartTimeTicks, request.Password)
 		return responseWithError(err)
 	case rpcRunAction:
 		if !s.admin.authenticate(request.Password) {
 			return nodeRPCResponse{Error: "management authentication failed"}
 		}
-		output, err := s.backend.RunAction(request.ActionID, "")
+		output, err := s.backend.RunAction(request.ActionID, request.Password)
 		response := responseWithError(err)
 		response.Output = output
 		return response
@@ -176,8 +176,13 @@ func (c *nodeRPCClient) call(ctx context.Context, request nodeRPCRequest) (nodeR
 	if err != nil {
 		return nodeRPCResponse{}, err
 	}
+	auth, err := c.authMethods()
+	if err != nil {
+		return nodeRPCResponse{}, err
+	}
 	config := &gossh.ClientConfig{
-		User:            "gpu-monitor-hub",
+		User:            nodeRPCUser,
+		Auth:            auth,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         5 * time.Second,
 	}
@@ -229,6 +234,20 @@ func (c *nodeRPCClient) call(ctx context.Context, request nodeRPCRequest) (nodeR
 
 func (c *nodeRPCClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
 	return fixedHostKeyCallback(c.node.Name, c.node.HostKey, c.node.InsecureSkipHostKey)
+}
+
+func (c *nodeRPCClient) authMethods() ([]gossh.AuthMethod, error) {
+	if c.node.IdentityFile == "" {
+		if c.node.AllowUnauthenticated {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("node %s has no RPC identity_file", c.node.Name)
+	}
+	signer, err := loadPrivateKeySigner(c.node.IdentityFile)
+	if err != nil {
+		return nil, fmt.Errorf("load RPC identity for %s: %w", c.node.Name, err)
+	}
+	return []gossh.AuthMethod{gossh.PublicKeys(signer)}, nil
 }
 
 func fixedHostKeyCallback(name, fingerprint string, insecure bool) (gossh.HostKeyCallback, error) {

@@ -29,6 +29,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Scan reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
       - name: Build Linux release assets
         shell: bash
         run: |

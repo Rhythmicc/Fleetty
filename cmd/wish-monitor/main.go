@@ -50,10 +50,17 @@ func main() {
 	if hub != nil {
 		hubRuntime = newHubService(*hub)
 	}
+	access, err := loadSSHAccessConfig()
+	if err != nil {
+		log.Fatal("Could not configure SSH client authentication", "error", err)
+	}
 
-	server, err := wish.NewServer(
+	serverOptions := []ssh.Option{
 		wish.WithAddress(net.JoinHostPort(host, port)),
 		wish.WithHostKeyPath(hostKeyPath),
+	}
+	serverOptions = append(serverOptions, access.options()...)
+	serverOptions = append(serverOptions,
 		wish.WithMiddleware(
 			bubblewish.Middleware(func(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
 				pty, _, ok := sess.Pty()
@@ -71,6 +78,7 @@ func main() {
 			logging.Middleware(),
 		),
 	)
+	server, err := wish.NewServer(serverOptions...)
 	if err != nil {
 		log.Fatal("Could not create SSH server", "error", err)
 	}
@@ -125,6 +133,8 @@ type monitorModel struct {
 	status           string
 	busy             bool
 	adminCredential  string
+	authFailures     int
+	authLockedUntil  time.Time
 	collecting       bool
 	cpuHistory       []float64
 	networkRXHistory []float64
@@ -270,14 +280,19 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.password, m.status = "", "Authentication failed: "+msg.err.Error()
 		} else if msg.ok {
-			credential := ""
-			if _, remote := m.backend.(*remoteMonitorBackend); remote {
-				credential = msg.password
-			}
-			m.screen, m.password, m.adminCredential = screenAdmin, "", credential
+			m.screen, m.password, m.adminCredential = screenAdmin, "", msg.password
+			m.authFailures, m.authLockedUntil = 0, time.Time{}
 			m.status = "Management mode enabled. Filter or select a process."
 		} else {
-			m.password, m.status = "", "Incorrect password. Try again or press Esc."
+			m.password = ""
+			m.authFailures++
+			if m.authFailures >= maxManagementAuthFailures {
+				m.authLockedUntil = time.Now().Add(managementAuthLockout)
+				m.status = "Too many incorrect passwords. Management authentication is locked for 30 seconds."
+			} else {
+				remaining := maxManagementAuthFailures - m.authFailures
+				m.status = fmt.Sprintf("Incorrect password. %d attempts remain.", remaining)
+			}
 		}
 	case tickMsg:
 		return m, tea.Batch(m.startCollect(), tick())
@@ -404,7 +419,10 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "esc":
 			m.screen, m.password, m.status = screenMonitor, "", "Management mode cancelled."
 		case "enter":
-			if !m.busy && m.password != "" {
+			if time.Now().Before(m.authLockedUntil) {
+				remaining := time.Until(m.authLockedUntil).Round(time.Second)
+				m.status = fmt.Sprintf("Management authentication is locked for %s.", remaining)
+			} else if !m.busy && m.password != "" {
 				m.busy = true
 				m.status = "Authenticating with the selected node…"
 				return m.authenticate(m.password)
@@ -1187,7 +1205,7 @@ func (m *monitorModel) processDetailView() string {
 	}
 	pid := m.selectedProcess.PID
 	action := compactButton("Esc", "Back to monitor", false)
-	description := "Read-only process information. Management authentication is not required."
+	description := "Read-only process information. Sensitive arguments and the working directory are redacted."
 	help := "[r] reload  [esc] back"
 	if !m.processReadOnly {
 		action = compactButton("T", "Terminate process", true)
@@ -1203,7 +1221,7 @@ func (m *monitorModel) processDetailView() string {
 		body = warningStyle.Render("Unable to read process details: " + m.detailErr.Error())
 	} else if m.processDetail != nil {
 		d := m.processDetail
-		body = strings.Join([]string{
+		lines := []string{
 			sectionStyle.Render(fmt.Sprintf("%s  PID %d", d.Name, d.PID)),
 			fmt.Sprintf("%s %d    %s %d    %s %s    %s %d", dimStyle.Render("PPID"), d.PPID, dimStyle.Render("UID"), d.UID, dimStyle.Render("USER"), d.User, dimStyle.Render("THREADS"), d.Threads),
 			fmt.Sprintf("%s %s    %s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("STATE"), d.State, dimStyle.Render("CPU"), d.CPU, dimStyle.Render("MEM"), d.Memory, dimStyle.Render("RSS"), bytes(d.RSS)),
@@ -1212,7 +1230,11 @@ func (m *monitorModel) processDetailView() string {
 			dimStyle.Render("COMMAND") + "  " + truncate(d.CommandLine, max(12, w-14)),
 			dimStyle.Render("EXEC") + "     " + truncate(d.Executable, max(12, w-14)),
 			dimStyle.Render("CWD") + "      " + truncate(d.CWD, max(12, w-14)),
-		}, "\n")
+		}
+		if d.Redacted {
+			lines = append([]string{warningStyle.Render("REDACTED  Authenticate for sensitive process details."), ""}, lines...)
+		}
+		body = strings.Join(lines, "\n")
 	}
 	return strings.Join([]string{
 		titleStyle.Render("PROCESS DETAILS") + "  " + accentStyle.Render(fmt.Sprintf("PID %d", pid)),
@@ -1576,6 +1598,7 @@ type processDetail struct {
 	Executable              string
 	CWD                     string
 	StartTimeTicks          uint64
+	Redacted                bool
 }
 
 type cpuCounters struct{ total, idle uint64 }
@@ -1826,7 +1849,7 @@ func readProcesses() ([]processInfo, error) {
 	return processes, nil
 }
 
-func readProcessDetail(pid int) (processDetail, error) {
+func readProcessDetailWithSensitive(pid int, includeSensitive bool) (processDetail, error) {
 	if pid <= 0 {
 		return processDetail{}, errors.New("invalid PID")
 	}
@@ -1871,8 +1894,18 @@ func readProcessDetail(pid int) (processDetail, error) {
 	} else {
 		detail.CWD = "unavailable"
 	}
+	applyProcessDetailPolicy(&detail, includeSensitive)
 	detail.StartTimeTicks, _ = readProcessStartTicks(pid)
 	return detail, nil
+}
+
+func applyProcessDetailPolicy(detail *processDetail, includeSensitive bool) {
+	if detail == nil || includeSensitive {
+		return
+	}
+	detail.CommandLine = redactProcessCommandLine(detail.CommandLine)
+	detail.CWD = redactedProcessDetailMessage
+	detail.Redacted = true
 }
 
 func readProcessStartTicks(pid int) (uint64, error) {

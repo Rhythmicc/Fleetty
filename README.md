@@ -72,18 +72,24 @@ sudo install -o root -g root -m 0644 \
   /tmp/gpu-ssh-monitor.service \
   /etc/systemd/system/gpu-ssh-monitor.service
 
+# 允许当前操作者的 SSH 公钥连接监控端口。
+# 如需允许多人访问，可将多行公钥写入同一个文件。
+sudo install -o root -g root -m 0600 \
+  "$HOME/.ssh/id_ed25519.pub" \
+  /etc/gpu-ssh-monitor/authorized_keys
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now gpu-ssh-monitor.service
 sudo systemctl status gpu-ssh-monitor.service
 ```
 
-服务默认监听 `0.0.0.0:23234`。首次启动时会自动创建 `/etc/gpu-ssh-monitor/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
+服务默认监听 `0.0.0.0:23234`，但只接受 `/etc/gpu-ssh-monitor/authorized_keys` 中登记的客户端公钥。首次启动时会自动创建 `/etc/gpu-ssh-monitor/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
 
 如果服务器启用了防火墙，请只向需要访问监控的网络开放 TCP 23234 端口。
 
 ## 连接与操作
 
-监控端口不会登录系统账户，SSH 用户名只用于标记会话来源；连接后不会获得 shell：
+监控端口不会登录系统账户，SSH 用户名只用于标记会话来源；客户端仍需持有已登记的私钥，连接后不会获得 shell：
 
 ```bash
 ssh -p 23234 monitor@example-host
@@ -100,7 +106,7 @@ ssh -p 23234 monitor@example-host
 
 主题只影响当前 SSH 会话，不会改变其他已连接用户的界面。
 
-只读监控页面不要求管理密码。请使用防火墙或安全组限制 23234 端口的访问范围；管理密码只保护管理模式中的操作。
+只读监控页面不要求管理密码，但 SSH 连接本身必须通过公钥认证。只读进程详情会隐藏工作目录，并自动遮盖密码、令牌、API Key 等常见敏感参数；通过管理密码认证后才会显示完整详情。
 
 ### 管理模式
 
@@ -162,11 +168,29 @@ Hub 使用同一个 Go 可执行文件运行，并通过各节点现有的 23234
 
 Hub 不需要系统 SSH 账户，也不会在磁盘中保存节点管理密码。进入某个节点的管理模式时，密码会通过加密的 SSH 连接发送给该节点即时校验，并且只保留在当前 Hub 会话的内存中。
 
+Hub 使用独立的 RPC 密钥连接节点。该密钥不能用于打开交互监控页面，普通操作者的密钥也不能冒充 Hub RPC 身份。
+
 关机或暂时不可达的节点会显示为 `OFFLINE`，不会阻塞其他节点的每秒刷新。Hub 会逐步降低离线节点的探测频率，并在节点恢复后自动重新上线；也可以选中节点后按 `r` 立即重试。
 
 部署 Hub 前，应先将各监控节点升级到相同版本。
 
 ### 创建节点配置
+
+先在 Hub 主机上创建专用 RPC 密钥：
+
+```bash
+sudo ssh-keygen -t ed25519 -N "" \
+  -f /etc/gpu-ssh-monitor/node_rpc_ed25519
+sudo chmod 0600 /etc/gpu-ssh-monitor/node_rpc_ed25519
+```
+
+将 `/etc/gpu-ssh-monitor/node_rpc_ed25519.pub` 的内容安装到每个节点的 `/etc/gpu-ssh-monitor/hub_authorized_keys`，权限设为 `0600`。然后在每个节点的 `/etc/gpu-ssh-monitor/machine.env` 中加入：
+
+```bash
+NODE_RPC_AUTHORIZED_KEYS_FILE=/etc/gpu-ssh-monitor/hub_authorized_keys
+```
+
+更新配置后重启节点的 `gpu-ssh-monitor.service`。节点只会允许这组公钥以内部用户 `gpu-monitor-hub` 调用受限 RPC，不会提供 shell。
 
 先在准备运行 Hub 的服务器上取得各节点的 SSH host key 指纹：
 
@@ -202,6 +226,7 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
       "address": "192.0.2.10:23234",
       "slurm_cluster": "Local GPU Cluster",
       "slurm_node": "gpu01",
+      "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     },
     {
@@ -209,6 +234,7 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
       "profile": "nas",
       "description": "Storage and services",
       "address": "192.0.2.20:23234",
+      "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     }
   ],
@@ -237,7 +263,9 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
 }
 ```
 
-`host_key` 用于防止 Hub 连接到被冒充的节点。节点重新生成 SSH host key 后，需要同步更新这里的指纹。
+`identity_file` 用于证明 Hub 身份，私钥必须由 root 所有且权限不超过 `0600`。`host_key` 用于防止 Hub 连接到被冒充的节点。节点重新生成 SSH host key 后，需要同步更新这里的指纹。
+
+隔离网络中的旧节点可以在滚动迁移期间临时设置顶层字段 `"insecure_allow_unauthenticated_nodes": true`。该选项会降低 Hub 到节点的身份保证，不应作为长期配置；全部节点安装 RPC 公钥后应立即删除。
 
 ### Slurm 队列
 
@@ -276,6 +304,7 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
   "name": "training-1",
   "profile": "gpu",
   "address": "192.0.2.10:23234",
+  "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
   "host_key": "SHA256:replace-with-the-node-host-key-fingerprint",
   "slurm_cluster": "Local GPU Cluster",
   "slurm_node": "gpu01"
@@ -297,6 +326,9 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
 Hub 默认监听 23235，可以和本机的 23234 节点监控服务共存：
 
 ```bash
+sudo install -o root -g root -m 0600 \
+  "$HOME/.ssh/id_ed25519.pub" \
+  /etc/gpu-ssh-monitor/authorized_keys
 sudo install -o root -g root -m 0644 \
   gpu-ssh-monitor-hub.service \
   /etc/systemd/system/gpu-ssh-monitor-hub.service
@@ -375,6 +407,12 @@ sudo systemctl restart gpu-ssh-monitor.service
 | `SSH_HOST` | `0.0.0.0` | 监听地址 |
 | `SSH_PORT` | `23234` | 监听端口 |
 | `SSH_HOST_KEY_PATH` | `/etc/gpu-ssh-monitor/ssh_host_ed25519` | SSH host key |
+| `SSH_AUTHORIZED_KEYS_FILE` | systemd 服务中为 `/etc/gpu-ssh-monitor/authorized_keys` | 允许连接交互 TUI 的客户端公钥 |
+| `NODE_RPC_AUTHORIZED_KEYS_FILE` | 空 | 允许以内部 Hub 身份连接节点的公钥 |
+| `SSH_ALLOW_ANONYMOUS` | `false` | 仅用于隔离网络迁移；显式设为 `true` 才允许匿名连接 |
+| `SSH_MAX_CONNECTIONS` | `64` | 同时接受的 SSH 连接上限 |
+| `SSH_IDLE_TIMEOUT` | `30m` | SSH 空闲连接超时 |
+| `SSH_MAX_TIMEOUT` | `24h` | 单个 SSH 连接的最长持续时间 |
 | `DEFAULT_THEME` | `dark` | 新连接的默认主题，可设为 `light` |
 | `MACHINE_CONFIG_FILE` | 空 | 节点角色、网卡、挂载点及服务检查 JSON 配置 |
 | `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
@@ -391,16 +429,31 @@ sudo systemctl restart gpu-ssh-monitor.service
 
 ## 升级
 
-重新执行安装章节中的下载和校验步骤，然后替换二进制：
+首次从允许匿名连接的旧版本升级时，必须先安装操作者公钥，并确保 systemd 设置了 `SSH_AUTHORIZED_KEYS_FILE`：
+
+```bash
+sudo install -o root -g root -m 0600 \
+  "$HOME/.ssh/id_ed25519.pub" \
+  /etc/gpu-ssh-monitor/authorized_keys
+sudo install -d -o root -g root -m 0755 \
+  /etc/systemd/system/gpu-ssh-monitor.service.d
+printf '%s\n' \
+  '[Service]' \
+  'Environment=SSH_AUTHORIZED_KEYS_FILE=/etc/gpu-ssh-monitor/authorized_keys' |
+  sudo tee /etc/systemd/system/gpu-ssh-monitor.service.d/security.conf >/dev/null
+```
+
+如果节点由 Hub 管理，还应先完成“创建节点配置”中的 RPC 密钥部署，并在节点设置 `NODE_RPC_AUTHORIZED_KEYS_FILE`。完成认证配置后，再执行下载、校验和二进制替换：
 
 ```bash
 sudo install -o root -g root -m 0755 \
   "/tmp/gpu-ssh-monitor_linux_${monitor_arch}" \
   /opt/gpu-ssh-monitor/gpu-ssh-monitor
+sudo systemctl daemon-reload
 sudo systemctl restart gpu-ssh-monitor.service
 ```
 
-升级不会覆盖 `/etc/gpu-ssh-monitor` 中的管理配置和 SSH host key。
+Hub 服务需要同样为 23235 端口配置 `SSH_AUTHORIZED_KEYS_FILE`。升级不会覆盖 `/etc/gpu-ssh-monitor` 中的客户端公钥、RPC 密钥、管理配置和 SSH host key。
 
 ## 故障排查
 
@@ -411,10 +464,10 @@ sudo systemctl status gpu-ssh-monitor.service
 sudo journalctl -u gpu-ssh-monitor.service -n 100 --no-pager
 ```
 
-- 无法连接：检查服务状态、TCP 23234 端口和防火墙规则；
+- 无法连接：检查服务状态、TCP 23234 端口、防火墙规则和客户端公钥是否存在于 `authorized_keys`；
 - GPU 区域不可用：确认 `nvidia-smi` 能以 root 身份正常执行；
 - 管理模式不可用：检查 `/etc/gpu-ssh-monitor/admin.env` 的权限和 `ADMIN_PASSWORD_HASH`；
-- Hub 节点离线：确认 Hub 能访问节点的 TCP 23234 端口，并检查 `host_key` 指纹；
+- Hub 节点离线：确认 Hub 能访问节点的 TCP 23234 端口，并检查 `identity_file`、节点的 `hub_authorized_keys` 和 `host_key` 指纹；
 - 鼠标无法点击：改用键盘，或检查终端及 SSH 客户端的鼠标协议支持；
 - 界面字符错位：使用支持 Unicode 和等宽字符的终端字体。
 

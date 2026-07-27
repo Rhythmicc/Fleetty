@@ -9,6 +9,7 @@
       "address": "192.0.2.10:23234",
       "slurm_cluster": "Local GPU Cluster",
       "slurm_node": "gpu01",
+      "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     },
     {
@@ -18,6 +19,7 @@
       "address": "192.0.2.11:23234",
       "slurm_cluster": "Remote GPU Cluster",
       "slurm_node": "gpu02",
+      "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     }
   ],

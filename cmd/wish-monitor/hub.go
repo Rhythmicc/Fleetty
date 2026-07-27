@@ -25,22 +25,25 @@ const (
 )
 
 type hubConfig struct {
-	Name                string               `json:"name,omitempty"`
-	RefreshSeconds      int                  `json:"refresh_seconds,omitempty"`
-	InsecureSkipHostKey bool                 `json:"insecure_skip_host_key,omitempty"`
-	Nodes               []hubNodeConfig      `json:"nodes"`
-	SlurmClusters       []slurmClusterConfig `json:"slurm_clusters,omitempty"`
+	Name                              string               `json:"name,omitempty"`
+	RefreshSeconds                    int                  `json:"refresh_seconds,omitempty"`
+	InsecureSkipHostKey               bool                 `json:"insecure_skip_host_key,omitempty"`
+	InsecureAllowUnauthenticatedNodes bool                 `json:"insecure_allow_unauthenticated_nodes,omitempty"`
+	Nodes                             []hubNodeConfig      `json:"nodes"`
+	SlurmClusters                     []slurmClusterConfig `json:"slurm_clusters,omitempty"`
 }
 
 type hubNodeConfig struct {
-	Name                string `json:"name"`
-	Address             string `json:"address"`
-	Description         string `json:"description,omitempty"`
-	Profile             string `json:"profile,omitempty"`
-	SlurmCluster        string `json:"slurm_cluster,omitempty"`
-	SlurmNode           string `json:"slurm_node,omitempty"`
-	HostKey             string `json:"host_key,omitempty"`
-	InsecureSkipHostKey bool   `json:"-"`
+	Name                 string `json:"name"`
+	Address              string `json:"address"`
+	Description          string `json:"description,omitempty"`
+	Profile              string `json:"profile,omitempty"`
+	SlurmCluster         string `json:"slurm_cluster,omitempty"`
+	SlurmNode            string `json:"slurm_node,omitempty"`
+	HostKey              string `json:"host_key,omitempty"`
+	IdentityFile         string `json:"identity_file,omitempty"`
+	InsecureSkipHostKey  bool   `json:"-"`
+	AllowUnauthenticated bool   `json:"-"`
 }
 
 func loadHubConfig(path string) (*hubConfig, error) {
@@ -77,7 +80,9 @@ func loadHubConfig(path string) (*hubConfig, error) {
 		}
 		node.Address = strings.TrimSpace(node.Address)
 		node.HostKey = strings.TrimSpace(node.HostKey)
+		node.IdentityFile = strings.TrimSpace(node.IdentityFile)
 		node.InsecureSkipHostKey = config.InsecureSkipHostKey
+		node.AllowUnauthenticated = config.InsecureAllowUnauthenticatedNodes
 		if node.Name == "" || node.Address == "" {
 			return nil, fmt.Errorf("hub node %d requires name and address", index+1)
 		}
@@ -87,6 +92,12 @@ func loadHubConfig(path string) (*hubConfig, error) {
 		seen[node.Name] = struct{}{}
 		if node.HostKey == "" && !config.InsecureSkipHostKey {
 			return nil, fmt.Errorf("hub node %q requires host_key", node.Name)
+		}
+		if node.IdentityFile == "" && !config.InsecureAllowUnauthenticatedNodes {
+			return nil, fmt.Errorf(
+				"hub node %q requires identity_file; use insecure_allow_unauthenticated_nodes only during migration",
+				node.Name,
+			)
 		}
 	}
 	seenClusters := make(map[string]struct{}, len(config.SlurmClusters))

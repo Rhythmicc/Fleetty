@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +17,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 type scriptedSlurmRunner struct {
@@ -188,10 +193,10 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 		"name": "Test Machine Hub",
 		"refresh_seconds": 3,
 		"nodes": [
-			{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:first"},
-			{"name":"node-2","address":"192.0.2.2:23234","profile":"nas","host_key":"SHA256:second"},
-			{"name":"node-3","address":"192.0.2.3:23234","host_key":"SHA256:third"},
-			{"name":"node-4","address":"192.0.2.4:23234","profile":"nas","host_key":"SHA256:fourth"}
+			{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:first","identity_file":"/etc/hub_key"},
+			{"name":"node-2","address":"192.0.2.2:23234","profile":"nas","host_key":"SHA256:second","identity_file":"/etc/hub_key"},
+			{"name":"node-3","address":"192.0.2.3:23234","host_key":"SHA256:third","identity_file":"/etc/hub_key"},
+			{"name":"node-4","address":"192.0.2.4:23234","profile":"nas","host_key":"SHA256:fourth","identity_file":"/etc/hub_key"}
 		]
 	}`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -279,6 +284,35 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	}
 	if !strings.Contains(model.status, "offline") {
 		t.Fatalf("offline selection status = %q", model.status)
+	}
+}
+
+func TestHubConfigRequiresNodeRPCIdentity(t *testing.T) {
+	path := t.TempDir() + "/nodes.json"
+	withoutIdentity := `{
+		"name":"Secure Hub",
+		"nodes":[{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:test"}]
+	}`
+	if err := os.WriteFile(path, []byte(withoutIdentity), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHubConfig(path); err == nil || !strings.Contains(err.Error(), "identity_file") {
+		t.Fatalf("missing node RPC identity should be rejected, got %v", err)
+	}
+	migration := `{
+		"name":"Migration Hub",
+		"insecure_allow_unauthenticated_nodes":true,
+		"nodes":[{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:test"}]
+	}`
+	if err := os.WriteFile(path, []byte(migration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadHubConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.Nodes[0].AllowUnauthenticated {
+		t.Fatal("migration flag was not propagated to the node")
 	}
 }
 
@@ -778,9 +812,10 @@ func TestNodeRPCTimeoutCoversSSHHandshake(t *testing.T) {
 	}()
 
 	client := newNodeRPCClient(hubNodeConfig{
-		Name:    "sleeping-node",
-		Address: listener.Addr().String(),
-		HostKey: "SHA256:not-reached",
+		Name:                 "sleeping-node",
+		Address:              listener.Addr().String(),
+		HostKey:              "SHA256:not-reached",
+		AllowUnauthenticated: true,
 	})
 	started := time.Now()
 	_, err = client.CallWithTimeout(nodeRPCRequest{Operation: rpcSnapshot}, 50*time.Millisecond)
@@ -798,6 +833,112 @@ func TestDefaultRestartCommandMatchesPackagedService(t *testing.T) {
 	if got := admin.actions[0].command; got != "systemctl restart gpu-ssh-monitor.service" {
 		t.Fatalf("default restart command = %q", got)
 	}
+}
+
+func TestSSHAccessConfigRequiresAndLoadsAuthorizedKeys(t *testing.T) {
+	t.Setenv("SSH_ALLOW_ANONYMOUS", "")
+	t.Setenv("SSH_AUTHORIZED_KEYS_FILE", "")
+	t.Setenv("NODE_RPC_AUTHORIZED_KEYS_FILE", "")
+	if _, err := loadSSHAccessConfig(); err == nil {
+		t.Fatal("missing SSH client authentication should be rejected")
+	}
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := gossh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	authorizedKeys := directory + "/authorized_keys"
+	if err := os.WriteFile(authorizedKeys, gossh.MarshalAuthorizedKey(signer.PublicKey()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSH_AUTHORIZED_KEYS_FILE", authorizedKeys)
+	config, err := loadSSHAccessConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := gossh.FingerprintSHA256(signer.PublicKey())
+	if _, ok := config.interactiveKeys[fingerprint]; !ok || config.allowAnonymous {
+		t.Fatalf("authorized key was not loaded: %#v", config)
+	}
+}
+
+func TestPrivateKeyPermissionsAndProcessRedaction(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded})
+	path := t.TempDir() + "/identity"
+	if err := os.WriteFile(path, privatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPrivateKeySigner(path); err != nil {
+		t.Fatalf("secure private key was rejected: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPrivateKeySigner(path); err == nil {
+		t.Fatal("group/world-readable private key should be rejected")
+	}
+
+	command := "python train.py --password hunter2 API_TOKEN=abc --api-key=xyz " +
+		"DATABASE_URL=postgres://alice:dbpass@db.example/app?token=urltoken --epochs 10"
+	redacted := redactProcessCommandLine(command)
+	for _, secret := range []string{"hunter2", "abc", "xyz", "dbpass", "urltoken"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("redacted command still contains %q: %s", secret, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "--epochs 10") {
+		t.Fatalf("non-sensitive arguments were lost: %s", redacted)
+	}
+	detail := processDetail{CommandLine: command, CWD: "/srv/private-project"}
+	applyProcessDetailPolicy(&detail, false)
+	if !detail.Redacted || detail.CWD != redactedProcessDetailMessage ||
+		strings.Contains(detail.CommandLine, "hunter2") {
+		t.Fatalf("read-only process detail policy did not redact sensitive fields: %#v", detail)
+	}
+	full := processDetail{CommandLine: command, CWD: "/srv/private-project"}
+	applyProcessDetailPolicy(&full, true)
+	if full.Redacted || full.CWD != "/srv/private-project" || full.CommandLine != command {
+		t.Fatalf("authenticated process detail policy changed full details: %#v", full)
+	}
+}
+
+func TestSSHConnectionLimiterReleasesClosedConnections(t *testing.T) {
+	limiter := newConnectionLimiter(1)
+	clientOne, serverOne := net.Pipe()
+	defer clientOne.Close()
+	limited := limiter.wrap(nil, serverOne)
+	if limited == nil {
+		t.Fatal("first connection should be accepted")
+	}
+	clientTwo, serverTwo := net.Pipe()
+	defer clientTwo.Close()
+	defer serverTwo.Close()
+	if got := limiter.wrap(nil, serverTwo); got != nil {
+		t.Fatal("connection above the limit should be rejected")
+	}
+	if err := limited.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clientThree, serverThree := net.Pipe()
+	defer clientThree.Close()
+	accepted := limiter.wrap(nil, serverThree)
+	if accepted == nil {
+		t.Fatal("closing a connection should release its slot")
+	}
+	_ = accepted.Close()
 }
 
 func TestManagementCardsCanBeClicked(t *testing.T) {
@@ -928,6 +1069,23 @@ func TestRPCProcessDetailsAreReadOnlyWithoutAuthentication(t *testing.T) {
 	})
 	if !strings.Contains(terminate.Error, "authentication failed") {
 		t.Fatalf("unauthenticated termination was not rejected: %#v", terminate)
+	}
+}
+
+func TestManagementAuthenticationLocksAfterRepeatedFailures(t *testing.T) {
+	model := &monitorModel{admin: &adminController{password: "correct"}, screen: screenPassword}
+	for attempt := 0; attempt < maxManagementAuthFailures; attempt++ {
+		_, _ = model.Update(authenticationResultMsg{password: "wrong", ok: false})
+	}
+	if !time.Now().Before(model.authLockedUntil) {
+		t.Fatal("repeated management authentication failures did not start a lockout")
+	}
+	model.password = "correct"
+	if command := model.handleKey(testKey("enter")); command != nil {
+		t.Fatal("locked management authentication should not call the backend")
+	}
+	if !strings.Contains(model.status, "locked") {
+		t.Fatalf("lockout status is not visible: %q", model.status)
 	}
 }
 
