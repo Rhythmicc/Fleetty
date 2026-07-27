@@ -1091,16 +1091,25 @@ func (m *monitorModel) slurmQueueRows() int {
 	if m.slurmQueue == nil {
 		return 0
 	}
-	limit := 4
+	limit := 6
 	switch {
 	case m.height < 34:
 		limit = 1
 	case m.height < 42:
-		limit = 2
+		limit = 3
 	case m.height >= 54:
-		limit = 5
+		limit = 8
 	}
+	limit = min(max(1, limit+m.queueHeightDelta), 12)
 	return min(limit, max(1, len(m.slurmQueue.Jobs)))
+}
+
+func (m *monitorModel) clampQueueOffset(rows int) {
+	if m.slurmQueue == nil || len(m.slurmQueue.Jobs) == 0 {
+		m.queueOffset = 0
+		return
+	}
+	m.queueOffset = min(max(0, m.queueOffset), max(0, len(m.slurmQueue.Jobs)-rows))
 }
 
 func (m *monitorModel) slurmNodePanel(width, rowLimit int) string {
@@ -1126,20 +1135,25 @@ func (m *monitorModel) slurmNodePanel(width, rowLimit int) string {
 	if len(queue.Jobs) == 0 {
 		lines = append(lines, dimStyle.Render("No running or eligible queued jobs for this node."))
 	} else {
-		for index, job := range queue.Jobs {
-			if index >= rowLimit {
-				break
-			}
+		m.clampQueueOffset(rowLimit)
+		end := min(len(queue.Jobs), m.queueOffset+rowLimit)
+		for _, job := range queue.Jobs[m.queueOffset:end] {
 			lines = append(lines, renderSlurmNodeJobRow(job, width-4))
 		}
-		remaining := len(queue.Jobs) - min(len(queue.Jobs), rowLimit)
-		if remaining > 0 && rowLimit > 1 {
+		remaining := len(queue.Jobs) - end
+		if (remaining > 0 || m.queueOffset > 0) && rowLimit > 1 {
+			more := fmt.Sprintf("  %d–%d/%d", m.queueOffset+1, end, len(queue.Jobs))
 			lines[len(lines)-1] = ansi.Truncate(lines[len(lines)-1],
-				max(1, width-lipgloss.Width(fmt.Sprintf("  +%d more", remaining))-4), "") +
-				dimStyle.Render(fmt.Sprintf("  +%d more", remaining))
+				max(1, width-lipgloss.Width(more)-4), "") + dimStyle.Render(more)
 		}
 	}
-	return btopPanel(width, "NODE QUEUE", meta, strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
+	titleForPanel := processTitleStyle
+	border := colorProcessBorder
+	if m.monitorFocus == monitorFocusQueue {
+		titleForPanel = accentStyle
+		border = lipgloss.Color("#B9A4FF")
+	}
+	return btopPanel(width, "NODE QUEUE", meta, strings.Join(lines, "\n"), titleForPanel, border)
 }
 
 func slurmNodeJobHeader(width int) string {

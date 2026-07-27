@@ -829,6 +829,100 @@ func TestProcessFilterAndMouseSelection(t *testing.T) {
 	}
 }
 
+func TestReadOnlyDashboardResizesPanelsAndOpensProcessDetails(t *testing.T) {
+	processes := make([]processInfo, 16)
+	for index := range processes {
+		processes[index] = processInfo{
+			PID: 200 + index, User: "worker", Command: fmt.Sprintf("trainer-%d", index),
+			State: "R", CPU: float64(16 - index),
+		}
+	}
+	jobs := make([]slurmDisplayJob, 10)
+	for index := range jobs {
+		jobs[index] = slurmDisplayJob{
+			Job: slurmJob{
+				ID: fmt.Sprintf("%d", 1000+index), User: "alice", State: "PENDING",
+				Partition: "gpu", Name: fmt.Sprintf("job-%d", index),
+			},
+			Next: index == 0,
+		}
+	}
+	m := &monitorModel{
+		screen: screenMonitor, width: 120, height: 48, colorMode: colorModeDark,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1, Processes: processes,
+		},
+		slurmQueue: &nodeSlurmQueue{
+			Cluster: "Test Cluster", Node: "gpu01", CollectedAt: time.Now(), Jobs: jobs,
+		},
+	}
+	initialRows := m.slurmQueueRows()
+	if initialRows != 6 {
+		t.Fatalf("default node queue rows = %d, want 6", initialRows)
+	}
+	m.handleKey(testKey("+"))
+	if got := m.slurmQueueRows(); got != initialRows+1 {
+		t.Fatalf("focused queue did not grow: rows=%d", got)
+	}
+	m.handleKey(testKey("tab"))
+	m.handleKey(testKey("+"))
+	if got := m.slurmQueueRows(); got != initialRows {
+		t.Fatalf("growing focused process panel should shrink queue: rows=%d", got)
+	}
+
+	for _, size := range []struct{ width, height int }{{160, 54}, {120, 48}, {100, 36}, {60, 24}} {
+		m.width, m.height = size.width, size.height
+		rendered := m.monitorView()
+		if got := lipgloss.Height(rendered); got > m.height {
+			t.Fatalf("%dx%d resizable dashboard height = %d\n%s", m.width, m.height, got, rendered)
+		}
+		for lineNumber, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > m.width {
+				t.Fatalf("%dx%d line %d width = %d\n%q", m.width, m.height, lineNumber, got, line)
+			}
+		}
+	}
+	m.width, m.height = 120, 48
+	_ = m.monitorView()
+	if m.processRowY <= m.processPanelY || m.monitorRows < 1 {
+		t.Fatalf("invalid process hit area: panel=%d row=%d rows=%d", m.processPanelY, m.processRowY, m.monitorRows)
+	}
+	command := m.handleClick(4, m.processRowY)
+	if command == nil || m.screen != screenProcessDetail || !m.processReadOnly ||
+		m.selectedProcess == nil || m.selectedProcess.PID != processes[0].PID {
+		t.Fatalf("read-only click selection failed: screen=%v readonly=%t process=%#v", m.screen, m.processReadOnly, m.selectedProcess)
+	}
+	detailView := m.processDetailView()
+	if strings.Contains(detailView, "Terminate process") {
+		t.Fatalf("read-only process details exposed termination action:\n%s", detailView)
+	}
+	m.handleKey(testKey("t"))
+	if m.screen != screenProcessDetail {
+		t.Fatal("read-only details accepted the terminate shortcut")
+	}
+	m.handleKey(testKey("esc"))
+	if m.screen != screenMonitor {
+		t.Fatalf("read-only process details returned to screen %v, want monitor", m.screen)
+	}
+}
+
+func TestRPCProcessDetailsAreReadOnlyWithoutAuthentication(t *testing.T) {
+	admin := &adminController{password: "secret"}
+	service := newNodeRPCService(admin, machineConfig{})
+	detail := service.Handle(nodeRPCRequest{
+		Version: nodeRPCVersion, Operation: rpcProcessDetail, PID: -1,
+	})
+	if detail.Error != "invalid PID" {
+		t.Fatalf("unauthenticated read-only detail did not reach the reader: %#v", detail)
+	}
+	terminate := service.Handle(nodeRPCRequest{
+		Version: nodeRPCVersion, Operation: rpcTerminateProcess, PID: os.Getpid(),
+	})
+	if !strings.Contains(terminate.Error, "authentication failed") {
+		t.Fatalf("unauthenticated termination was not rejected: %#v", terminate)
+	}
+}
+
 func TestProcessSelectionScrollsWithTerminalHeight(t *testing.T) {
 	processes := make([]processInfo, 12)
 	for i := range processes {

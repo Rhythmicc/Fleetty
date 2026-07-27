@@ -114,9 +114,13 @@ type monitorModel struct {
 	filtering        bool
 	cursor           int
 	processOffset    int
+	monitorCursor    int
+	monitorOffset    int
+	queueOffset      int
 	selectedAction   *adminAction
 	selectedProcess  *processInfo
 	processDetail    *processDetail
+	processReadOnly  bool
 	detailErr        error
 	status           string
 	busy             bool
@@ -127,7 +131,20 @@ type monitorModel struct {
 	networkTXHistory []float64
 	colorMode        colorMode
 	slurmQueue       *nodeSlurmQueue
+	monitorFocus     monitorPanelFocus
+	queueHeightDelta int
+	queuePanelY      int
+	processPanelY    int
+	processRowY      int
+	monitorRows      int
 }
+
+type monitorPanelFocus int
+
+const (
+	monitorFocusQueue monitorPanelFocus = iota
+	monitorFocusProcesses
+)
 
 type colorMode int
 
@@ -247,6 +264,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.networkRXHistory = appendHistory(m.networkRXHistory, float64(msg.snapshot.NetworkRX), 60)
 		m.networkTXHistory = appendHistory(m.networkTXHistory, float64(msg.snapshot.NetworkTX), 60)
 		m.clampProcessCursor()
+		m.clampMonitorProcessCursor(m.monitorRows)
 	case authenticationResultMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -297,7 +315,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		if m.screen == screenPassword {
 			m.appendPassword(msg.Content)
-		} else if m.screen == screenAdmin && m.filtering {
+		} else if (m.screen == screenAdmin || m.screen == screenMonitor) && m.filtering {
 			m.appendFilter(msg.Content)
 		}
 	}
@@ -306,7 +324,32 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	key := msg.String()
-	if key == "ctrl+c" || key == "q" && m.screen == screenMonitor {
+	if key == "ctrl+c" {
+		return tea.Quit
+	}
+	if m.screen == screenMonitor && m.filtering {
+		switch key {
+		case "esc":
+			m.filtering = false
+			m.status = "Filter editing cancelled."
+		case "enter":
+			m.filtering = false
+			m.monitorCursor, m.monitorOffset = 0, 0
+			m.status = fmt.Sprintf("Filter applied: %q", m.filter)
+		case "backspace", "delete":
+			m.filter = trimLastRune(m.filter)
+			m.monitorCursor, m.monitorOffset = 0, 0
+		default:
+			text := msg.Key().Text
+			if text == "" && len([]rune(key)) == 1 {
+				text = key
+			}
+			m.appendFilter(text)
+			m.monitorCursor, m.monitorOffset = 0, 0
+		}
+		return nil
+	}
+	if key == "q" && m.screen == screenMonitor {
 		return tea.Quit
 	}
 	themeKey := key == "T" || key == "t" && (m.screen == screenMonitor || m.screen == screenAdmin)
@@ -327,6 +370,34 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "r":
 			m.status = "Refreshing now…"
 			return m.startCollect()
+		case "tab":
+			if m.slurmQueue == nil {
+				m.monitorFocus = monitorFocusProcesses
+			} else if m.monitorFocus == monitorFocusQueue {
+				m.monitorFocus = monitorFocusProcesses
+			} else {
+				m.monitorFocus = monitorFocusQueue
+			}
+			m.status = "Focused " + m.monitorFocus.label() + "."
+		case "+", "=":
+			m.adjustFocusedPanelHeight(1)
+		case "-", "_":
+			m.adjustFocusedPanelHeight(-1)
+		case "up", "k":
+			m.moveMonitorSelection(-1)
+		case "down", "j":
+			m.moveMonitorSelection(1)
+		case "enter":
+			if m.effectiveMonitorFocus() == monitorFocusProcesses {
+				return m.openReadOnlyProcess(m.monitorCursor)
+			}
+		case "/":
+			m.monitorFocus = monitorFocusProcesses
+			m.filtering = true
+			m.status = "Type a process name, user, or PID."
+		case "c":
+			m.filter, m.monitorCursor, m.monitorOffset = "", 0, 0
+			m.status = "Process filter cleared."
 		}
 	case screenPassword:
 		switch key {
@@ -409,13 +480,17 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case screenProcessDetail:
 		switch key {
 		case "esc", "q":
-			m.screen, m.status = screenAdmin, "Returned to process manager."
+			if m.processReadOnly {
+				m.screen, m.status = screenMonitor, "Returned to read-only monitor."
+			} else {
+				m.screen, m.status = screenAdmin, "Returned to process manager."
+			}
 		case "r":
 			if m.selectedProcess != nil {
 				return m.loadProcessDetail(m.selectedProcess.PID)
 			}
 		case "t":
-			if m.selectedProcessCanTerminate() {
+			if !m.processReadOnly && m.selectedProcessCanTerminate() {
 				m.screen = screenProcessTerminateConfirm
 				m.status = "Confirm before sending SIGTERM."
 			}
@@ -458,10 +533,30 @@ func (m *monitorModel) appendFilter(text string) {
 			m.filter += string(r)
 		}
 	}
-	m.cursor, m.processOffset = 0, 0
+	if m.screen == screenMonitor {
+		m.monitorCursor, m.monitorOffset = 0, 0
+	} else {
+		m.cursor, m.processOffset = 0, 0
+	}
 }
 
 func (m *monitorModel) handleClick(x, y int) tea.Cmd {
+	if m.screen == screenMonitor {
+		if m.queuePanelY >= 0 && y >= m.queuePanelY && y < m.processPanelY {
+			m.monitorFocus = monitorFocusQueue
+			m.status = "Focused node queue. Use +/- to resize and ↑/↓ to scroll."
+			return nil
+		}
+		if y >= m.processPanelY && y < m.processRowY {
+			m.monitorFocus = monitorFocusProcesses
+			m.status = "Focused processes. Use +/- to resize."
+			return nil
+		}
+		if y >= m.processRowY && y < m.processRowY+m.monitorRows {
+			m.monitorFocus = monitorFocusProcesses
+			return m.openReadOnlyProcess(m.monitorOffset + y - m.processRowY)
+		}
+	}
 	if m.screen == screenAdmin {
 		if y == 2 {
 			firstLabel, secondLabel := m.adminActionLabels()
@@ -488,7 +583,8 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 			m.screen, m.selectedAction, m.status = screenAdmin, nil, "Action cancelled."
 		}
 	}
-	if m.screen == screenProcessDetail && y == 2 && x < compactButtonWidth("T", "Terminate process") {
+	if m.screen == screenProcessDetail && !m.processReadOnly &&
+		y == 2 && x < compactButtonWidth("T", "Terminate process") {
 		if m.selectedProcessCanTerminate() {
 			m.screen = screenProcessTerminateConfirm
 			m.status = "Confirm before sending SIGTERM."
@@ -555,6 +651,81 @@ func (m *monitorModel) clampProcessCursor() {
 	}
 }
 
+func (focus monitorPanelFocus) label() string {
+	if focus == monitorFocusProcesses {
+		return "processes"
+	}
+	return "node queue"
+}
+
+func (m *monitorModel) effectiveMonitorFocus() monitorPanelFocus {
+	if m.slurmQueue == nil {
+		return monitorFocusProcesses
+	}
+	return m.monitorFocus
+}
+
+func (m *monitorModel) adjustFocusedPanelHeight(delta int) {
+	if m.slurmQueue == nil {
+		m.status = "This dashboard has no resizable node queue."
+		return
+	}
+	if m.effectiveMonitorFocus() == monitorFocusProcesses {
+		delta = -delta
+	}
+	before := m.slurmQueueRows()
+	m.queueHeightDelta += delta
+	m.queueHeightDelta = min(max(-10, m.queueHeightDelta), 10)
+	after := m.slurmQueueRows()
+	if before == after {
+		m.queueHeightDelta -= delta
+		m.status = "Panel height limit reached."
+		return
+	}
+	m.clampQueueOffset(after)
+	m.status = fmt.Sprintf("Node queue height: %d rows; process area adjusts automatically.", after)
+}
+
+func (m *monitorModel) moveMonitorSelection(delta int) {
+	if m.effectiveMonitorFocus() == monitorFocusQueue {
+		if m.slurmQueue == nil || len(m.slurmQueue.Jobs) == 0 {
+			return
+		}
+		rows := m.slurmQueueRows()
+		m.queueOffset = min(max(0, m.queueOffset+delta), max(0, len(m.slurmQueue.Jobs)-rows))
+		m.status = fmt.Sprintf("Node queue rows %d–%d of %d.",
+			m.queueOffset+1, min(len(m.slurmQueue.Jobs), m.queueOffset+rows), len(m.slurmQueue.Jobs))
+		return
+	}
+	processes := m.filteredProcesses()
+	if len(processes) == 0 {
+		return
+	}
+	m.monitorCursor = min(max(0, m.monitorCursor+delta), len(processes)-1)
+	m.clampMonitorProcessCursor(m.monitorRows)
+	m.status = fmt.Sprintf("Selected PID %d. Press Enter for read-only details.", processes[m.monitorCursor].PID)
+}
+
+func (m *monitorModel) clampMonitorProcessCursor(rows int) {
+	processes := m.filteredProcesses()
+	if len(processes) == 0 {
+		m.monitorCursor, m.monitorOffset = 0, 0
+		return
+	}
+	m.monitorCursor = min(max(0, m.monitorCursor), len(processes)-1)
+	if rows <= 0 {
+		m.monitorOffset = 0
+		return
+	}
+	if m.monitorCursor < m.monitorOffset {
+		m.monitorOffset = m.monitorCursor
+	}
+	if m.monitorCursor >= m.monitorOffset+rows {
+		m.monitorOffset = m.monitorCursor - rows + 1
+	}
+	m.monitorOffset = min(max(0, m.monitorOffset), max(0, len(processes)-rows))
+}
+
 func (m *monitorModel) adminVisibleProcessRows() int {
 	return max(3, m.height-9)
 }
@@ -571,14 +742,27 @@ func (m *monitorModel) adminActionLabels() (string, string) {
 }
 
 func (m *monitorModel) openProcess(index int) tea.Cmd {
+	return m.openProcessMode(index, false)
+}
+
+func (m *monitorModel) openReadOnlyProcess(index int) tea.Cmd {
+	return m.openProcessMode(index, true)
+}
+
+func (m *monitorModel) openProcessMode(index int, readOnly bool) tea.Cmd {
 	processes := m.filteredProcesses()
 	if index < 0 || index >= len(processes) {
 		return nil
 	}
 	process := processes[index]
-	m.cursor = index
+	if readOnly {
+		m.monitorCursor = index
+	} else {
+		m.cursor = index
+	}
 	m.selectedProcess = &process
 	m.processDetail, m.detailErr = nil, nil
+	m.processReadOnly = readOnly
 	m.screen = screenProcessDetail
 	m.status = fmt.Sprintf("Loading details for PID %d…", process.PID)
 	return m.loadProcessDetail(process.PID)
@@ -707,6 +891,7 @@ func (m *monitorModel) monitorView() string {
 	metricRows := renderMetricRows(metrics, layout)
 	gpu := m.gpuPanel(layout)
 	slurm := ""
+	m.queuePanelY = -1
 	if m.slurmQueue != nil {
 		queueRows := m.slurmQueueRows()
 		queueLines := queueRows + 4
@@ -716,17 +901,30 @@ func (m *monitorModel) monitorView() string {
 		layout.processRows = max(0, layout.processRows-queueLines)
 		slurm = m.slurmNodePanel(layout.width, queueRows)
 	}
+	m.clampMonitorProcessCursor(layout.processRows)
 	processes := m.processPanel(layout)
-	footer := renderFooter(w, m.status)
+	footer := m.renderMonitorFooter(w)
 	if m.loadErr != nil {
 		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
 	}
 	sections := []string{header, metricRows, gpu}
 	if slurm != "" {
+		m.queuePanelY = renderedSectionsHeight(sections)
 		sections = append(sections, slurm)
 	}
+	m.processPanelY = renderedSectionsHeight(sections)
+	m.processRowY = m.processPanelY + 3
+	m.monitorRows = layout.processRows
 	sections = append(sections, processes, footer)
 	return strings.Join(sections, "\n")
+}
+
+func renderedSectionsHeight(sections []string) int {
+	height := 0
+	for _, section := range sections {
+		height += lipgloss.Height(section)
+	}
+	return height
 }
 
 func dashboardHeader(width int, collectedAt time.Time, mode colorMode, nodeName string) string {
@@ -850,20 +1048,39 @@ func gpuLoadStatus(utilization float64) (string, lipgloss.Style) {
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	w := layout.width
 	format := newProcessFormat(w)
+	processes := m.filteredProcesses()
 	lines := []string{
 		processLegend(w),
 		processTableHeader(format.header(), w-4),
 	}
-	for i, p := range m.snapshot.Processes {
-		if i >= layout.processRows {
-			break
+	end := min(len(processes), m.monitorOffset+layout.processRows)
+	for i := m.monitorOffset; i < end; i++ {
+		row := format.row(processes[i])
+		if m.effectiveMonitorFocus() == monitorFocusProcesses && i == m.monitorCursor {
+			row = selectedRowStyle.Render(row)
+		} else {
+			row = processStateStyle(processes[i].State).Render(row)
 		}
-		lines = append(lines, processStateStyle(p.State).Render(format.row(p)))
+		lines = append(lines, row)
 	}
-	if len(m.snapshot.Processes) == 0 {
-		lines = append(lines, dimStyle.Render("No process data available."))
+	if len(processes) == 0 {
+		message := "No process data available."
+		if m.filter != "" {
+			message = "No processes match the current filter."
+		}
+		lines = append(lines, dimStyle.Render(message))
 	}
-	return btopPanel(w, "PROCESSES", "CPU ↓  ·  READ ONLY", strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
+	titleForPanel := processTitleStyle
+	border := colorProcessBorder
+	if m.monitorFocus == monitorFocusProcesses || m.slurmQueue == nil {
+		titleForPanel = accentStyle
+		border = lipgloss.Color("#B9A4FF")
+	}
+	meta := fmt.Sprintf("CPU ↓  ·  READ ONLY  ·  %d/%d", len(processes), len(m.snapshot.Processes))
+	if m.filter != "" {
+		meta += "  ·  FILTER " + truncate(m.filter, 18)
+	}
+	return btopPanel(w, "PROCESSES", meta, strings.Join(lines, "\n"), titleForPanel, border)
 }
 
 func (m *monitorModel) passwordView() string {
@@ -961,13 +1178,25 @@ func (m *monitorModel) confirmView() string {
 func (m *monitorModel) processDetailView() string {
 	w := usableWidth(m.width)
 	if m.selectedProcess == nil {
+		if m.processReadOnly {
+			m.screen = screenMonitor
+			return m.monitorView()
+		}
 		m.screen = screenAdmin
 		return m.adminView()
 	}
 	pid := m.selectedProcess.PID
-	action := compactButton("T", "Terminate process", true)
-	if !m.selectedProcessCanTerminate() {
-		action = dimStyle.Render("Termination unavailable until details are loaded, or for protected processes")
+	action := compactButton("Esc", "Back to monitor", false)
+	description := "Read-only process information. Management authentication is not required."
+	help := "[r] reload  [esc] back"
+	if !m.processReadOnly {
+		action = compactButton("T", "Terminate process", true)
+		if !m.selectedProcessCanTerminate() {
+			action = dimStyle.Render("Termination unavailable until details are loaded, or for protected processes")
+		}
+		action += "  " + compactButton("Esc", "Back to process manager", false)
+		description = "Inspect the selected process before taking action."
+		help = "[t/click] terminate  [r] reload  [esc] back"
 	}
 	body := "Loading process details…"
 	if m.detailErr != nil {
@@ -987,10 +1216,10 @@ func (m *monitorModel) processDetailView() string {
 	}
 	return strings.Join([]string{
 		titleStyle.Render("PROCESS DETAILS") + "  " + accentStyle.Render(fmt.Sprintf("PID %d", pid)),
-		dimStyle.Render("Inspect the selected process before taking action."),
-		action + "  " + compactButton("Esc", "Back to process manager", false),
+		dimStyle.Render(description),
+		action,
 		panelStyle(w).Render(body),
-		helpStyle.Render("[t/click] terminate  [r] reload  [esc] back") + "  " + dimStyle.Render(m.status),
+		helpStyle.Render(help) + "  " + dimStyle.Render(m.status),
 	}, "\n")
 }
 
@@ -1789,6 +2018,41 @@ func renderFooter(width int, status string) string {
 		return hints
 	}
 	return hints + "  " + dimStyle.Render(truncate(status, remaining))
+}
+
+func (m *monitorModel) renderMonitorFooter(width int) string {
+	if m.filtering {
+		value := m.filter
+		if value == "" {
+			value = "process name, user, or PID"
+		}
+		return ansi.Truncate(accentStyle.Render("FILTER /")+" "+
+			inputStyle.Render(value+"█")+"  "+dimStyle.Render("[enter] apply  [esc] cancel"), width, "")
+	}
+	hints := []string{keyHint("m", "management")}
+	if m.slurmQueue != nil {
+		hints = append(hints,
+			keyHint("tab", "focus"),
+			keyHint("+/-", "height"),
+		)
+	}
+	hints = append(hints,
+		keyHint("↑↓", "select"),
+		keyHint("enter", "details"),
+		keyHint("/", "filter"),
+		keyHint("t", "theme"),
+		keyHint("r", "refresh"),
+		keyHint("q", "quit"),
+	)
+	joined := strings.Join(hints, "  ")
+	if lipgloss.Width(joined) > width {
+		return ansi.Truncate(joined, width, "")
+	}
+	remaining := width - lipgloss.Width(joined) - 2
+	if remaining < 12 || strings.TrimSpace(m.status) == "" {
+		return joined
+	}
+	return joined + "  " + dimStyle.Render(truncate(m.status, remaining))
 }
 
 func keyHint(key, label string) string {

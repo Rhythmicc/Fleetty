@@ -93,9 +93,6 @@ func (s *nodeRPCService) Handle(request nodeRPCRequest) nodeRPCResponse {
 	case rpcAuthenticate:
 		return nodeRPCResponse{Authorized: s.admin.authenticate(request.Password)}
 	case rpcProcessDetail:
-		if !s.admin.authenticate(request.Password) {
-			return nodeRPCResponse{Error: "management authentication failed"}
-		}
 		detail, err := s.backend.ProcessDetail(request.PID, "")
 		return responseWithProcessDetail(detail, err)
 	case rpcTerminateProcess:
