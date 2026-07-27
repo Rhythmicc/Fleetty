@@ -64,7 +64,7 @@ func loadHubConfig(path string) (*hubConfig, error) {
 	}
 	config.Name = sanitizeTerminalText(config.Name)
 	if config.Name == "" {
-		config.Name = "Machine Hub"
+		config.Name = "Fleetty Hub"
 	}
 	seen := make(map[string]struct{}, len(config.Nodes))
 	for index := range config.Nodes {
@@ -177,7 +177,7 @@ func (c hubConfig) displayName() string {
 	if name := sanitizeTerminalText(c.Name); name != "" {
 		return name
 	}
-	return "Machine Hub"
+	return "Fleetty Hub"
 }
 
 func (c hubConfig) refreshInterval() time.Duration {

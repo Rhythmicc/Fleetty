@@ -19,7 +19,7 @@ func (m *monitorModel) nasView() string {
 	if m.snapshot.NodeName != "" {
 		nodeName = m.snapshot.NodeName
 	}
-	header := dashboardHeaderNamed("NAS MONITOR", width, m.snapshot.CollectedAt, m.colorMode, nodeName)
+	header := dashboardHeaderNamed("FLEETTY NAS", width, m.snapshot.CollectedAt, m.colorMode, nodeName)
 	if m.snapshot.CollectedAt.IsZero() {
 		return strings.Join([]string{header, "", panelStyle(width).Render("Collecting NAS metrics…")}, "\n")
 	}

@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	nodeRPCUser                  = "gpu-monitor-hub"
+	nodeRPCUser                  = "fleetty-hub"
 	defaultSSHConnectionLimit    = 64
 	defaultSSHIdleTimeout        = 30 * time.Minute
 	defaultSSHMaxTimeout         = 24 * time.Hour

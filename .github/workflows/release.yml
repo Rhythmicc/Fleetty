@@ -37,19 +37,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          for monitor_arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="${monitor_arch}" \
+          for fleetty_arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${fleetty_arch}" \
               go build -trimpath -ldflags="-s -w" \
-              -o "dist/gpu-ssh-monitor_linux_${monitor_arch}" \
-              ./cmd/wish-monitor
+              -o "dist/fleetty_linux_${fleetty_arch}" \
+              ./cmd/fleetty
           done
-          cp deploy/gpu-ssh-monitor.service dist/gpu-ssh-monitor.service
-          cp deploy/gpu-ssh-monitor-hub.service dist/gpu-ssh-monitor-hub.service
+          cp deploy/fleetty.service dist/fleetty.service
+          cp deploy/fleetty-hub.service dist/fleetty-hub.service
           cp deploy/hub-nodes.example.json dist/hub-nodes.example.json
           cp deploy/machine-nas.example.json dist/machine-nas.example.json
           (
             cd dist
-            sha256sum gpu-ssh-monitor_linux_* gpu-ssh-monitor*.service *.example.json > checksums.txt
+            sha256sum fleetty_linux_* fleetty*.service *.example.json > checksums.txt
           )
 
       - name: Create GitHub release
@@ -59,4 +59,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --verify-tag \
             --generate-notes \
-            --title "GPU SSH Monitor ${GITHUB_REF_NAME}"
+            --title "Fleetty ${GITHUB_REF_NAME}"

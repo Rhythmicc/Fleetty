@@ -328,7 +328,7 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 				"transport":"ssh",
 				"address":"login.example.test:2222",
 				"user":"slurm-monitor",
-				"identity_file":"/etc/gpu-ssh-monitor/slurm_ed25519",
+				"identity_file":"/etc/fleetty/slurm_ed25519",
 				"host_key":"SHA256:test"
 			}
 		]
@@ -935,9 +935,9 @@ func TestNodeRPCTimeoutCoversSSHHandshake(t *testing.T) {
 }
 
 func TestDefaultRestartCommandMatchesPackagedService(t *testing.T) {
-	t.Setenv("ADMIN_RESTART_MONITOR_CMD", "")
+	t.Setenv("ADMIN_RESTART_SERVICE_CMD", "")
 	admin := newAdminController()
-	if got := admin.actions[0].command; got != "systemctl restart gpu-ssh-monitor.service" {
+	if got := admin.actions[0].command; got != "systemctl restart fleetty.service" {
 		t.Fatalf("default restart command = %q", got)
 	}
 }

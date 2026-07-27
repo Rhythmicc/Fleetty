@@ -45,8 +45,8 @@ jobs:
       - name: Build release architectures
         shell: bash
         run: |
-          for monitor_arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="${monitor_arch}" \
-              go build -trimpath -o "/tmp/gpu-ssh-monitor_${monitor_arch}" \
-              ./cmd/wish-monitor
+          for fleetty_arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${fleetty_arch}" \
+              go build -trimpath -o "/tmp/fleetty_${fleetty_arch}" \
+              ./cmd/fleetty
           done

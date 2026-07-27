@@ -1,6 +1,6 @@
-# GPU SSH Monitor
+# Fleetty
 
-GPU SSH Monitor 是一个面向计算服务器和存储节点的 SSH 监控界面。连接专用 SSH 端口后会直接进入终端仪表盘，不会获得服务器 shell。
+Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终端控制台。连接专用 SSH 端口后会直接进入终端仪表盘，不会获得服务器 shell。
 
 它以单一可执行文件运行，适合为运维人员或服务器使用者提供统一、受控的主机状态入口。
 
@@ -32,30 +32,30 @@ GPU SSH Monitor 是一个面向计算服务器和存储节点的 SSH 监控界�
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/Rhythmicc/gpu-ssh-monitor/releases) 下载当前架构的最新版本：
+从 [GitHub Releases](https://github.com/Rhythmicc/fleetty/releases) 下载当前架构的最新版本：
 
 ```bash
 case "$(uname -m)" in
-  x86_64) monitor_arch=amd64 ;;
-  aarch64|arm64) monitor_arch=arm64 ;;
+  x86_64) fleetty_arch=amd64 ;;
+  aarch64|arm64) fleetty_arch=arm64 ;;
   *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-monitor_release_base="https://github.com/Rhythmicc/gpu-ssh-monitor/releases/latest/download"
+fleetty_release_base="https://github.com/Rhythmicc/fleetty/releases/latest/download"
 
 curl -fL \
-  -o "/tmp/gpu-ssh-monitor_linux_${monitor_arch}" \
-  "${monitor_release_base}/gpu-ssh-monitor_linux_${monitor_arch}"
+  -o "/tmp/fleetty_linux_${fleetty_arch}" \
+  "${fleetty_release_base}/fleetty_linux_${fleetty_arch}"
 curl -fL \
-  -o /tmp/gpu-ssh-monitor.service \
-  "${monitor_release_base}/gpu-ssh-monitor.service"
+  -o /tmp/fleetty.service \
+  "${fleetty_release_base}/fleetty.service"
 curl -fL \
-  -o /tmp/gpu-ssh-monitor-checksums.txt \
-  "${monitor_release_base}/checksums.txt"
+  -o /tmp/fleetty-checksums.txt \
+  "${fleetty_release_base}/checksums.txt"
 
 (
   cd /tmp
-  grep "gpu-ssh-monitor_linux_${monitor_arch}$" gpu-ssh-monitor-checksums.txt |
+  grep "fleetty_linux_${fleetty_arch}$" fleetty-checksums.txt |
     sha256sum -c -
 )
 ```
@@ -63,27 +63,27 @@ curl -fL \
 安装程序和 systemd 服务：
 
 ```bash
-sudo install -d -o root -g root -m 0755 /opt/gpu-ssh-monitor
-sudo install -d -o root -g root -m 0700 /etc/gpu-ssh-monitor
+sudo install -d -o root -g root -m 0755 /opt/fleetty
+sudo install -d -o root -g root -m 0700 /etc/fleetty
 sudo install -o root -g root -m 0755 \
-  "/tmp/gpu-ssh-monitor_linux_${monitor_arch}" \
-  /opt/gpu-ssh-monitor/gpu-ssh-monitor
+  "/tmp/fleetty_linux_${fleetty_arch}" \
+  /opt/fleetty/fleetty
 sudo install -o root -g root -m 0644 \
-  /tmp/gpu-ssh-monitor.service \
-  /etc/systemd/system/gpu-ssh-monitor.service
+  /tmp/fleetty.service \
+  /etc/systemd/system/fleetty.service
 
 # 允许当前操作者的 SSH 公钥连接监控端口。
 # 如需允许多人访问，可将多行公钥写入同一个文件。
 sudo install -o root -g root -m 0600 \
   "$HOME/.ssh/id_ed25519.pub" \
-  /etc/gpu-ssh-monitor/authorized_keys
+  /etc/fleetty/authorized_keys
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now gpu-ssh-monitor.service
-sudo systemctl status gpu-ssh-monitor.service
+sudo systemctl enable --now fleetty.service
+sudo systemctl status fleetty.service
 ```
 
-服务默认监听 `0.0.0.0:23234`，但只接受 `/etc/gpu-ssh-monitor/authorized_keys` 中登记的客户端公钥。首次启动时会自动创建 `/etc/gpu-ssh-monitor/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
+服务默认监听 `0.0.0.0:23234`，但只接受 `/etc/fleetty/authorized_keys` 中登记的客户端公钥。首次启动时会自动创建 `/etc/fleetty/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
 
 如果服务器启用了防火墙，请只向需要访问监控的网络开放 TCP 23234 端口。
 
@@ -130,17 +130,17 @@ ssh -p 23234 monitor@example-host
 下载 NAS 配置示例并按实际环境修改：
 
 ```bash
-monitor_release_base="https://github.com/Rhythmicc/gpu-ssh-monitor/releases/latest/download"
-curl -fLO "${monitor_release_base}/machine-nas.example.json"
+fleetty_release_base="https://github.com/Rhythmicc/fleetty/releases/latest/download"
+curl -fLO "${fleetty_release_base}/machine-nas.example.json"
 
 sudo install -o root -g root -m 0600 \
   machine-nas.example.json \
-  /etc/gpu-ssh-monitor/machine.json
+  /etc/fleetty/machine.json
 printf '%s\n' \
-  'MACHINE_CONFIG_FILE=/etc/gpu-ssh-monitor/machine.json' |
-  sudo tee /etc/gpu-ssh-monitor/machine.env >/dev/null
-sudo chmod 0600 /etc/gpu-ssh-monitor/machine.env
-sudo systemctl restart gpu-ssh-monitor.service
+  'MACHINE_CONFIG_FILE=/etc/fleetty/machine.json' |
+  sudo tee /etc/fleetty/machine.env >/dev/null
+sudo chmod 0600 /etc/fleetty/machine.env
+sudo systemctl restart fleetty.service
 ```
 
 配置示例：
@@ -180,17 +180,17 @@ Hub 使用独立的 RPC 密钥连接节点。该密钥不能用于打开交互�
 
 ```bash
 sudo ssh-keygen -t ed25519 -N "" \
-  -f /etc/gpu-ssh-monitor/node_rpc_ed25519
-sudo chmod 0600 /etc/gpu-ssh-monitor/node_rpc_ed25519
+  -f /etc/fleetty/node_rpc_ed25519
+sudo chmod 0600 /etc/fleetty/node_rpc_ed25519
 ```
 
-将 `/etc/gpu-ssh-monitor/node_rpc_ed25519.pub` 的内容安装到每个节点的 `/etc/gpu-ssh-monitor/hub_authorized_keys`，权限设为 `0600`。然后在每个节点的 `/etc/gpu-ssh-monitor/machine.env` 中加入：
+将 `/etc/fleetty/node_rpc_ed25519.pub` 的内容安装到每个节点的 `/etc/fleetty/hub_authorized_keys`，权限设为 `0600`。然后在每个节点的 `/etc/fleetty/machine.env` 中加入：
 
 ```bash
-NODE_RPC_AUTHORIZED_KEYS_FILE=/etc/gpu-ssh-monitor/hub_authorized_keys
+NODE_RPC_AUTHORIZED_KEYS_FILE=/etc/fleetty/hub_authorized_keys
 ```
 
-更新配置后重启节点的 `gpu-ssh-monitor.service`。节点只会允许这组公钥以内部用户 `gpu-monitor-hub` 调用受限 RPC，不会提供 shell。
+更新配置后重启节点的 `fleetty.service`。节点只会允许这组公钥以内部用户 `fleetty-hub` 调用受限 RPC，不会提供 shell。
 
 先在准备运行 Hub 的服务器上取得各节点的 SSH host key 指纹：
 
@@ -202,21 +202,21 @@ ssh-keyscan -p 23234 192.0.2.10 2>/dev/null |
 复制示例配置并填写节点地址与指纹：
 
 ```bash
-monitor_release_base="https://github.com/Rhythmicc/gpu-ssh-monitor/releases/latest/download"
-curl -fLO "${monitor_release_base}/hub-nodes.example.json"
-curl -fLO "${monitor_release_base}/gpu-ssh-monitor-hub.service"
+fleetty_release_base="https://github.com/Rhythmicc/fleetty/releases/latest/download"
+curl -fLO "${fleetty_release_base}/hub-nodes.example.json"
+curl -fLO "${fleetty_release_base}/fleetty-hub.service"
 
 sudo install -o root -g root -m 0600 \
   hub-nodes.example.json \
-  /etc/gpu-ssh-monitor/nodes.json
-sudo editor /etc/gpu-ssh-monitor/nodes.json
+  /etc/fleetty/nodes.json
+sudo editor /etc/fleetty/nodes.json
 ```
 
 配置格式如下：
 
 ```json
 {
-  "name": "Machine Hub",
+  "name": "Fleetty Hub",
   "refresh_seconds": 1,
   "nodes": [
     {
@@ -226,7 +226,7 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
       "address": "192.0.2.10:23234",
       "slurm_cluster": "Local GPU Cluster",
       "slurm_node": "gpu01",
-      "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
+      "identity_file": "/etc/fleetty/node_rpc_ed25519",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     },
     {
@@ -234,7 +234,7 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
       "profile": "nas",
       "description": "Storage and services",
       "address": "192.0.2.20:23234",
-      "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
+      "identity_file": "/etc/fleetty/node_rpc_ed25519",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     }
   ],
@@ -250,7 +250,7 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
       "transport": "ssh",
       "address": "login.example.com:22",
       "user": "slurm-monitor",
-      "identity_file": "/etc/gpu-ssh-monitor/slurm_remote_ed25519",
+      "identity_file": "/etc/fleetty/slurm_remote_ed25519",
       "host_keys": [
         "SHA256:replace-with-the-ed25519-host-key-fingerprint",
         "SHA256:replace-with-the-ecdsa-host-key-fingerprint"
@@ -282,8 +282,8 @@ Hub 可以同时读取多个互相独立的 Slurm 集群。每个集群对应一
 
 ```bash
 sudo ssh-keygen -t ed25519 -N "" \
-  -f /etc/gpu-ssh-monitor/slurm_remote_ed25519
-sudo chmod 0600 /etc/gpu-ssh-monitor/slurm_remote_ed25519
+  -f /etc/fleetty/slurm_remote_ed25519
+sudo chmod 0600 /etc/fleetty/slurm_remote_ed25519
 ```
 
 将生成的公钥加入远程登录节点上 `slurm-monitor` 用户的 `authorized_keys`，建议在公钥前添加 `restrict` 以禁用端口转发、PTY 和代理转发，并限制该账户的 sudo 权限。取得登录节点提供的 Host Key 指纹：
@@ -304,7 +304,7 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
   "name": "training-1",
   "profile": "gpu",
   "address": "192.0.2.10:23234",
-  "identity_file": "/etc/gpu-ssh-monitor/node_rpc_ed25519",
+  "identity_file": "/etc/fleetty/node_rpc_ed25519",
   "host_key": "SHA256:replace-with-the-node-host-key-fingerprint",
   "slurm_cluster": "Local GPU Cluster",
   "slurm_node": "gpu01"
@@ -332,13 +332,13 @@ Hub 默认监听 23235，可以和本机的 23234 节点监控服务共存：
 ```bash
 sudo install -o root -g root -m 0600 \
   "$HOME/.ssh/id_ed25519.pub" \
-  /etc/gpu-ssh-monitor/authorized_keys
+  /etc/fleetty/authorized_keys
 sudo install -o root -g root -m 0644 \
-  gpu-ssh-monitor-hub.service \
-  /etc/systemd/system/gpu-ssh-monitor-hub.service
+  fleetty-hub.service \
+  /etc/systemd/system/fleetty-hub.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now gpu-ssh-monitor-hub.service
-sudo systemctl status gpu-ssh-monitor-hub.service
+sudo systemctl enable --now fleetty-hub.service
+sudo systemctl status fleetty-hub.service
 ```
 
 连接 Hub：
@@ -393,25 +393,25 @@ unset monitor_admin_password
 
 printf '%s\n' \
   "ADMIN_PASSWORD_HASH=${monitor_admin_hash}" \
-  "ADMIN_RESTART_MONITOR_CMD=systemctl restart gpu-ssh-monitor.service" \
+  "ADMIN_RESTART_SERVICE_CMD=systemctl restart fleetty.service" \
   "ADMIN_REBOOT_CMD=systemctl reboot" |
-  sudo tee /etc/gpu-ssh-monitor/admin.env >/dev/null
-sudo chmod 0600 /etc/gpu-ssh-monitor/admin.env
-sudo systemctl restart gpu-ssh-monitor.service
+  sudo tee /etc/fleetty/admin.env >/dev/null
+sudo chmod 0600 /etc/fleetty/admin.env
+sudo systemctl restart fleetty.service
 ```
 
 监控服务以 root 运行，才能显示全部进程并执行受控管理操作。建议限制监听端口的来源范围，并妥善保管管理密码。
 
 ## 配置
 
-默认 systemd 配置位于 `/etc/systemd/system/gpu-ssh-monitor.service`，管理配置位于 `/etc/gpu-ssh-monitor/admin.env`。
+默认 systemd 配置位于 `/etc/systemd/system/fleetty.service`，管理配置位于 `/etc/fleetty/admin.env`。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `SSH_HOST` | `0.0.0.0` | 监听地址 |
 | `SSH_PORT` | `23234` | 监听端口 |
-| `SSH_HOST_KEY_PATH` | `/etc/gpu-ssh-monitor/ssh_host_ed25519` | SSH host key |
-| `SSH_AUTHORIZED_KEYS_FILE` | systemd 服务中为 `/etc/gpu-ssh-monitor/authorized_keys` | 允许连接交互 TUI 的客户端公钥 |
+| `SSH_HOST_KEY_PATH` | `/etc/fleetty/ssh_host_ed25519` | SSH host key |
+| `SSH_AUTHORIZED_KEYS_FILE` | systemd 服务中为 `/etc/fleetty/authorized_keys` | 允许连接交互 TUI 的客户端公钥 |
 | `NODE_RPC_AUTHORIZED_KEYS_FILE` | 空 | 允许以内部 Hub 身份连接节点的公钥 |
 | `SSH_ALLOW_ANONYMOUS` | `false` | 仅用于隔离网络迁移；显式设为 `true` 才允许匿名连接 |
 | `SSH_MAX_CONNECTIONS` | `64` | 同时接受的 SSH 连接上限 |
@@ -421,56 +421,41 @@ sudo systemctl restart gpu-ssh-monitor.service
 | `MACHINE_CONFIG_FILE` | 空 | 节点角色、网卡、挂载点及服务检查 JSON 配置 |
 | `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
 | `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希；为空时禁用管理模式 |
-| `ADMIN_RESTART_MONITOR_CMD` | `systemctl restart gpu-ssh-monitor.service` | 重启监控服务命令 |
+| `ADMIN_RESTART_SERVICE_CMD` | `systemctl restart fleetty.service` | 重启 Fleetty 服务命令 |
 | `ADMIN_REBOOT_CMD` | `systemctl reboot` | 重启主机命令 |
 
 修改 systemd 配置后执行：
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl restart gpu-ssh-monitor.service
+sudo systemctl restart fleetty.service
 ```
 
 ## 升级
 
-首次从允许匿名连接的旧版本升级时，必须先安装操作者公钥，并确保 systemd 设置了 `SSH_AUTHORIZED_KEYS_FILE`：
-
-```bash
-sudo install -o root -g root -m 0600 \
-  "$HOME/.ssh/id_ed25519.pub" \
-  /etc/gpu-ssh-monitor/authorized_keys
-sudo install -d -o root -g root -m 0755 \
-  /etc/systemd/system/gpu-ssh-monitor.service.d
-printf '%s\n' \
-  '[Service]' \
-  'Environment=SSH_AUTHORIZED_KEYS_FILE=/etc/gpu-ssh-monitor/authorized_keys' |
-  sudo tee /etc/systemd/system/gpu-ssh-monitor.service.d/security.conf >/dev/null
-```
-
-如果节点由 Hub 管理，还应先完成“创建节点配置”中的 RPC 密钥部署，并在节点设置 `NODE_RPC_AUTHORIZED_KEYS_FILE`。完成认证配置后，再执行下载、校验和二进制替换：
+按照“安装”章节下载并校验新版本，然后替换可执行文件并重启对应服务。`/etc/fleetty` 中的客户端公钥、RPC 密钥、管理配置和 SSH host key 不会被覆盖。
 
 ```bash
 sudo install -o root -g root -m 0755 \
-  "/tmp/gpu-ssh-monitor_linux_${monitor_arch}" \
-  /opt/gpu-ssh-monitor/gpu-ssh-monitor
-sudo systemctl daemon-reload
-sudo systemctl restart gpu-ssh-monitor.service
+  "/tmp/fleetty_linux_${fleetty_arch}" \
+  /opt/fleetty/fleetty
+sudo systemctl restart fleetty.service
 ```
 
-Hub 服务需要同样为 23235 端口配置 `SSH_AUTHORIZED_KEYS_FILE`。升级不会覆盖 `/etc/gpu-ssh-monitor` 中的客户端公钥、RPC 密钥、管理配置和 SSH host key。
+Hub 主机使用相同的可执行文件，替换后重启 `fleetty-hub.service`。
 
 ## 故障排查
 
 查看服务状态和最近日志：
 
 ```bash
-sudo systemctl status gpu-ssh-monitor.service
-sudo journalctl -u gpu-ssh-monitor.service -n 100 --no-pager
+sudo systemctl status fleetty.service
+sudo journalctl -u fleetty.service -n 100 --no-pager
 ```
 
 - 无法连接：检查服务状态、TCP 23234 端口、防火墙规则和客户端公钥是否存在于 `authorized_keys`；
 - GPU 区域不可用：确认 `nvidia-smi` 能以 root 身份正常执行；
-- 管理模式不可用：检查 `/etc/gpu-ssh-monitor/admin.env` 的权限和 `ADMIN_PASSWORD_HASH`；
+- 管理模式不可用：检查 `/etc/fleetty/admin.env` 的权限和 `ADMIN_PASSWORD_HASH`；
 - Hub 节点离线：确认 Hub 能访问节点的 TCP 23234 端口，并检查 `identity_file`、节点的 `hub_authorized_keys` 和 `host_key` 指纹；
 - 鼠标无法点击：改用键盘，或检查终端及 SSH 客户端的鼠标协议支持；
 - 界面字符错位：使用支持 Unicode 和等宽字符的终端字体。
@@ -478,12 +463,12 @@ sudo journalctl -u gpu-ssh-monitor.service -n 100 --no-pager
 ## 卸载
 
 ```bash
-sudo systemctl disable --now gpu-ssh-monitor.service
-sudo rm /etc/systemd/system/gpu-ssh-monitor.service
+sudo systemctl disable --now fleetty.service
+sudo rm /etc/systemd/system/fleetty.service
 sudo systemctl daemon-reload
-sudo rm -r /opt/gpu-ssh-monitor
+sudo rm -r /opt/fleetty
 ```
 
-如需同时删除管理配置和 SSH host key，再删除 `/etc/gpu-ssh-monitor`。
+如需同时删除管理配置和 SSH host key，再删除 `/etc/fleetty`。
 
-安装了 Hub 时，先执行 `sudo systemctl disable --now gpu-ssh-monitor-hub.service`，并删除对应的 systemd 单元；`nodes.json` 中只包含节点地址和 host key 指纹，可以按需要保留或删除。
+安装了 Hub 时，先执行 `sudo systemctl disable --now fleetty-hub.service`，并删除对应的 systemd 单元；`nodes.json` 中只包含节点地址和 host key 指纹，可以按需要保留或删除。

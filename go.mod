@@ -1,4 +1,4 @@
-module github.com/Rhythmicc/gpu-ssh-monitor
+module github.com/Rhythmicc/fleetty
 
 go 1.25.12
 

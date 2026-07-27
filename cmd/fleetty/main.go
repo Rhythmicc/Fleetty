@@ -35,7 +35,7 @@ const refreshInterval = time.Second
 func main() {
 	host := envString("SSH_HOST", "0.0.0.0")
 	port := envString("SSH_PORT", "23234")
-	hostKeyPath := envString("SSH_HOST_KEY_PATH", ".ssh/gpu-ssh-monitor_ed25519")
+	hostKeyPath := envString("SSH_HOST_KEY_PATH", ".ssh/fleetty_ed25519")
 	machine, err := loadMachineConfig(os.Getenv("MACHINE_CONFIG_FILE"))
 	if err != nil {
 		log.Fatal("Could not load machine configuration", "error", err)
@@ -85,7 +85,7 @@ func main() {
 
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-	log.Info("Starting Go SSH monitor", "host", host, "port", port)
+	log.Info("Starting Fleetty", "host", host, "port", port)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 			log.Error("Could not start SSH server", "error", err)
@@ -94,7 +94,7 @@ func main() {
 	}()
 
 	<-done
-	log.Info("Stopping SSH monitor")
+	log.Info("Stopping Fleetty")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
@@ -863,9 +863,9 @@ func (m *monitorModel) View() tea.View {
 	v := tea.NewView(body)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
-	v.WindowTitle = "GPU SSH Monitor"
+	v.WindowTitle = "Fleetty"
 	if m.profile == machineProfileNAS {
-		v.WindowTitle = "NAS Monitor"
+		v.WindowTitle = "Fleetty · NAS"
 	}
 	v.BackgroundColor, v.ForegroundColor = viewColors(m.colorMode)
 	return v
@@ -946,7 +946,7 @@ func renderedSectionsHeight(sections []string) int {
 }
 
 func dashboardHeader(width int, collectedAt time.Time, mode colorMode, nodeName string) string {
-	return dashboardHeaderNamed("GPU SSH MONITOR", width, collectedAt, mode, nodeName)
+	return dashboardHeaderNamed("FLEETTY", width, collectedAt, mode, nodeName)
 }
 
 func dashboardHeaderNamed(label string, width int, collectedAt time.Time, mode colorMode, nodeName string) string {
@@ -1527,7 +1527,7 @@ func newAdminController() *adminController {
 		password:     os.Getenv("ADMIN_PASSWORD"),
 		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
 		actions: []adminAction{
-			{ID: 0, label: "Restart monitor service", description: "Restart the machine SSH monitor service.", command: envString("ADMIN_RESTART_MONITOR_CMD", "systemctl restart gpu-ssh-monitor.service")},
+			{ID: 0, label: "Restart Fleetty", description: "Restart the Fleetty node service.", command: envString("ADMIN_RESTART_SERVICE_CMD", "systemctl restart fleetty.service")},
 			{ID: 1, label: "Reboot machine", description: "Restart the entire host. Active workloads will be interrupted.", command: envString("ADMIN_REBOOT_CMD", "systemctl reboot")},
 		},
 	}

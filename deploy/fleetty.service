@@ -1,22 +1,26 @@
 [Unit]
-Description=Machine SSH Monitor Hub
+Description=Fleetty node terminal
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/gpu-ssh-monitor
+WorkingDirectory=/opt/fleetty
 Environment=HOME=/root
 Environment=SSH_HOST=0.0.0.0
-Environment=SSH_PORT=23235
-Environment=SSH_HOST_KEY_PATH=/etc/gpu-ssh-monitor/hub_host_ed25519
-Environment=SSH_AUTHORIZED_KEYS_FILE=/etc/gpu-ssh-monitor/authorized_keys
+Environment=SSH_PORT=23234
+Environment=SSH_HOST_KEY_PATH=/etc/fleetty/ssh_host_ed25519
+Environment=SSH_AUTHORIZED_KEYS_FILE=/etc/fleetty/authorized_keys
+# Nodes connected to a Hub should set NODE_RPC_AUTHORIZED_KEYS_FILE in machine.env.
 Environment=SSH_MAX_CONNECTIONS=64
 Environment=SSH_IDLE_TIMEOUT=30m
 Environment=SSH_MAX_TIMEOUT=24h
 Environment=DEFAULT_THEME=dark
-Environment=HUB_NODES_FILE=/etc/gpu-ssh-monitor/nodes.json
-ExecStart=/opt/gpu-ssh-monitor/gpu-ssh-monitor
+# Optional machine profile (for example, a NAS), owned by root (0600).
+EnvironmentFile=-/etc/fleetty/machine.env
+# Optional management-password and command overrides, owned by root (0600).
+EnvironmentFile=-/etc/fleetty/admin.env
+ExecStart=/opt/fleetty/fleetty
 Restart=always
 RestartSec=2
 UMask=0077
@@ -26,7 +30,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/etc/gpu-ssh-monitor
+ReadWritePaths=/etc/fleetty
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
