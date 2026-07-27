@@ -68,23 +68,28 @@ type slurmPartition struct {
 }
 
 type slurmJob struct {
-	ID        string
-	Partition string
-	Name      string
-	User      string
-	State     string
-	Priority  uint64
-	QOS       string
-	Elapsed   string
-	TimeLimit string
-	Nodes     int
-	NodeList  string
-	Reason    string
+	ID             string
+	Partition      string
+	Name           string
+	User           string
+	State          string
+	Priority       uint64
+	QOS            string
+	Elapsed        string
+	TimeLimit      string
+	Nodes          int
+	NodeList       string
+	Reason         string
+	GRES           string
+	RequestedNodes string
+	ExpectedNodes  string
+	ExcludedNodes  string
 }
 
 type slurmNode struct {
 	Name       string
 	Partitions []string
+	GRES       []string
 }
 
 type slurmSnapshot struct {
@@ -314,11 +319,14 @@ func collectSlurmSnapshotWithRunner(
 	if err != nil {
 		return slurmSnapshot{}, err
 	}
-	nodeOutput, err := runner.Run(ctx, "sinfo", "-N", "-h", "-o", "%N\t%P")
+	nodeOutput, err := runner.Run(ctx, "sinfo", "-N", "-h", "-o", "%N\t%P\t%G")
 	if err != nil {
 		return slurmSnapshot{}, err
 	}
-	jobOutput, err := runner.Run(ctx, "squeue", "-h", "-o", "%i\t%P\t%j\t%u\t%T\t%Q\t%q\t%M\t%l\t%D\t%N\t%R")
+	jobOutput, err := runner.Run(
+		ctx, "squeue", "-h", "-o",
+		"%i\t%P\t%j\t%u\t%T\t%Q\t%q\t%M\t%l\t%D\t%N\t%b\t%n\t%Y\t%x\t%R",
+	)
 	if err != nil {
 		return slurmSnapshot{}, err
 	}
@@ -425,8 +433,8 @@ func parseSlurmNodes(output string, filter []string) ([]slurmNode, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 2 {
-			return nil, fmt.Errorf("parse sinfo node line %d: expected 2 fields", lineNumber+1)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("parse sinfo node line %d: expected 3 fields", lineNumber+1)
 		}
 		name := strings.TrimSpace(fields[0])
 		partition := strings.TrimSuffix(strings.TrimSpace(fields[1]), "*")
@@ -442,6 +450,9 @@ func parseSlurmNodes(output string, filter []string) ([]slurmNode, error) {
 			order = append(order, name)
 		}
 		node.Partitions = appendUnique(node.Partitions, partition)
+		if gres := strings.TrimSpace(fields[2]); gres != "" && gres != "(null)" {
+			node.GRES = appendUnique(node.GRES, gres)
+		}
 	}
 	nodes := make([]slurmNode, 0, len(order))
 	for _, name := range order {
@@ -458,8 +469,8 @@ func parseSlurmJobs(output string, filter []string) ([]slurmJob, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 12 {
-			return nil, fmt.Errorf("parse squeue line %d: expected 12 fields", lineNumber+1)
+		if len(fields) != 16 {
+			return nil, fmt.Errorf("parse squeue line %d: expected 16 fields", lineNumber+1)
 		}
 		partition := strings.TrimSpace(fields[1])
 		if len(allowed) > 0 {
@@ -481,7 +492,12 @@ func parseSlurmJobs(output string, filter []string) ([]slurmJob, error) {
 			State: strings.TrimSpace(fields[4]), Priority: priority,
 			QOS: strings.TrimSpace(fields[6]), Elapsed: strings.TrimSpace(fields[7]),
 			TimeLimit: strings.TrimSpace(fields[8]), Nodes: nodes,
-			NodeList: strings.TrimSpace(fields[10]), Reason: strings.TrimSpace(fields[11]),
+			NodeList:       strings.TrimSpace(fields[10]),
+			GRES:           strings.TrimSpace(fields[11]),
+			RequestedNodes: strings.TrimSpace(fields[12]),
+			ExpectedNodes:  strings.TrimSpace(fields[13]),
+			ExcludedNodes:  strings.TrimSpace(fields[14]),
+			Reason:         strings.TrimSpace(fields[15]),
 		})
 	}
 	return jobs, nil
@@ -667,6 +683,9 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 		if _, eligible := partitions[job.Partition]; !eligible {
 			continue
 		}
+		if !slurmPendingJobMatchesNode(job, nodeConfig.SlurmNode, state.Snapshot.Nodes) {
+			continue
+		}
 		next := !nextMarked
 		nextMarked = true
 		queue.Jobs = append(queue.Jobs, slurmDisplayJob{
@@ -675,6 +694,95 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 	}
 	sortSlurmJobs(queue.Jobs)
 	return queue
+}
+
+func slurmPendingJobMatchesNode(job slurmJob, nodeName string, nodes []slurmNode) bool {
+	if slurmNodeExpressionPresent(job.NodeList) {
+		return slurmNodeListContains(job.NodeList, nodeName)
+	}
+	if slurmNodeExpressionPresent(job.ExpectedNodes) {
+		return slurmNodeListContains(job.ExpectedNodes, nodeName)
+	}
+	if slurmNodeExpressionPresent(job.RequestedNodes) &&
+		!slurmNodeListContains(job.RequestedNodes, nodeName) {
+		return false
+	}
+	if slurmNodeExpressionPresent(job.ExcludedNodes) &&
+		slurmNodeListContains(job.ExcludedNodes, nodeName) {
+		return false
+	}
+	requirements := slurmGPUCounts(job.GRES)
+	if len(requirements) == 0 {
+		return true
+	}
+	for _, node := range nodes {
+		if node.Name != nodeName {
+			continue
+		}
+		available := slurmGPUCounts(strings.Join(node.GRES, ","))
+		for gpuType, count := range requirements {
+			if gpuType == "" {
+				var total int
+				for _, availableCount := range available {
+					total += availableCount
+				}
+				if total < count {
+					return false
+				}
+				continue
+			}
+			if available[gpuType] < count {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func slurmNodeExpressionPresent(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "", "(null)", "N/A", "None":
+		return false
+	default:
+		return true
+	}
+}
+
+func slurmGPUCounts(value string) map[string]int {
+	result := make(map[string]int)
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(strings.TrimPrefix(item, "gres/"))
+		if item == "" || item == "(null)" || item == "N/A" {
+			continue
+		}
+		if suffix := strings.IndexByte(item, '('); suffix >= 0 {
+			item = item[:suffix]
+		}
+		parts := strings.Split(item, ":")
+		if len(parts) < 2 || parts[0] != "gpu" {
+			continue
+		}
+		gpuType, countField := "", parts[len(parts)-1]
+		if len(parts) >= 3 {
+			gpuType = parts[1]
+		}
+		countText := strings.TrimLeftFunc(countField, func(r rune) bool {
+			return r < '0' || r > '9'
+		})
+		end := 0
+		for end < len(countText) && countText[end] >= '0' && countText[end] <= '9' {
+			end++
+		}
+		if end == 0 {
+			continue
+		}
+		count, err := strconv.Atoi(countText[:end])
+		if err == nil {
+			result[gpuType] += count
+		}
+	}
+	return result
 }
 
 func slurmNodeListContains(expression, node string) bool {

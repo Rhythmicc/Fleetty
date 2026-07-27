@@ -32,11 +32,11 @@ func (r *scriptedSlurmRunner) Run(_ context.Context, command string, args ...str
 	case command == "sinfo" && strings.Contains(arguments, "--version"):
 		return []byte("slurm-wlm 25.11.2\n"), nil
 	case command == "sinfo" && strings.Contains(arguments, "%N"):
-		return []byte("gpu01\tgpu*\n"), nil
+		return []byte("gpu01\tgpu*\tgpu:test:1\n"), nil
 	case command == "sinfo":
 		return []byte("gpu*\tup\t20:00\t1\tidle\t0/16/0/16\tgpu:test:1\n"), nil
 	case command == "squeue":
-		return []byte("101\tgpu\ttrain\talice\tPENDING\t98765\tnormal\t0:00\t20:00\t1\t\t(Priority)\n"), nil
+		return []byte("101\tgpu\ttrain\talice\tPENDING\t98765\tnormal\t0:00\t20:00\t1\t\tgres/gpu:test:1\t\tgpu01\t\t(Priority)\n"), nil
 	default:
 		return nil, fmt.Errorf("unexpected command %s %s", command, arguments)
 	}
@@ -365,23 +365,29 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		t.Fatalf("unexpected aggregated Slurm partition: %#v", partitions)
 	}
 	jobs, err := parseSlurmJobs(strings.Join([]string{
-		"101\tgpu\ttrain\talice\tRUNNING\t45678\tnormal\t1:20\t20:00\t1\tgpu01\tgpu01",
-		"102_[1-4]\tgpu\tsweep\tbob\tPENDING\t12345\turgent\t0:00\t20:00\t1\t\t(Priority)",
-		"103\tcpu\tcompile\tcarol\tRUNNING\t23456\tnormal\t0:10\t10:00\t1\tcpu01\tcpu01",
+		"101\tgpu\ttrain\talice\tRUNNING\t45678\tnormal\t1:20\t20:00\t1\tgpu01\tgres/gpu:test:1\tgpu01\t(null)\t\tgpu01",
+		"102_[1-4]\tgpu\tsweep\tbob\tPENDING\t12345\turgent\t0:00\t20:00\t1\t\tgres/gpu:test:1\t\tgpu02\tgpu03\t(Priority)",
+		"103\tcpu\tcompile\tcarol\tRUNNING\t23456\tnormal\t0:10\t10:00\t1\tcpu01\tN/A\t\t(null)\t\tcpu01",
 	}, "\n"), []string{"gpu"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(jobs) != 2 || jobs[0].NodeList != "gpu01" || jobs[0].Priority != 45678 ||
 		jobs[0].QOS != "normal" || jobs[1].QOS != "urgent" ||
-		jobs[1].Reason != "(Priority)" || jobs[1].Nodes != 1 {
+		jobs[1].Reason != "(Priority)" || jobs[1].Nodes != 1 ||
+		jobs[1].GRES != "gres/gpu:test:1" || jobs[1].ExpectedNodes != "gpu02" ||
+		jobs[1].ExcludedNodes != "gpu03" {
 		t.Fatalf("unexpected parsed Slurm jobs: %#v", jobs)
 	}
-	nodes, err := parseSlurmNodes("gpu01\tgpu*\ngpu01\tmixed\ngpu02\tcpu\n", []string{"gpu", "mixed"})
+	nodes, err := parseSlurmNodes(
+		"gpu01\tgpu*\tgpu:test:1\ngpu01\tmixed\tgpu:test:1\ngpu02\tcpu\t(null)\n",
+		[]string{"gpu", "mixed"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nodes) != 1 || len(nodes[0].Partitions) != 2 || nodes[0].Partitions[1] != "mixed" {
+	if len(nodes) != 1 || len(nodes[0].Partitions) != 2 || nodes[0].Partitions[1] != "mixed" ||
+		len(nodes[0].GRES) != 1 || nodes[0].GRES[0] != "gpu:test:1" {
 		t.Fatalf("unexpected parsed Slurm nodes: %#v", nodes)
 	}
 	if got := shellJoin([]string{"squeue", "-o", "a'b"}); got != "'squeue' '-o' 'a'\"'\"'b'" {
@@ -473,7 +479,7 @@ func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
 		},
 		slurmStates: []slurmClusterState{{Snapshot: slurmSnapshot{
 			Name: "General GPU", CollectedAt: now,
-			Nodes: []slurmNode{{Name: "node2", Partitions: []string{"rtx5060"}}},
+			Nodes: []slurmNode{{Name: "node2", Partitions: []string{"rtx5060"}, GRES: []string{"gpu:rtx_5060_ti:4"}}},
 			Jobs: []slurmJob{
 				{ID: "90", Partition: "mixed-gpu", State: "PENDING", Priority: 80000, QOS: "normal", Reason: "(Priority)"},
 				{ID: "12", Partition: "rtx5060", State: "PENDING", Priority: 70000, QOS: "urgent", Name: "first", Reason: "(Priority)"},
@@ -500,6 +506,106 @@ func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
 	if !slurmNodeListContains("gpu[01-04],node7", "gpu03") ||
 		slurmNodeListContains("gpu[01-04]", "gpu05") {
 		t.Fatal("Slurm node-list range matching failed")
+	}
+}
+
+func TestNodeSlurmQueueFiltersPendingJobsByGPUType(t *testing.T) {
+	nodes := []slurmNode{
+		{
+			Name: "gpu4090", Partitions: []string{"mixed-gpu"},
+			GRES: []string{"gpu:rtx_4090:1(S:0-15),gpu:rtx_3090:1(S:0-15)"},
+		},
+		{
+			Name: "gpu5090", Partitions: []string{"mixed-gpu"},
+			GRES: []string{"gpu:rtx_5090:1(S:0-7),gpu:rtx_5080:1(S:0-7)"},
+		},
+	}
+	jobs := []slurmJob{
+		{
+			ID: "1511", Partition: "mixed-gpu", State: "PENDING", Priority: 900,
+			GRES: "gres/gpu:rtx_5090:1", ExpectedNodes: "gpu5090", Reason: "(Resources)",
+		},
+		{
+			ID: "1512", Partition: "mixed-gpu", State: "PENDING", Priority: 800,
+			GRES: "gres/gpu:rtx_4090:1", Reason: "(Resources)",
+		},
+		{
+			ID: "1513", Partition: "mixed-gpu", State: "PENDING", Priority: 700,
+			GRES: "gres/gpu:1", Reason: "(Resources)",
+		},
+	}
+	model := &hubModel{
+		config: hubConfig{
+			Nodes: []hubNodeConfig{
+				{Name: "4090", SlurmCluster: "General GPU", SlurmNode: "gpu4090"},
+				{Name: "5090", SlurmCluster: "General GPU", SlurmNode: "gpu5090"},
+			},
+			SlurmClusters: []slurmClusterConfig{{Name: "General GPU"}},
+		},
+		slurmStates: []slurmClusterState{{Snapshot: slurmSnapshot{
+			Name: "General GPU", CollectedAt: time.Now(), Nodes: nodes, Jobs: jobs,
+		}}},
+	}
+
+	queue4090 := model.nodeSlurmQueue(0)
+	if queue4090 == nil || len(queue4090.Jobs) != 2 ||
+		queue4090.Jobs[0].Job.ID != "1512" || !queue4090.Jobs[0].Next ||
+		queue4090.Jobs[1].Job.ID != "1513" {
+		t.Fatalf("gpu4090 queue contains incompatible jobs: %#v", queue4090)
+	}
+	queue5090 := model.nodeSlurmQueue(1)
+	if queue5090 == nil || len(queue5090.Jobs) != 2 ||
+		queue5090.Jobs[0].Job.ID != "1511" || !queue5090.Jobs[0].Next ||
+		queue5090.Jobs[1].Job.ID != "1513" {
+		t.Fatalf("gpu5090 queue contains incompatible jobs: %#v", queue5090)
+	}
+}
+
+func TestSlurmPendingJobMatchesExpectedRequestedAndExcludedNodes(t *testing.T) {
+	nodes := []slurmNode{
+		{Name: "gpu4090", GRES: []string{"gpu:rtx_4090:1,gpu:rtx_3090:1"}},
+		{Name: "gpu5090", GRES: []string{"gpu:rtx_5090:1,gpu:rtx_5080:1"}},
+	}
+	tests := []struct {
+		name string
+		job  slurmJob
+		node string
+		want bool
+	}{
+		{
+			name: "scheduler expected node wins",
+			job:  slurmJob{ExpectedNodes: "gpu5090", GRES: "gres/gpu:1"},
+			node: "gpu4090",
+			want: false,
+		},
+		{
+			name: "explicit requested node",
+			job:  slurmJob{RequestedNodes: "gpu5090"},
+			node: "gpu4090",
+			want: false,
+		},
+		{
+			name: "excluded node",
+			job:  slurmJob{ExcludedNodes: "gpu4090"},
+			node: "gpu4090",
+			want: false,
+		},
+		{
+			name: "null selectors fall back to GRES",
+			job: slurmJob{
+				NodeList: "(null)", ExpectedNodes: "(null)", RequestedNodes: "N/A",
+				ExcludedNodes: "None", GRES: "gres/gpu:rtx_4090:1",
+			},
+			node: "gpu4090",
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := slurmPendingJobMatchesNode(test.job, test.node, nodes); got != test.want {
+				t.Fatalf("slurmPendingJobMatchesNode() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
