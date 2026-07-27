@@ -323,6 +323,8 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
 
 `WEIGHT` 显示 Slurm `squeue %Q` 返回的原始总优先级。数值越高通常表示调度优先级越高，但它不是开工时间承诺；资源是否满足、依赖关系和 backfill 等策略仍会影响实际顺序。
 
+`QOS` 显示 Slurm `squeue %q` 返回的服务质量名称，便于识别用户在提交任务时选择的优先级、时限或资源策略。
+
 ### 安装 Hub 服务
 
 Hub 默认监听 23235，可以和本机的 23234 节点监控服务共存：
