@@ -321,6 +321,8 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
 
 `NEXT` 表示 Slurm `squeue` 返回顺序中的首个合资格 pending 作业，是便于观察的候选提示；最终调度仍由 Slurm 的优先级、资源、依赖和 backfill 策略决定。
 
+`WEIGHT` 显示 Slurm `squeue %Q` 返回的原始总优先级。数值越高通常表示调度优先级越高，但它不是开工时间承诺；资源是否满足、依赖关系和 backfill 等策略仍会影响实际顺序。
+
 ### 安装 Hub 服务
 
 Hub 默认监听 23235，可以和本机的 23234 节点监控服务共存：

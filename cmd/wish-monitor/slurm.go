@@ -73,6 +73,7 @@ type slurmJob struct {
 	Name      string
 	User      string
 	State     string
+	Priority  uint64
 	Elapsed   string
 	TimeLimit string
 	Nodes     int
@@ -316,7 +317,7 @@ func collectSlurmSnapshotWithRunner(
 	if err != nil {
 		return slurmSnapshot{}, err
 	}
-	jobOutput, err := runner.Run(ctx, "squeue", "-h", "-o", "%i\t%P\t%j\t%u\t%T\t%M\t%l\t%D\t%N\t%R")
+	jobOutput, err := runner.Run(ctx, "squeue", "-h", "-o", "%i\t%P\t%j\t%u\t%T\t%Q\t%M\t%l\t%D\t%N\t%R")
 	if err != nil {
 		return slurmSnapshot{}, err
 	}
@@ -456,8 +457,8 @@ func parseSlurmJobs(output string, filter []string) ([]slurmJob, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 10 {
-			return nil, fmt.Errorf("parse squeue line %d: expected 10 fields", lineNumber+1)
+		if len(fields) != 11 {
+			return nil, fmt.Errorf("parse squeue line %d: expected 11 fields", lineNumber+1)
 		}
 		partition := strings.TrimSpace(fields[1])
 		if len(allowed) > 0 {
@@ -465,16 +466,21 @@ func parseSlurmJobs(output string, filter []string) ([]slurmJob, error) {
 				continue
 			}
 		}
-		nodes, err := strconv.Atoi(strings.TrimSpace(fields[7]))
+		priority, err := strconv.ParseUint(strings.TrimSpace(fields[5]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse squeue priority on line %d: %w", lineNumber+1, err)
+		}
+		nodes, err := strconv.Atoi(strings.TrimSpace(fields[8]))
 		if err != nil {
 			return nil, fmt.Errorf("parse squeue nodes on line %d: %w", lineNumber+1, err)
 		}
 		jobs = append(jobs, slurmJob{
 			ID: strings.TrimSpace(fields[0]), Partition: partition,
 			Name: strings.TrimSpace(fields[2]), User: strings.TrimSpace(fields[3]),
-			State: strings.TrimSpace(fields[4]), Elapsed: strings.TrimSpace(fields[5]),
-			TimeLimit: strings.TrimSpace(fields[6]), Nodes: nodes,
-			NodeList: strings.TrimSpace(fields[8]), Reason: strings.TrimSpace(fields[9]),
+			State: strings.TrimSpace(fields[4]), Priority: priority,
+			Elapsed: strings.TrimSpace(fields[6]), TimeLimit: strings.TrimSpace(fields[7]),
+			Nodes: nodes, NodeList: strings.TrimSpace(fields[9]),
+			Reason: strings.TrimSpace(fields[10]),
 		})
 	}
 	return jobs, nil
@@ -1002,19 +1008,21 @@ func slurmDisplayStateCounts(jobs []slurmDisplayJob) (running, pending, other in
 func slurmJobTableHeader(width int) string {
 	var header string
 	switch {
-	case width >= 124:
-		reasonWidth := max(10, width-120)
-		header = fmt.Sprintf("%-14s %-15s %-10s %-11s %-9s %-9s %5s %-16s %-22s %-*s",
-			"CLUSTER", "JOB ID", "USER", "STATE", "ELAPSED", "LIMIT", "NODES", "PARTITION", "NAME",
+	case width >= 139:
+		reasonWidth := max(8, width-131)
+		header = fmt.Sprintf("%-14s %-15s %-10s %-11s %10s %-9s %-9s %5s %-16s %-22s %-*s",
+			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "ELAPSED", "LIMIT", "NODES", "PARTITION", "NAME",
 			reasonWidth, "NODE / REASON")
-	case width >= 84:
-		reasonWidth := max(8, width-82)
-		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %-8s %5s %-18s %-*s",
-			"CLUSTER", "JOB ID", "USER", "STATE", "ELAPSED", "NODES", "NAME", reasonWidth, "NODE / REASON")
-	case width >= 58:
-		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %-8s", "CLUSTER", "JOB ID", "USER", "STATE", "ELAPSED")
+	case width >= 101:
+		reasonWidth := max(8, width-93)
+		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-8s %5s %-18s %-*s",
+			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "ELAPSED", "NODES", "NAME",
+			reasonWidth, "NODE / REASON")
+	case width >= 70:
+		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-8s",
+			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "ELAPSED")
 	default:
-		header = "JOB ID        STATE     USER"
+		header = fmt.Sprintf("%-13s %-9s %10s %s", "JOB ID", "STATE", "WEIGHT", "USER")
 	}
 	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 }
@@ -1029,13 +1037,14 @@ func renderSlurmJobRow(display slurmDisplayJob, width int) string {
 		reasonStyle = gpuTitleStyle
 	}
 	switch {
-	case width >= 124:
-		reasonWidth := max(10, width-120)
+	case width >= 139:
+		reasonWidth := max(8, width-131)
 		return strings.Join([]string{
 			fixedCell(display.Cluster, 14, false),
 			valueStyle.Render(fixedCell(job.ID, 15, false)),
 			fixedCell(job.User, 10, false),
 			stateStyle.Render(fixedCell(stateLabel, 11, false)),
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
 			fixedCell(job.Elapsed, 9, true),
 			fixedCell(job.TimeLimit, 9, true),
 			fixedCell(strconv.Itoa(job.Nodes), 5, true),
@@ -1043,30 +1052,33 @@ func renderSlurmJobRow(display slurmDisplayJob, width int) string {
 			fixedCell(job.Name, 22, false),
 			reasonStyle.Render(fixedCell(job.Reason, reasonWidth, false)),
 		}, " ")
-	case width >= 84:
-		reasonWidth := max(8, width-82)
+	case width >= 101:
+		reasonWidth := max(8, width-93)
 		return strings.Join([]string{
 			fixedCell(display.Cluster, 12, false),
 			valueStyle.Render(fixedCell(job.ID, 13, false)),
 			fixedCell(job.User, 9, false),
 			stateStyle.Render(fixedCell(stateLabel, 10, false)),
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
 			fixedCell(job.Elapsed, 8, true),
 			fixedCell(strconv.Itoa(job.Nodes), 5, true),
 			fixedCell(job.Name, 18, false),
 			reasonStyle.Render(fixedCell(job.Reason, reasonWidth, false)),
 		}, " ")
-	case width >= 58:
+	case width >= 70:
 		return strings.Join([]string{
 			fixedCell(display.Cluster, 12, false),
 			valueStyle.Render(fixedCell(job.ID, 13, false)),
 			fixedCell(job.User, 9, false),
 			stateStyle.Render(fixedCell(stateLabel, 10, false)),
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
 			fixedCell(job.Elapsed, 8, true),
 		}, " ")
 	default:
 		return valueStyle.Render(fixedCell(job.ID, 13, false)) + " " +
 			stateStyle.Render(fixedCell(stateLabel, 9, false)) + " " +
-			fixedCell(job.User, max(6, width-24), false)
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)) + " " +
+			fixedCell(job.User, max(6, width-35), false)
 	}
 }
 
@@ -1156,12 +1168,15 @@ func slurmNodeJobHeader(width int) string {
 	var header string
 	switch {
 	case width >= 108:
-		header = fmt.Sprintf("%-15s %-10s %-9s %-9s %-9s %-16s %s",
-			"JOB ID", "USER", "STATE", "ELAPSED", "LIMIT", "PARTITION", "NAME / REASON")
+		header = fmt.Sprintf("%-15s %-10s %-9s %10s %-9s %-9s %-16s %s",
+			"JOB ID", "USER", "STATE", "WEIGHT", "ELAPSED", "LIMIT", "PARTITION", "NAME / REASON")
 	case width >= 72:
-		header = fmt.Sprintf("%-14s %-9s %-9s %-8s %s", "JOB ID", "USER", "STATE", "ELAPSED", "NAME / REASON")
+		header = fmt.Sprintf("%-14s %-9s %-9s %10s %-8s %s",
+			"JOB ID", "USER", "STATE", "WEIGHT", "ELAPSED", "NAME / REASON")
+	case width >= 48:
+		header = fmt.Sprintf("%-13s %-9s %10s %s", "JOB ID", "STATE", "WEIGHT", "NAME")
 	default:
-		header = fmt.Sprintf("%-13s %-9s %s", "JOB ID", "STATE", "NAME")
+		header = fmt.Sprintf("%-13s %-9s %10s", "JOB ID", "STATE", "WEIGHT")
 	}
 	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 }
@@ -1175,29 +1190,36 @@ func renderSlurmNodeJobRow(display slurmDisplayJob, width int) string {
 	}
 	switch {
 	case width >= 108:
-		fixed := 15 + 1 + 10 + 1 + 9 + 1 + 9 + 1 + 9 + 1 + 16 + 1
+		fixed := 15 + 1 + 10 + 1 + 9 + 1 + 10 + 1 + 9 + 1 + 9 + 1 + 16 + 1
 		return strings.Join([]string{
 			valueStyle.Render(fixedCell(job.ID, 15, false)),
 			fixedCell(job.User, 10, false),
 			style.Render(fixedCell(state, 9, false)),
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
 			fixedCell(job.Elapsed, 9, true),
 			fixedCell(job.TimeLimit, 9, true),
 			fixedCell(job.Partition, 16, false),
 			fixedCell(detail, max(8, width-fixed), false),
 		}, " ")
 	case width >= 72:
-		fixed := 14 + 1 + 9 + 1 + 9 + 1 + 8 + 1
+		fixed := 14 + 1 + 9 + 1 + 9 + 1 + 10 + 1 + 8 + 1
 		return strings.Join([]string{
 			valueStyle.Render(fixedCell(job.ID, 14, false)),
 			fixedCell(job.User, 9, false),
 			style.Render(fixedCell(state, 9, false)),
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
 			fixedCell(job.Elapsed, 8, true),
 			fixedCell(detail, max(8, width-fixed), false),
 		}, " ")
-	default:
-		fixed := 13 + 1 + 9 + 1
+	case width >= 48:
+		fixed := 13 + 1 + 9 + 1 + 10 + 1
 		return valueStyle.Render(fixedCell(job.ID, 13, false)) + " " +
 			style.Render(fixedCell(state, 9, false)) + " " +
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)) + " " +
 			fixedCell(detail, max(6, width-fixed), false)
+	default:
+		return valueStyle.Render(fixedCell(job.ID, 13, false)) + " " +
+			style.Render(fixedCell(state, 9, false)) + " " +
+			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true))
 	}
 }
