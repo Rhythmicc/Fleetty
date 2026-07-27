@@ -16,6 +16,7 @@ GPU SSH Monitor 是一个面向计算服务器和存储节点的 SSH 监控界�
 - 鼠标和键盘操作；
 - 密码保护的管理模式；
 - 可选的多服务器 Hub 首页；
+- 可接入多个本地或远程 Slurm 集群的队列页面；
 - 面向 NAS 的网络、存储、Docker 和 HTTP 服务监控页面。
 
 管理模式可以查看进程详情、过滤进程、发送 `SIGTERM`、重启监控服务或重启主机。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
@@ -208,11 +209,63 @@ sudo editor /etc/gpu-ssh-monitor/nodes.json
       "address": "192.0.2.20:23234",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     }
+  ],
+  "slurm_clusters": [
+    {
+      "name": "Local GPU Cluster",
+      "description": "Slurm available on the Hub host",
+      "transport": "local"
+    },
+    {
+      "name": "Remote GPU Cluster",
+      "description": "Slurm reached through a login node",
+      "transport": "ssh",
+      "address": "login.example.com:22",
+      "user": "slurm-monitor",
+      "identity_file": "/etc/gpu-ssh-monitor/slurm_remote_ed25519",
+      "host_keys": [
+        "SHA256:replace-with-the-ed25519-host-key-fingerprint",
+        "SHA256:replace-with-the-ecdsa-host-key-fingerprint"
+      ],
+      "partitions": ["gpu"],
+      "refresh_seconds": 2,
+      "timeout_seconds": 5
+    }
   ]
 }
 ```
 
 `host_key` 用于防止 Hub 连接到被冒充的节点。节点重新生成 SSH host key 后，需要同步更新这里的指纹。
+
+### Slurm 队列
+
+Hub 可以同时读取多个互相独立的 Slurm 集群。每个集群对应一个 `slurm_clusters` 条目，计算节点名称、分区名称和登录节点位置均由配置决定。
+
+`transport` 支持两种模式：
+
+| 模式 | 适用场景 |
+| --- | --- |
+| `local` | Hub 就运行在 Slurm 登录节点上，或本机可以直接执行 `sinfo` 和 `squeue` |
+| `ssh` | Slurm 位于另一套网络或登录节点后，Hub 使用只读 SSH 密钥远程执行 `sinfo` 和 `squeue` |
+
+远程模式建议使用专用的低权限系统账户和独立密钥。私钥只需对 Hub 服务的 `root` 用户可读：
+
+```bash
+sudo ssh-keygen -t ed25519 -N "" \
+  -f /etc/gpu-ssh-monitor/slurm_remote_ed25519
+sudo chmod 0600 /etc/gpu-ssh-monitor/slurm_remote_ed25519
+```
+
+将生成的公钥加入远程登录节点上 `slurm-monitor` 用户的 `authorized_keys`，建议在公钥前添加 `restrict` 以禁用端口转发、PTY 和代理转发，并限制该账户的 sudo 权限。取得登录节点提供的 Host Key 指纹：
+
+```bash
+ssh-keyscan -p 22 login.example.com 2>/dev/null |
+  ssh-keygen -lf - -E sha256
+```
+
+将输出中的全部有效 `SHA256:` 指纹写入 `host_keys`，以兼容登录节点同时发布 Ed25519、ECDSA 或 RSA Host Key 的情况。只登记一个指纹时，也可以继续使用单值字段 `host_key`。
+
+可选的 `partitions` 只展示指定分区；省略时展示该集群的全部分区和作业。`refresh_seconds` 默认 2 秒，`timeout_seconds` 默认 4 秒。某个 Slurm 源离线时，Hub 会保留最后一次状态并单独退避重试，不影响服务器首页或其他集群。
 
 ### 安装 Hub 服务
 
@@ -238,7 +291,11 @@ ssh -p 23235 monitor@hub-host
 | `↑` / `↓` / `←` / `→` | 选择服务器 |
 | `Enter` | 打开所选服务器 |
 | `Esc` | 从服务器详情返回 Hub 首页 |
-| `r` | 立即刷新所有服务器 |
+| `s` | 打开 Slurm 队列 |
+| `Tab` | 在服务器与 Slurm 页面之间切换 |
+| `←` / `→` | 在 Slurm 页面按集群过滤 |
+| `a` | 在 Slurm 页面恢复显示全部集群 |
+| `r` | 立即刷新服务器和 Slurm 队列 |
 | `t` | 切换当前会话的深色、浅色主题 |
 | `q` | 退出 |
 

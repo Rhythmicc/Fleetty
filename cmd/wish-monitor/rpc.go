@@ -231,17 +231,25 @@ func (c *nodeRPCClient) call(ctx context.Context, request nodeRPCRequest) (nodeR
 }
 
 func (c *nodeRPCClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
-	expected := strings.TrimSpace(c.node.HostKey)
-	if expected == "" {
-		if c.node.InsecureSkipHostKey {
+	return fixedHostKeyCallback(c.node.Name, c.node.HostKey, c.node.InsecureSkipHostKey)
+}
+
+func fixedHostKeyCallback(name, fingerprint string, insecure bool) (gossh.HostKeyCallback, error) {
+	return fixedHostKeysCallback(name, []string{fingerprint}, insecure)
+}
+
+func fixedHostKeysCallback(name string, fingerprints []string, insecure bool) (gossh.HostKeyCallback, error) {
+	expected := stringSet(fingerprints)
+	if len(expected) == 0 {
+		if insecure {
 			return gossh.InsecureIgnoreHostKey(), nil //nolint:gosec
 		}
-		return nil, fmt.Errorf("node %s has no host_key fingerprint", c.node.Name)
+		return nil, fmt.Errorf("%s has no host_key fingerprint", name)
 	}
 	return func(_ string, _ net.Addr, key gossh.PublicKey) error {
 		actual := gossh.FingerprintSHA256(key)
-		if actual != expected {
-			return fmt.Errorf("host key mismatch for %s: got %s", c.node.Name, actual)
+		if _, ok := expected[actual]; !ok {
+			return fmt.Errorf("host key mismatch for %s: got %s", name, actual)
 		}
 		return nil
 	}, nil

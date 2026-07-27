@@ -16,5 +16,28 @@
       "address": "192.0.2.11:23234",
       "host_key": "SHA256:replace-with-the-node-host-key-fingerprint"
     }
+  ],
+  "slurm_clusters": [
+    {
+      "name": "Local GPU Cluster",
+      "description": "Slurm controller reachable from the Hub host",
+      "transport": "local",
+      "refresh_seconds": 2
+    },
+    {
+      "name": "Remote GPU Cluster",
+      "description": "Slurm controller reached through a login node",
+      "transport": "ssh",
+      "address": "login.example.com:22",
+      "user": "slurm-monitor",
+      "identity_file": "/etc/gpu-ssh-monitor/slurm_remote_ed25519",
+      "host_keys": [
+        "SHA256:replace-with-the-ed25519-host-key-fingerprint",
+        "SHA256:replace-with-the-ecdsa-host-key-fingerprint"
+      ],
+      "partitions": ["gpu"],
+      "refresh_seconds": 2,
+      "timeout_seconds": 5
+    }
   ]
 }

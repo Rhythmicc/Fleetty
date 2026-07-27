@@ -255,6 +255,135 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	}
 }
 
+func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
+	configPath := t.TempDir() + "/nodes.json"
+	configJSON := `{
+		"name": "Test Lab Hub",
+		"nodes": [],
+		"slurm_clusters": [
+			{"name":"Local GPU","transport":"local","partitions":["gpu","gpu"]},
+			{
+				"name":"Remote A100",
+				"transport":"ssh",
+				"address":"login.example.test:2222",
+				"user":"slurm-monitor",
+				"identity_file":"/etc/gpu-ssh-monitor/slurm_ed25519",
+				"host_key":"SHA256:test"
+			}
+		]
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadHubConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Nodes) != 0 || len(config.SlurmClusters) != 2 {
+		t.Fatalf("unexpected Slurm-only Hub config: %#v", config)
+	}
+	if config.SlurmClusters[0].Transport != "local" || len(config.SlurmClusters[0].Partitions) != 1 {
+		t.Fatalf("local Slurm config was not normalized: %#v", config.SlurmClusters[0])
+	}
+	if config.SlurmClusters[1].refreshInterval() != 2*time.Second ||
+		config.SlurmClusters[1].timeout() != 4*time.Second {
+		t.Fatalf("unexpected Slurm defaults: %#v", config.SlurmClusters[1])
+	}
+
+	partitions, err := parseSlurmPartitions(strings.Join([]string{
+		"gpu*\tup\t20:00\t1\tmix\t2/14/0/16\tgpu:rtx_4090:1",
+		"gpu*\tup\t20:00\t1\talloc\t8/8/0/16\tgpu:rtx_5090:1",
+		"cpu\tup\tinfinite\t2\tidle\t0/64/0/64\t(null)",
+	}, "\n"), []string{"gpu"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partitions) != 1 || partitions[0].Nodes != 2 ||
+		partitions[0].CPUsAlloc != 10 || partitions[0].CPUsTotal != 32 ||
+		len(partitions[0].States) != 2 || len(partitions[0].GRES) != 2 {
+		t.Fatalf("unexpected aggregated Slurm partition: %#v", partitions)
+	}
+	jobs, err := parseSlurmJobs(strings.Join([]string{
+		"101\tgpu\ttrain\talice\tRUNNING\t1:20\t20:00\t1\tgpu01",
+		"102_[1-4]\tgpu\tsweep\tbob\tPENDING\t0:00\t20:00\t1\t(Priority)",
+		"103\tcpu\tcompile\tcarol\tRUNNING\t0:10\t10:00\t1\tcpu01",
+	}, "\n"), []string{"gpu"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 || jobs[1].Reason != "(Priority)" || jobs[1].Nodes != 1 {
+		t.Fatalf("unexpected parsed Slurm jobs: %#v", jobs)
+	}
+	if got := shellJoin([]string{"squeue", "-o", "a'b"}); got != "'squeue' '-o' 'a'\"'\"'b'" {
+		t.Fatalf("shell quoting = %q", got)
+	}
+
+	now := time.Now()
+	model := &hubModel{
+		config: hubConfig{
+			Name: "Test Lab Hub",
+			SlurmClusters: []slurmClusterConfig{
+				{Name: "A100 Cluster", Transport: "ssh"},
+				{Name: "General GPU", Transport: "local"},
+			},
+		},
+		slurmView:   true,
+		slurmFilter: -1,
+		slurmStates: []slurmClusterState{
+			{Snapshot: slurmSnapshot{
+				Name: "A100 Cluster", CollectedAt: now, Version: "slurm-wlm 23.11.4",
+				Partitions: []slurmPartition{{
+					Name: "gpu-part", Default: true, Available: "up", Nodes: 1,
+					States: []string{"alloc"}, CPUsAlloc: 20, CPUsTotal: 20,
+				}},
+				Jobs: []slurmJob{
+					{ID: "57612", Partition: "gpu-part", Name: "bash", User: "yida", State: "RUNNING", Elapsed: "4:00", TimeLimit: "20:00", Nodes: 1, Reason: "a100"},
+					{ID: "57615", Partition: "gpu-part", Name: "laplace", User: "lwx", State: "PENDING", Elapsed: "0:00", TimeLimit: "20:00", Nodes: 1, Reason: "(Resources)"},
+				},
+			}, Latency: 20 * time.Millisecond},
+			{Snapshot: slurmSnapshot{
+				Name: "General GPU", CollectedAt: now, Version: "slurm-wlm 25.11.2",
+				Partitions: []slurmPartition{{
+					Name: "mixed-gpu", Default: true, Available: "up", Nodes: 2,
+					States: []string{"mix"}, CPUsAlloc: 6, CPUsTotal: 24,
+				}},
+				Jobs: []slurmJob{
+					{ID: "600_15", Partition: "mixed-gpu", Name: "ctx5090", User: "chl", State: "RUNNING", Elapsed: "1:41", TimeLimit: "20:00", Nodes: 1, Reason: "gpu5090"},
+					{ID: "613_[0-7%1]", Partition: "mixed-gpu", Name: "sc-spmv-full", User: "lhc", State: "PENDING", Elapsed: "0:00", TimeLimit: "20:00", Nodes: 1, Reason: "(Priority)"},
+				},
+			}, Latency: 12 * time.Millisecond},
+		},
+		colorMode: colorModeDark,
+		status:    "test",
+	}
+	for _, size := range []struct{ width, height int }{{160, 40}, {100, 30}, {60, 24}} {
+		model.width, model.height, model.slurmOffset = size.width, size.height, 0
+		rendered := model.slurmQueueView()
+		if size.width == 160 {
+			for _, expected := range []string{"SLURM QUEUES", "A100 Cluster", "General GPU", "57612", "613_[0-7%1]", "(Priority)"} {
+				if !strings.Contains(rendered, expected) {
+					t.Fatalf("%dx%d Slurm view missing %q\n%s", size.width, size.height, expected, rendered)
+				}
+			}
+		}
+		if got := lipgloss.Height(rendered); got > size.height {
+			t.Fatalf("%dx%d Slurm height = %d\n%s", size.width, size.height, got, rendered)
+		}
+		for index, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d Slurm line %d width = %d\n%q", size.width, size.height, index, got, line)
+			}
+		}
+	}
+	if index, ok := model.slurmClusterAt(0, 1); !ok || index != 0 {
+		t.Fatalf("Slurm cluster click resolved to index=%d ok=%t", index, ok)
+	}
+	model.moveSlurmFilter(1)
+	if model.slurmFilter != 0 {
+		t.Fatalf("Slurm filter = %d, want first cluster", model.slurmFilter)
+	}
+}
+
 func TestHubRefreshLifecycleSurvivesDetailDashboard(t *testing.T) {
 	model := &hubModel{
 		config: hubConfig{

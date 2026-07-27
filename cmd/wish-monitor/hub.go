@@ -25,10 +25,11 @@ const (
 )
 
 type hubConfig struct {
-	Name                string          `json:"name,omitempty"`
-	RefreshSeconds      int             `json:"refresh_seconds,omitempty"`
-	InsecureSkipHostKey bool            `json:"insecure_skip_host_key,omitempty"`
-	Nodes               []hubNodeConfig `json:"nodes"`
+	Name                string               `json:"name,omitempty"`
+	RefreshSeconds      int                  `json:"refresh_seconds,omitempty"`
+	InsecureSkipHostKey bool                 `json:"insecure_skip_host_key,omitempty"`
+	Nodes               []hubNodeConfig      `json:"nodes"`
+	SlurmClusters       []slurmClusterConfig `json:"slurm_clusters,omitempty"`
 }
 
 type hubNodeConfig struct {
@@ -53,8 +54,8 @@ func loadHubConfig(path string) (*hubConfig, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if len(config.Nodes) == 0 {
-		return nil, errors.New("hub configuration has no nodes")
+	if len(config.Nodes) == 0 && len(config.SlurmClusters) == 0 {
+		return nil, errors.New("hub configuration has no nodes or Slurm clusters")
 	}
 	config.Name = sanitizeTerminalText(config.Name)
 	if config.Name == "" {
@@ -84,7 +85,67 @@ func loadHubConfig(path string) (*hubConfig, error) {
 			return nil, fmt.Errorf("hub node %q requires host_key", node.Name)
 		}
 	}
+	seenClusters := make(map[string]struct{}, len(config.SlurmClusters))
+	for index := range config.SlurmClusters {
+		cluster := &config.SlurmClusters[index]
+		cluster.Name = sanitizeTerminalText(cluster.Name)
+		cluster.Description = sanitizeTerminalText(cluster.Description)
+		cluster.Transport = strings.ToLower(strings.TrimSpace(cluster.Transport))
+		cluster.Address = strings.TrimSpace(cluster.Address)
+		cluster.User = strings.TrimSpace(cluster.User)
+		cluster.IdentityFile = strings.TrimSpace(cluster.IdentityFile)
+		cluster.HostKey = strings.TrimSpace(cluster.HostKey)
+		cluster.HostKeys = uniqueTerminalValues(cluster.HostKeys)
+		if cluster.HostKey != "" {
+			cluster.HostKeys = appendUnique(cluster.HostKeys, cluster.HostKey)
+		}
+		cluster.InsecureSkipHostKey = config.InsecureSkipHostKey
+		if cluster.Transport == "" {
+			if cluster.Address == "" {
+				cluster.Transport = "local"
+			} else {
+				cluster.Transport = "ssh"
+			}
+		}
+		if cluster.Name == "" {
+			return nil, fmt.Errorf("Slurm cluster %d requires name", index+1)
+		}
+		if _, exists := seenClusters[cluster.Name]; exists {
+			return nil, fmt.Errorf("duplicate Slurm cluster name %q", cluster.Name)
+		}
+		seenClusters[cluster.Name] = struct{}{}
+		switch cluster.Transport {
+		case "local":
+		case "ssh":
+			if cluster.Address == "" || cluster.User == "" || cluster.IdentityFile == "" {
+				return nil, fmt.Errorf("Slurm cluster %q using ssh requires address, user, and identity_file", cluster.Name)
+			}
+			if len(cluster.HostKeys) == 0 && !config.InsecureSkipHostKey {
+				return nil, fmt.Errorf("Slurm cluster %q requires host_key or host_keys", cluster.Name)
+			}
+		default:
+			return nil, fmt.Errorf("Slurm cluster %q has invalid transport %q", cluster.Name, cluster.Transport)
+		}
+		cluster.Partitions = uniqueTerminalValues(cluster.Partitions)
+	}
 	return &config, nil
+}
+
+func uniqueTerminalValues(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = sanitizeTerminalText(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (c hubConfig) displayName() string {
@@ -115,15 +176,20 @@ type hubNodeState struct {
 // hubService shares one recent overview snapshot between all connected Hub
 // sessions. Per-node detail pages remain live and session-specific.
 type hubService struct {
-	config      hubConfig
-	mu          sync.RWMutex
-	collectMu   sync.Mutex
-	states      []hubNodeState
-	collectedAt time.Time
+	config         hubConfig
+	mu             sync.RWMutex
+	collectMu      sync.Mutex
+	slurmCollectMu sync.Mutex
+	states         []hubNodeState
+	slurmStates    []slurmClusterState
+	collectedAt    time.Time
 }
 
 func newHubService(config hubConfig) *hubService {
-	return &hubService{config: config, states: make([]hubNodeState, len(config.Nodes))}
+	return &hubService{
+		config: config, states: make([]hubNodeState, len(config.Nodes)),
+		slurmStates: make([]slurmClusterState, len(config.SlurmClusters)),
+	}
 }
 
 func (s *hubService) collect() []hubNodeState {
@@ -145,6 +211,23 @@ func (s *hubService) collect() []hubNodeState {
 	s.mu.Lock()
 	s.states = append([]hubNodeState(nil), states...)
 	s.collectedAt = time.Now()
+	s.mu.Unlock()
+	return states
+}
+
+func (s *hubService) collectSlurm() []slurmClusterState {
+	if len(s.config.SlurmClusters) == 0 {
+		return nil
+	}
+	s.slurmCollectMu.Lock()
+	defer s.slurmCollectMu.Unlock()
+
+	s.mu.RLock()
+	previous := append([]slurmClusterState(nil), s.slurmStates...)
+	s.mu.RUnlock()
+	states := collectSlurmStatesWithPrevious(s.config.SlurmClusters, previous, time.Now())
+	s.mu.Lock()
+	s.slurmStates = append([]slurmClusterState(nil), states...)
 	s.mu.Unlock()
 	return states
 }
@@ -215,27 +298,37 @@ func (s *hubService) retryOfflineNow() {
 			s.states[index].NextRetry = time.Time{}
 		}
 	}
+	for index := range s.slurmStates {
+		if s.slurmStates[index].ConsecutiveFailures > 0 {
+			s.slurmStates[index].NextRetry = time.Time{}
+		}
+	}
 	s.collectedAt = time.Time{}
 }
 
 type hubSnapshotsMsg struct {
-	States []hubNodeState
+	States      []hubNodeState
+	SlurmStates []slurmClusterState
 }
 
 type hubTickMsg struct{}
 
 type hubModel struct {
-	service    *hubService
-	config     hubConfig
-	states     []hubNodeState
-	width      int
-	height     int
-	cursor     int
-	offset     int
-	collecting bool
-	colorMode  colorMode
-	status     string
-	detail     *monitorModel
+	service     *hubService
+	config      hubConfig
+	states      []hubNodeState
+	width       int
+	height      int
+	cursor      int
+	offset      int
+	collecting  bool
+	colorMode   colorMode
+	status      string
+	detail      *monitorModel
+	slurmView   bool
+	slurmFilter int
+	slurmOffset int
+	slurmStates []slurmClusterState
 }
 
 type hubNodeGroup struct {
@@ -257,13 +350,16 @@ type hubPage struct {
 
 func newHubModel(service *hubService, _ ssh.Session, width, height int) *hubModel {
 	return &hubModel{
-		service:   service,
-		config:    service.config,
-		states:    make([]hubNodeState, len(service.config.Nodes)),
-		width:     width,
-		height:    height,
-		colorMode: parseColorMode(os.Getenv("DEFAULT_THEME")),
-		status:    "Select a server to open its live dashboard.",
+		service:     service,
+		config:      service.config,
+		states:      make([]hubNodeState, len(service.config.Nodes)),
+		slurmStates: make([]slurmClusterState, len(service.config.SlurmClusters)),
+		slurmFilter: -1,
+		slurmView:   len(service.config.Nodes) == 0 && len(service.config.SlurmClusters) > 0,
+		width:       width,
+		height:      height,
+		colorMode:   parseColorMode(os.Getenv("DEFAULT_THEME")),
+		status:      "Select a server to open its live dashboard.",
 	}
 }
 
@@ -281,12 +377,29 @@ func (m *hubModel) startCollect() tea.Cmd {
 	}
 	m.collecting = true
 	nodes := append([]hubNodeConfig(nil), m.config.Nodes...)
+	clusters := append([]slurmClusterConfig(nil), m.config.SlurmClusters...)
 	service := m.service
 	return func() tea.Msg {
 		if service != nil {
-			return hubSnapshotsMsg{States: service.collect()}
+			var states []hubNodeState
+			var slurmStates []slurmClusterState
+			var wait sync.WaitGroup
+			wait.Add(2)
+			go func() {
+				defer wait.Done()
+				states = service.collect()
+			}()
+			go func() {
+				defer wait.Done()
+				slurmStates = service.collectSlurm()
+			}()
+			wait.Wait()
+			return hubSnapshotsMsg{States: states, SlurmStates: slurmStates}
 		}
-		return hubSnapshotsMsg{States: collectHubNodeStates(nodes)}
+		return hubSnapshotsMsg{
+			States:      collectHubNodeStates(nodes),
+			SlurmStates: collectSlurmStatesWithPrevious(clusters, nil, time.Now()),
+		}
 	}
 }
 
@@ -298,6 +411,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hubSnapshotsMsg:
 		m.collecting = false
 		m.states = msg.States
+		m.slurmStates = msg.SlurmStates
 		if m.detail == nil {
 			m.updateOnlineStatus()
 		}
@@ -329,6 +443,14 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
+			if m.slurmView {
+				if index, ok := m.slurmClusterAt(msg.Mouse().X, msg.Mouse().Y); ok {
+					m.slurmFilter = index
+					m.slurmOffset = 0
+					m.status = "Showing jobs from " + m.config.SlurmClusters[index].Name + "."
+				}
+				return m, nil
+			}
 			if index, ok := m.nodeAt(msg.Mouse().X, msg.Mouse().Y); ok {
 				m.cursor = index
 				return m, m.openSelected()
@@ -341,20 +463,74 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t", "T":
 			m.toggleColorMode()
 		case "r":
-			m.status = "Refreshing all servers…"
+			m.status = "Refreshing servers and Slurm queues…"
 			if m.service != nil {
 				m.service.retryOfflineNow()
 			}
 			return m, m.startCollect()
+		case "tab":
+			if len(m.config.SlurmClusters) > 0 {
+				m.slurmView = !m.slurmView
+				m.slurmOffset = 0
+				if m.slurmView {
+					m.status = "Slurm queue overview."
+				} else {
+					m.status = "Server overview."
+				}
+			}
+		case "s", "S":
+			if len(m.config.SlurmClusters) > 0 {
+				m.slurmView = true
+				m.slurmOffset = 0
+				m.status = "Slurm queue overview."
+			}
+		case "esc":
+			if m.slurmView {
+				m.slurmView = false
+				m.status = "Server overview."
+			}
+		case "a", "A":
+			if m.slurmView {
+				m.slurmFilter = -1
+				m.slurmOffset = 0
+				m.status = "Showing jobs from all Slurm clusters."
+			}
 		case "left", "h":
+			if m.slurmView {
+				m.moveSlurmFilter(-1)
+				break
+			}
 			m.moveCursor(-1)
 		case "right", "l":
+			if m.slurmView {
+				m.moveSlurmFilter(1)
+				break
+			}
 			m.moveCursor(1)
 		case "up", "k":
+			if m.slurmView {
+				m.slurmOffset = max(0, m.slurmOffset-1)
+				break
+			}
 			m.moveCursor(-m.columns())
 		case "down", "j":
+			if m.slurmView {
+				m.slurmOffset++
+				break
+			}
 			m.moveCursor(m.columns())
+		case "pgup":
+			if m.slurmView {
+				m.slurmOffset = max(0, m.slurmOffset-max(1, m.height/2))
+			}
+		case "pgdown":
+			if m.slurmView {
+				m.slurmOffset += max(1, m.height/2)
+			}
 		case "enter":
+			if m.slurmView {
+				break
+			}
 			return m, m.openSelected()
 		}
 	}
@@ -367,6 +543,17 @@ func (m *hubModel) updateOnlineStatus() {
 		if state.Error == "" {
 			online++
 		}
+	}
+	slurmOnline := 0
+	for _, state := range m.slurmStates {
+		if state.Error == "" && !state.Snapshot.CollectedAt.IsZero() {
+			slurmOnline++
+		}
+	}
+	if len(m.slurmStates) > 0 {
+		m.status = fmt.Sprintf("%d/%d servers · %d/%d Slurm clusters online.",
+			online, len(m.states), slurmOnline, len(m.slurmStates))
+		return
 	}
 	m.status = fmt.Sprintf("%d/%d servers online.", online, len(m.states))
 }
@@ -562,6 +749,9 @@ func (m *hubModel) View() tea.View {
 		return view
 	}
 	body := m.hubView()
+	if m.slurmView {
+		body = m.slurmQueueView()
+	}
 	if m.colorMode == colorModeLight {
 		body = applyLightTheme(body)
 	}
@@ -612,13 +802,19 @@ func (m *hubModel) hubView() string {
 	if len(pages) > 1 {
 		rangeText = fmt.Sprintf("  PAGE %d/%d", pageIndex+1, len(pages))
 	}
-	footer := strings.Join([]string{
+	hints := []string{
 		keyHint("↑↓←→", "select"),
 		keyHint("enter", "open"),
+	}
+	if len(m.config.SlurmClusters) > 0 {
+		hints = append(hints, keyHint("s", "queues"))
+	}
+	hints = append(hints,
 		keyHint("r", "refresh"),
 		keyHint("t", "theme"),
 		keyHint("q", "quit"),
-	}, "  ")
+	)
+	footer := strings.Join(hints, "  ")
 	statusWidth := width - lipgloss.Width(footer) - 2
 	if statusWidth > 10 {
 		footer += "  " + dimStyle.Render(truncate(m.status+rangeText, statusWidth))
