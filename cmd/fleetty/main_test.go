@@ -914,6 +914,31 @@ lo0 16384 <Link#1> 1 0 100 1 0 100 0
 		t.Fatalf("netstat parser = %#v", devices)
 	}
 
+	battery, err := parseDarwinBattery([]byte(`Now drawing from 'AC Power'
+ -InternalBattery-0 (id=37421155)	80%; AC attached; not charging present: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if battery == nil || battery.Percent != 80 || battery.Status != "not charging" ||
+		battery.PowerSource != "AC Power" || battery.TimeRemaining != "" {
+		t.Fatalf("AC battery parser = %#v", battery)
+	}
+	battery, err = parseDarwinBattery([]byte(`Now drawing from 'Battery Power'
+ -InternalBattery-0 (id=1234)	57%; discharging; 4:09 remaining present: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if battery == nil || battery.Percent != 57 || battery.Status != "discharging" ||
+		battery.PowerSource != "Battery Power" || battery.TimeRemaining != "4h09m remaining" {
+		t.Fatalf("discharging battery parser = %#v", battery)
+	}
+	battery, err = parseDarwinBattery([]byte("Now drawing from 'AC Power'\n"))
+	if err != nil || battery != nil {
+		t.Fatalf("desktop battery parser = %#v, %v; want no battery", battery, err)
+	}
+
 	for value, want := range map[string]uint64{
 		"01:02":      62,
 		"03:04:05":   11045,
@@ -949,6 +974,36 @@ func TestGeneralProfileOmitsGPUSection(t *testing.T) {
 	rendered := model.monitorView()
 	if strings.Contains(rendered, " GPU ") || strings.Contains(rendered, "NVIDIA") {
 		t.Fatalf("general profile unexpectedly rendered GPU panel\n%s", rendered)
+	}
+}
+
+func TestMacBatteryCardIsResponsive(t *testing.T) {
+	model := &monitorModel{
+		profile: machineProfileGeneral,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryUsed: 8 << 30, MemoryTotal: 16 << 30,
+			DiskUsed: 200 << 30, DiskTotal: 500 << 30,
+			Battery: &batteryInfo{
+				Percent: 57, Status: "discharging",
+				TimeRemaining: "4h09m remaining", PowerSource: "Battery Power",
+			},
+		},
+	}
+	for _, size := range []struct{ width, height int }{{160, 40}, {100, 30}, {60, 24}} {
+		model.width, model.height = size.width, size.height
+		rendered := model.monitorView()
+		if !strings.Contains(rendered, "BATTERY") || !strings.Contains(rendered, "57%") {
+			t.Fatalf("%dx%d battery card missing:\n%s", size.width, size.height, rendered)
+		}
+		if got := lipgloss.Height(rendered); got > size.height {
+			t.Fatalf("%dx%d battery view height = %d", size.width, size.height, got)
+		}
+		for lineNumber, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d line %d width = %d: %q", size.width, size.height, lineNumber, got, line)
+			}
+		}
 	}
 }
 

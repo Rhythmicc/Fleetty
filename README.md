@@ -106,7 +106,7 @@ install -m 0755 "/tmp/${fleetty_asset}" "$HOME/.local/bin/fleetty"
 "$HOME/.local/bin/fleetty" top
 ```
 
-`fleetty top --theme light` 使用浅色主题。该模式不启动后台服务、不开放网络端口，也不需要 root；`q` 退出，`t` 切换主题，`/` 过滤进程，方向键、回车和鼠标可以选择并查看进程详情。
+`fleetty top --theme light` 使用浅色主题。MacBook 会自动显示电量、充放电状态、剩余时间和当前电源来源；没有电池的桌面 Mac 自动隐藏该状态卡。该模式不启动后台服务、不开放网络端口，也不需要 root；`q` 退出，`t` 切换主题，`/` 过滤进程，方向键、回车和鼠标可以选择并查看进程详情。
 
 ### Linux SSH 节点
 

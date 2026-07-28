@@ -909,7 +909,11 @@ func (m *monitorModel) monitorView() string {
 	if !showGPU {
 		gpuCount = -1
 	}
-	layout := newDashboardLayout(m.width, m.height, gpuCount, showGPU && m.snapshot.GPUError != "")
+	metricCount := 4
+	if m.snapshot.Battery != nil {
+		metricCount++
+	}
+	layout := newDashboardLayoutForMetrics(m.width, m.height, gpuCount, showGPU && m.snapshot.GPUError != "", metricCount)
 	w := layout.width
 	header := dashboardHeader(w, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
 	if m.snapshot.CollectedAt.IsZero() {
@@ -939,6 +943,23 @@ func (m *monitorModel) monitorView() string {
 			visual: metricVisualNetwork, primaryHistory: m.networkRXHistory, secondaryHistory: m.networkTXHistory,
 			titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
 		},
+	}
+	if battery := m.snapshot.Battery; battery != nil {
+		detail := battery.PowerSource
+		if battery.TimeRemaining != "" {
+			if detail != "" {
+				detail += " · "
+			}
+			detail += battery.TimeRemaining
+		}
+		if detail == "" {
+			detail = "power source unavailable"
+		}
+		metrics = append(metrics, metricCard{
+			title: "BATTERY", value: fmt.Sprintf("%.0f%%  %s", battery.Percent, strings.ToUpper(battery.Status)), detail: detail,
+			visual: metricVisualBattery, usage: battery.Percent,
+			titleStyle: batteryTitleStyle, borderColor: colorBatteryBorder,
+		})
 	}
 	metricRows := renderMetricRows(metrics, layout)
 	gpu := ""
@@ -1320,6 +1341,7 @@ const (
 	metricVisualCPU
 	metricVisualMeter
 	metricVisualNetwork
+	metricVisualBattery
 )
 
 type metricCard struct {
@@ -1342,21 +1364,30 @@ type dashboardLayout struct {
 }
 
 func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashboardLayout {
+	return newDashboardLayoutForMetrics(width, height, gpuCount, gpuUnavailable, 4)
+}
+
+func newDashboardLayoutForMetrics(width, height, gpuCount int, gpuUnavailable bool, metricCount int) dashboardLayout {
 	if width <= 0 {
 		width = 80
 	}
 	if height <= 0 {
 		height = 24
 	}
+	metricCount = max(1, metricCount)
 	cols := 1
 	switch {
+	case metricCount >= 5 && width >= 140:
+		cols = 5
+	case metricCount >= 5 && width >= 84:
+		cols = 3
 	case width >= 132:
 		cols = 4
 	case width >= 52:
 		cols = 2
 	}
 	compactGPU := width < 112
-	metricLines := ((4 + cols - 1) / cols) * 5 // three content lines plus border
+	metricLines := ((metricCount + cols - 1) / cols) * 5 // three content lines plus border
 	gpuContentLines := -2
 	if gpuCount < 0 {
 		gpuContentLines = -2
@@ -1428,6 +1459,8 @@ func renderMetricVisual(card metricCard, width int) string {
 			sparkline(card.primaryHistory, graphWidth, ceiling, networkRXStyle) +
 			dimStyle.Render("  ") + networkTXStyle.Render("↑") +
 			sparkline(card.secondaryHistory, graphWidth, ceiling, networkTXStyle)
+	case metricVisualBattery:
+		return batteryBar(card.usage, width)
 	default:
 		return dimStyle.Render(strings.Repeat("─", max(1, width)))
 	}
@@ -1652,6 +1685,7 @@ type monitorSnapshot struct {
 	NetworkRX, NetworkTX    uint64
 	NetworkRXTotal          uint64
 	NetworkTXTotal          uint64
+	Battery                 *batteryInfo
 	NetworkInterfaces       []networkInterfaceInfo
 	Filesystems             []filesystemInfo
 	Services                []serviceHealth
@@ -1663,6 +1697,13 @@ type monitorSnapshot struct {
 	GPUError                string
 	Processes               []processInfo
 	ManagementActions       []managementActionInfo
+}
+
+type batteryInfo struct {
+	Percent       float64
+	Status        string
+	TimeRemaining string
+	PowerSource   string
 }
 
 type managementActionInfo struct {
@@ -1780,6 +1821,9 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 		errs = append(errs, "network: "+err.Error())
 	}
 	s.LoadAverage = readLoadAverage()
+	if runtime.GOOS == "darwin" {
+		s.Battery, _ = readDarwinBattery()
+	}
 	if c.config.Profile == machineProfileGPU {
 		s.GPUs, s.GPUError = readGPUs()
 	}
@@ -2072,6 +2116,7 @@ var (
 	colorMemoryBorder        = lipgloss.Color("#514A78")
 	colorDiskBorder          = lipgloss.Color("#6B5438")
 	colorNetworkBorder       = lipgloss.Color("#315B72")
+	colorBatteryBorder       = lipgloss.Color("#615B32")
 	colorGPUBorder           = lipgloss.Color("#53517A")
 	colorProcessBorder       = lipgloss.Color("#465572")
 	titleStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
@@ -2082,6 +2127,7 @@ var (
 	memoryTitleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A7E7")).Bold(true)
 	diskTitleStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#F6C177")).Bold(true)
 	networkTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
+	batteryTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD166")).Bold(true)
 	gpuTitleStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
 	processTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#9FC3FF")).Bold(true)
 	dangerStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80")).Bold(true)
@@ -2283,6 +2329,7 @@ var lightThemeColorSwaps = []themeColorSwap{
 	{"#514A78", "#756D99"},
 	{"#6B5438", "#92795C"},
 	{"#315B72", "#66869A"},
+	{"#615B32", "#827A4E"},
 	{"#53517A", "#74739C"},
 	{"#465572", "#697D9B"},
 	{"#5B6B8A", "#7183A0"},
@@ -2436,6 +2483,21 @@ func bar(value float64, width int) string {
 	}
 	_, loadStyle := gpuLoadStatus(value)
 	return loadStyle.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
+}
+
+func batteryBar(value float64, width int) string {
+	filled := int(value / 100 * float64(width))
+	filled = max(0, min(width, filled))
+	style := gpuActiveStyle
+	switch {
+	case value <= 10:
+		style = gpuMaxStyle
+	case value <= 25:
+		style = gpuHighStyle
+	case value <= 50:
+		style = gpuBusyStyle
+	}
+	return style.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
 }
 func compactCommandError(err error) string {
 	if errors.Is(err, exec.ErrNotFound) {

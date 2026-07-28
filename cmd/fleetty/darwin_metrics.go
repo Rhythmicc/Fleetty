@@ -207,6 +207,111 @@ func readDarwinLoadAverage() string {
 	return "load " + strings.Join(fields[:3], " · ")
 }
 
+func readDarwinBattery() (*batteryInfo, error) {
+	output, err := commandOutput(2*time.Second, "pmset", "-g", "batt")
+	if err != nil {
+		return nil, err
+	}
+	return parseDarwinBattery(output)
+}
+
+func parseDarwinBattery(output []byte) (*batteryInfo, error) {
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 {
+		return nil, errors.New("pmset returned no battery information")
+	}
+
+	powerSource := ""
+	if start := strings.Index(lines[0], "'"); start >= 0 {
+		if end := strings.Index(lines[0][start+1:], "'"); end >= 0 {
+			powerSource = sanitizeTerminalText(lines[0][start+1 : start+1+end])
+		}
+	}
+
+	for _, line := range lines[1:] {
+		closing := strings.Index(line, ")")
+		if closing < 0 {
+			continue
+		}
+		fields := strings.Split(line[closing+1:], ";")
+		if len(fields) < 2 {
+			continue
+		}
+		percentValue := strings.TrimSpace(strings.TrimSuffix(fields[0], "%"))
+		charge, err := strconv.ParseFloat(percentValue, 64)
+		if err != nil {
+			continue
+		}
+		statusText := strings.ToLower(strings.Join(fields[1:], " "))
+		statusText = strings.ReplaceAll(statusText, "present: true", "")
+		statusText = strings.TrimSpace(statusText)
+		return &batteryInfo{
+			Percent:       maxFloat64(0, minFloat64(100, charge)),
+			Status:        normalizeDarwinBatteryStatus(statusText),
+			TimeRemaining: parseDarwinBatteryRemaining(statusText),
+			PowerSource:   powerSource,
+		}, nil
+	}
+
+	// Desktop Macs report only the current power source. A missing battery is
+	// normal and should not reserve dashboard space or surface as a warning.
+	return nil, nil
+}
+
+func normalizeDarwinBatteryStatus(value string) string {
+	switch {
+	case strings.Contains(value, "not charging"):
+		return "not charging"
+	case strings.Contains(value, "discharging"):
+		return "discharging"
+	case strings.Contains(value, "finishing charge"):
+		return "finishing charge"
+	case strings.Contains(value, "charging"):
+		return "charging"
+	case strings.Contains(value, "charged"):
+		return "charged"
+	case strings.Contains(value, "ac attached"):
+		return "AC attached"
+	default:
+		return "unknown"
+	}
+}
+
+func parseDarwinBatteryRemaining(value string) string {
+	for _, field := range strings.Fields(value) {
+		if !strings.Contains(field, ":") {
+			continue
+		}
+		parts := strings.SplitN(field, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		hours, hourErr := strconv.Atoi(parts[0])
+		minutes, minuteErr := strconv.Atoi(parts[1])
+		if hourErr == nil && minuteErr == nil && hours >= 0 && minutes >= 0 && minutes < 60 {
+			if hours == 0 && minutes == 0 {
+				return ""
+			}
+			return fmt.Sprintf("%dh%02dm remaining", hours, minutes)
+		}
+	}
+	return ""
+}
+
+func minFloat64(first, second float64) float64 {
+	if first < second {
+		return first
+	}
+	return second
+}
+
+func maxFloat64(first, second float64) float64 {
+	if first > second {
+		return first
+	}
+	return second
+}
+
 func readDarwinProcesses() ([]processInfo, error) {
 	output, err := commandOutput(3*time.Second, "ps", "-axo", "pid=,user=,state=,%cpu=,%mem=,rss=,etime=,comm=")
 	if err != nil {
