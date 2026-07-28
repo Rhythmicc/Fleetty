@@ -17,6 +17,7 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "optional machine configuration")
 	theme := flags.String("theme", envString("DEFAULT_THEME", "dark"), "dark or light")
+	layoutPathFlag := flags.String("layout", "", "dashboard layout file")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -44,6 +45,12 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 		machine.Name = sanitizeTerminalText(machine.Name)
 	}
 
+	layoutPath, err := resolvePanelLayoutPath(*layoutPathFlag)
+	if err != nil {
+		return err
+	}
+	panelLayout, layoutErr := loadPanelLayout(layoutPath)
+
 	admin := newAdminController()
 	account, _ := user.Current()
 	userName := "local"
@@ -51,15 +58,20 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 		userName = account.Username
 	}
 	model := &monitorModel{
-		backend:   newLocalMonitorBackend(admin, machine, userName, "local-terminal"),
-		admin:     admin,
-		user:      userName,
-		remote:    "local-terminal",
-		nodeName:  machine.Name,
-		profile:   machine.Profile,
-		status:    "Local metrics refresh every second.",
-		colorMode: mode,
+		backend:     newLocalMonitorBackend(admin, machine, userName, "local-terminal"),
+		admin:       admin,
+		user:        userName,
+		remote:      "local-terminal",
+		nodeName:    machine.Name,
+		profile:     machine.Profile,
+		status:      "Local metrics refresh every second.",
+		colorMode:   mode,
+		panelLayout: panelLayout,
+		layoutPath:  layoutPath,
 	}
-	_, err := tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout)).Run()
+	if layoutErr != nil {
+		model.status = "Using the default layout: " + layoutErr.Error()
+	}
+	_, err = tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout)).Run()
 	return err
 }

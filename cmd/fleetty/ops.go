@@ -148,7 +148,7 @@ func writeOperationsUsage(writer io.Writer) {
 	fmt.Fprintln(writer, `Fleetty
 
 Usage:
-  fleetty top [--config PATH] [--theme dark|light]
+  fleetty top [--config PATH] [--theme dark|light] [--layout PATH]
   fleetty serve
   fleetty privileged-helper [--socket PATH] [--group NAME] [--service fleetty.service]
   fleetty install --role node|hub|privileged-helper [--scope auto|user|system] [--config-dir PATH] [--json]

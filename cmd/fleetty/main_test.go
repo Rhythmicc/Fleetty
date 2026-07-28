@@ -1416,6 +1416,149 @@ func TestReadOnlyDashboardResizesPanelsAndOpensProcessDetails(t *testing.T) {
 	}
 }
 
+func TestPanelLayoutPersistenceNormalizesRegistry(t *testing.T) {
+	path := t.TempDir() + "/nested/layout.json"
+	layout := panelLayoutConfig{
+		Version: panelLayoutVersion,
+		Panels: []dashboardPanelPreference{
+			{ID: dashboardPanelProcesses},
+			{ID: dashboardPanelOverview, Collapsed: true},
+			{ID: "removed_plugin"},
+			{ID: dashboardPanelProcesses, Collapsed: true},
+		},
+	}
+	if err := savePanelLayout(path, layout); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("layout mode = %o, want 600", info.Mode().Perm())
+	}
+	loaded, err := loadPanelLayout(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Panels) != len(dashboardPanelRegistry) {
+		t.Fatalf("normalized panels = %#v", loaded.Panels)
+	}
+	if loaded.Panels[0].ID != dashboardPanelProcesses ||
+		loaded.Panels[1].ID != dashboardPanelOverview ||
+		!loaded.Panels[1].Collapsed {
+		t.Fatalf("saved order or collapsed state lost: %#v", loaded.Panels)
+	}
+	for _, panel := range loaded.Panels {
+		if panel.ID == "removed_plugin" {
+			t.Fatalf("unknown panel survived normalization: %#v", loaded.Panels)
+		}
+	}
+}
+
+func TestReadOnlyLayoutEditorReordersCollapsesAndSaves(t *testing.T) {
+	path := t.TempDir() + "/layout.json"
+	m := &monitorModel{
+		screen: screenMonitor, width: 100, height: 30,
+		layoutPath: path,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryTotal: 1, DiskTotal: 1,
+		},
+	}
+	m.handleKey(testKey("l"))
+	if m.screen != screenLayout {
+		t.Fatalf("layout shortcut opened screen %v", m.screen)
+	}
+	view := m.View().Content
+	if !strings.Contains(view, "DASHBOARD PANELS") || !strings.Contains(view, "SYSTEM OVERVIEW") {
+		t.Fatalf("layout editor missing registry rows:\n%s", view)
+	}
+
+	m.handleKey(testKey("down"))
+	if m.selectedLayoutPanel().ID != dashboardPanelGPU {
+		t.Fatalf("selected panel = %#v", m.selectedLayoutPanel())
+	}
+	m.handleKey(testKey("space"))
+	if !m.selectedLayoutPanel().Collapsed {
+		t.Fatal("space did not collapse selected panel")
+	}
+	m.handleKey(testKey("K"))
+	if m.panelLayout.Panels[0].ID != dashboardPanelGPU || m.layoutCursor != 0 {
+		t.Fatalf("panel was not moved up: %#v", m.panelLayout.Panels)
+	}
+	m.handleKey(testKey("s"))
+	loaded, err := loadPanelLayout(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Panels[0].ID != dashboardPanelGPU || !loaded.Panels[0].Collapsed {
+		t.Fatalf("saved layout = %#v", loaded.Panels)
+	}
+	m.handleKey(testKey("esc"))
+	if m.screen != screenMonitor {
+		t.Fatalf("layout editor returned to screen %v", m.screen)
+	}
+}
+
+func TestLayoutEditorSupportsMouseAndNarrowTerminals(t *testing.T) {
+	m := &monitorModel{
+		screen: screenLayout, width: 60, height: 24,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+		},
+	}
+	rendered := m.layoutView()
+	if got := lipgloss.Height(rendered); got > m.height {
+		t.Fatalf("layout editor height = %d, want <= %d\n%s", got, m.height, rendered)
+	}
+	for lineNumber, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("layout editor line %d width = %d\n%q", lineNumber, got, line)
+		}
+	}
+	m.handleClick(3, m.layoutFirstRowY+2)
+	if m.layoutCursor != 2 || m.selectedLayoutPanel().ID != dashboardPanelNodeQueue {
+		t.Fatalf("mouse selected panel = %#v at cursor %d", m.selectedLayoutPanel(), m.layoutCursor)
+	}
+	m.handleClick(1, m.layoutButtonY)
+	if m.layoutCursor != 1 || m.panelLayout.Panels[1].ID != dashboardPanelNodeQueue {
+		t.Fatalf("mouse move-up button did not reorder panels: %#v", m.panelLayout.Panels)
+	}
+}
+
+func TestDashboardPanelOrderAndCollapseAffectRendering(t *testing.T) {
+	m := &monitorModel{
+		width: 100, height: 30, profile: machineProfileGeneral,
+		panelLayout: panelLayoutConfig{Panels: []dashboardPanelPreference{
+			{ID: dashboardPanelProcesses},
+			{ID: dashboardPanelOverview, Collapsed: true},
+			{ID: dashboardPanelGPU},
+			{ID: dashboardPanelNodeQueue},
+		}},
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryTotal: 1, DiskTotal: 1,
+			Processes: []processInfo{{PID: 42, User: "alice", State: "R", Command: "trainer"}},
+		},
+	}
+	rendered := m.monitorView()
+	processIndex := strings.Index(rendered, "PROCESSES")
+	overviewIndex := strings.Index(rendered, "SYSTEM OVERVIEW")
+	if processIndex < 0 || overviewIndex < 0 || processIndex >= overviewIndex {
+		t.Fatalf("custom panel order not applied:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "COLLAPSED") {
+		t.Fatalf("collapsed panel summary missing:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "GPU") {
+		t.Fatalf("unavailable GPU panel should be capability-hidden:\n%s", rendered)
+	}
+	if got := lipgloss.Height(rendered); got > m.height {
+		t.Fatalf("custom layout height = %d, want <= %d", got, m.height)
+	}
+}
+
 func TestRPCProcessDetailsAreReadOnlyWithoutAuthentication(t *testing.T) {
 	admin := &adminController{password: "secret"}
 	service := newNodeRPCService(admin, machineConfig{})
