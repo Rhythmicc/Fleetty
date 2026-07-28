@@ -58,6 +58,8 @@ jobs:
           done
           cp deploy/fleetty.service dist/fleetty.service
           cp deploy/fleetty-hub.service dist/fleetty-hub.service
+          cp deploy/fleetty-user.service dist/fleetty-user.service
+          cp deploy/fleetty-hub-user.service dist/fleetty-hub-user.service
           cp deploy/fleet.example.json dist/fleet.example.json
           cp deploy/hub-nodes.example.json dist/hub-nodes.example.json
           cp deploy/machine-nas.example.json dist/machine-nas.example.json

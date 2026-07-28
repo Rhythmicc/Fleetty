@@ -84,6 +84,7 @@ func (s *nodeRPCService) Handle(request nodeRPCRequest) nodeRPCResponse {
 			time.Sleep(120 * time.Millisecond)
 			snapshot, err = collect()
 		}
+		snapshot.ManagementActions = s.admin.actionInfo()
 		s.collectMu.Unlock()
 		response := nodeRPCResponse{Snapshot: snapshot}
 		if err != nil {

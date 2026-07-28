@@ -99,6 +99,51 @@ func TestApplyTargetUsesBatchSSHAndPasswordlessSudo(t *testing.T) {
 	}
 }
 
+func TestUserScopePlanAndApplyNeverUsesSudo(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "fleetty")
+	if err := os.WriteFile(binary, []byte("fleetty-user"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := fileSHA256(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := resolvedTarget{
+		Name: "user-node", SSH: "user-node", Role: "node", Scope: "user",
+		Binary: binary, Become: "none", TimeoutSeconds: 5,
+	}
+	runner := &scriptedRemoteRunner{
+		home: "/home/alice", binaryHash: hash, state: "active", enabled: "enabled",
+	}
+	plan := planTarget(context.Background(), target, runner)
+	if plan.Action != "noop" || plan.Scope != "user" {
+		t.Fatalf("user plan = %#v", plan)
+	}
+
+	runner.binaryHash = strings.Repeat("0", 64)
+	runner.staging = "/tmp/fleettyctl.User123"
+	runner.installResult = `{"role":"node","scope":"user","service":"fleetty.service","changed":true,"state":"active"}`
+	plan = planTarget(context.Background(), target, runner)
+	result := applyTarget(context.Background(), target, runner)
+	if plan.Action != "update" || result.Error != "" || result.Action != "applied" {
+		t.Fatalf("plan=%#v result=%#v", plan, result)
+	}
+	commands := strings.Join(runner.Commands(), "\n")
+	for _, expected := range []string{
+		"'printenv' 'HOME'",
+		"'sha256sum' '/home/alice/.local/bin/fleetty'",
+		"'systemctl' '--user' 'is-active'",
+		"'--scope' 'user'",
+	} {
+		if !strings.Contains(commands, expected) {
+			t.Fatalf("commands missing %q:\n%s", expected, commands)
+		}
+	}
+	if strings.Contains(commands, "'sudo'") {
+		t.Fatalf("user deployment invoked sudo:\n%s", commands)
+	}
+}
+
 func TestApplyRejectsUnsafeRemoteStagingPath(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "fleetty")
 	if err := os.WriteFile(binary, []byte("fleetty"), 0o755); err != nil {
@@ -164,6 +209,7 @@ type scriptedRemoteRunner struct {
 	staging       string
 	installResult string
 	failSudo      bool
+	home          string
 	commands      []string
 }
 
@@ -187,19 +233,27 @@ func (runner *scriptedRemoteRunner) Run(_ context.Context, name string, args []s
 			return []byte("sudo: a password is required"), errors.New("exit status 1")
 		}
 		return nil, nil
+	case remote == "'printenv' 'HOME'":
+		home := runner.home
+		if home == "" {
+			home = "/home/test"
+		}
+		return []byte(home + "\n"), nil
+	case strings.Contains(remote, "'systemctl'") && strings.Contains(remote, "'--property=Version'"):
+		return []byte("249\n"), nil
 	case strings.Contains(remote, "'mktemp'"):
 		return []byte(runner.staging + "\n"), nil
-	case strings.Contains(remote, "'sha256sum' '/opt/fleetty/fleetty'"):
+	case strings.Contains(remote, "'sha256sum'") && !strings.Contains(remote, "/etc/fleetty/"):
 		if runner.binaryHash == "" {
 			return []byte("missing"), errors.New("exit status 1")
 		}
-		return []byte(runner.binaryHash + "  /opt/fleetty/fleetty\n"), nil
-	case strings.Contains(remote, "'systemctl' 'is-active'"):
+		return []byte(runner.binaryHash + "  fleetty\n"), nil
+	case strings.Contains(remote, "'systemctl'") && strings.Contains(remote, "'is-active'"):
 		if runner.state == "active" {
 			return []byte("active\n"), nil
 		}
 		return []byte(runner.state + "\n"), errors.New("exit status 3")
-	case strings.Contains(remote, "'systemctl' 'is-enabled'"):
+	case strings.Contains(remote, "'systemctl'") && strings.Contains(remote, "'is-enabled'"):
 		if runner.enabled == "enabled" {
 			return []byte("enabled\n"), nil
 		}

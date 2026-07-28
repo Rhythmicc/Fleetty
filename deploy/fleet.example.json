@@ -8,18 +8,21 @@
       "name": "gpu-1",
       "ssh": "gpu-1-admin",
       "role": "node",
+      "scope": "user",
       "config_dir": "./config/gpu-1"
     },
     {
       "name": "nas-1",
       "ssh": "nas-1-admin",
       "role": "node",
+      "scope": "user",
       "config_dir": "./config/nas-1"
     },
     {
       "name": "lab-hub",
       "ssh": "hub-admin",
       "role": "hub",
+      "scope": "system",
       "config_dir": "./config/hub"
     }
   ]

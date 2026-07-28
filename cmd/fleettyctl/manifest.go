@@ -34,6 +34,7 @@ type manifestTarget struct {
 	Name      string `json:"name"`
 	SSH       string `json:"ssh"`
 	Role      string `json:"role"`
+	Scope     string `json:"scope,omitempty"`
 	Binary    string `json:"binary,omitempty"`
 	ConfigDir string `json:"config_dir,omitempty"`
 	Become    string `json:"become,omitempty"`
@@ -44,6 +45,7 @@ type resolvedTarget struct {
 	Name           string
 	SSH            string
 	Role           string
+	Scope          string
 	Binary         string
 	ConfigDir      string
 	Become         string
@@ -129,6 +131,7 @@ func (manifest *fleetManifest) validateAndResolve() ([]resolvedTarget, error) {
 		target.Name = strings.TrimSpace(target.Name)
 		target.SSH = strings.TrimSpace(target.SSH)
 		target.Role = strings.ToLower(strings.TrimSpace(target.Role))
+		target.Scope = strings.ToLower(strings.TrimSpace(target.Scope))
 		target.Become = strings.ToLower(strings.TrimSpace(target.Become))
 		if target.Name == "" || !safeLabel(target.Name) {
 			return nil, fmt.Errorf("target %d has invalid name %q", index+1, target.Name)
@@ -143,11 +146,24 @@ func (manifest *fleetManifest) validateAndResolve() ([]resolvedTarget, error) {
 		if target.Role != "node" && target.Role != "hub" {
 			return nil, fmt.Errorf("target %q role must be node or hub", target.Name)
 		}
+		if target.Scope == "" {
+			target.Scope = "system"
+		}
+		if target.Scope != "system" && target.Scope != "user" {
+			return nil, fmt.Errorf("target %q scope must be system or user", target.Name)
+		}
 		if target.Become == "" {
-			target.Become = "sudo"
+			if target.Scope == "user" {
+				target.Become = "none"
+			} else {
+				target.Become = "sudo"
+			}
 		}
 		if target.Become != "sudo" && target.Become != "none" {
 			return nil, fmt.Errorf("target %q become must be sudo or none", target.Name)
+		}
+		if target.Scope == "user" && target.Become != "none" {
+			return nil, fmt.Errorf("target %q user scope must use become none", target.Name)
 		}
 		binary := globalBinary
 		if strings.TrimSpace(target.Binary) != "" {
@@ -167,7 +183,7 @@ func (manifest *fleetManifest) validateAndResolve() ([]resolvedTarget, error) {
 			}
 		}
 		targets = append(targets, resolvedTarget{
-			Index: index, Name: target.Name, SSH: target.SSH, Role: target.Role,
+			Index: index, Name: target.Name, SSH: target.SSH, Role: target.Role, Scope: target.Scope,
 			Binary: binary, ConfigDir: configDir, Become: target.Become,
 			TimeoutSeconds: manifest.TimeoutSeconds,
 		})

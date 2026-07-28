@@ -19,8 +19,6 @@ import (
 	"time"
 )
 
-const remoteBinaryPath = "/opt/fleetty/fleetty"
-
 type commandRunner interface {
 	Run(context.Context, string, []string) ([]byte, error)
 }
@@ -37,6 +35,7 @@ type targetPlan struct {
 	Name        string   `json:"name"`
 	SSH         string   `json:"ssh"`
 	Role        string   `json:"role"`
+	Scope       string   `json:"scope"`
 	Action      string   `json:"action"`
 	Service     string   `json:"service"`
 	DesiredHash string   `json:"desired_hash"`
@@ -55,6 +54,12 @@ type targetApply struct {
 	Error  string          `json:"error,omitempty"`
 }
 
+type remoteDeploymentLayout struct {
+	BinaryPath    string
+	ConfigPath    string
+	SystemctlArgs []string
+}
+
 func planTargets(ctx context.Context, targets []resolvedTarget, parallel int, runner commandRunner) []targetPlan {
 	results := make([]targetPlan, len(targets))
 	runParallel(len(targets), parallel, func(index int) {
@@ -66,6 +71,7 @@ func planTargets(ctx context.Context, targets []resolvedTarget, parallel int, ru
 func planTarget(parent context.Context, target resolvedTarget, runner commandRunner) targetPlan {
 	plan := targetPlan{
 		Index: target.Index, Name: target.Name, SSH: target.SSH, Role: target.Role,
+		Scope:   targetScope(target),
 		Service: serviceForRole(target.Role), State: "unknown", Enabled: "unknown",
 	}
 	desiredHash, err := fileSHA256(target.Binary)
@@ -74,7 +80,8 @@ func planTarget(parent context.Context, target resolvedTarget, runner commandRun
 		return plan
 	}
 	plan.DesiredHash = desiredHash
-	ctx, cancel := context.WithTimeout(parent, time.Duration(target.TimeoutSeconds)*time.Second)
+	operationTimeout := time.Duration(max(target.TimeoutSeconds*6, 30)) * time.Second
+	ctx, cancel := context.WithTimeout(parent, operationTimeout)
 	defer cancel()
 	if output, connectErr := runSSH(ctx, runner, target, "true"); connectErr != nil {
 		plan.Action = "error"
@@ -88,7 +95,21 @@ func planTarget(parent context.Context, target resolvedTarget, runner commandRun
 			return plan
 		}
 	}
-	output, hashErr := runSSH(ctx, runner, target, "sha256sum", remoteBinaryPath)
+	layout, layoutErr := resolveRemoteLayout(ctx, runner, target)
+	if layoutErr != nil {
+		plan.Action, plan.Error = "error", layoutErr.Error()
+		return plan
+	}
+	if targetScope(target) == "user" {
+		arguments := append([]string{"systemctl"}, layout.SystemctlArgs...)
+		arguments = append(arguments, "show", "--property=Version", "--value")
+		if output, systemdErr := runSSH(ctx, runner, target, arguments...); systemdErr != nil {
+			plan.Action = "error"
+			plan.Error = remoteFailure("connect to the remote systemd user manager", output, systemdErr).Error()
+			return plan
+		}
+	}
+	output, hashErr := runSSH(ctx, runner, target, "sha256sum", layout.BinaryPath)
 	if hashErr == nil {
 		fields := strings.Fields(string(output))
 		if len(fields) == 0 || !validSHA256(fields[0]) {
@@ -99,11 +120,13 @@ func planTarget(parent context.Context, target resolvedTarget, runner commandRun
 			plan.CurrentHash = strings.ToLower(fields[0])
 		}
 	}
-	stateOutput, stateErr := runSSH(ctx, runner, target, "systemctl", "is-active", plan.Service)
+	systemctlArgs := append(append([]string{"systemctl"}, layout.SystemctlArgs...), "is-active", plan.Service)
+	stateOutput, stateErr := runSSH(ctx, runner, target, systemctlArgs...)
 	if stateErr == nil || strings.TrimSpace(string(stateOutput)) != "" {
 		plan.State = safeRemoteText(string(stateOutput), 80)
 	}
-	enabledOutput, enabledErr := runSSH(ctx, runner, target, "systemctl", "is-enabled", plan.Service)
+	systemctlArgs = append(append([]string{"systemctl"}, layout.SystemctlArgs...), "is-enabled", plan.Service)
+	enabledOutput, enabledErr := runSSH(ctx, runner, target, systemctlArgs...)
 	if enabledErr == nil || strings.TrimSpace(string(enabledOutput)) != "" {
 		plan.Enabled = safeRemoteText(string(enabledOutput), 80)
 	}
@@ -119,7 +142,7 @@ func planTarget(parent context.Context, target resolvedTarget, runner commandRun
 	if plan.Enabled != "enabled" {
 		plan.Reasons = append(plan.Reasons, "service is "+plan.Enabled)
 	}
-	configReasons, configErr := compareRemoteConfigs(ctx, runner, target)
+	configReasons, configErr := compareRemoteConfigs(ctx, runner, target, layout)
 	if configErr != nil {
 		plan.Action, plan.Error = "error", configErr.Error()
 		return plan
@@ -135,7 +158,12 @@ func planTarget(parent context.Context, target resolvedTarget, runner commandRun
 	return plan
 }
 
-func compareRemoteConfigs(ctx context.Context, runner commandRunner, target resolvedTarget) ([]string, error) {
+func compareRemoteConfigs(
+	ctx context.Context,
+	runner commandRunner,
+	target resolvedTarget,
+	layout remoteDeploymentLayout,
+) ([]string, error) {
 	if target.ConfigDir == "" {
 		return nil, nil
 	}
@@ -154,7 +182,7 @@ func compareRemoteConfigs(ctx context.Context, runner commandRunner, target reso
 			return nil, hashErr
 		}
 		local[entry.Name()] = hash
-		arguments = append(arguments, filepath.Join("/etc/fleetty", entry.Name()))
+		arguments = append(arguments, filepath.Join(layout.ConfigPath, entry.Name()))
 	}
 	if target.Become == "sudo" {
 		arguments = append([]string{"sudo", "-n"}, arguments...)
@@ -233,7 +261,10 @@ func applyTarget(parent context.Context, target resolvedTarget, runner commandRu
 		result.Error = remoteFailure("make staged binary executable", output, err).Error()
 		return result
 	}
-	installArgs := []string{staging + "/fleetty", "install", "--role", target.Role, "--json"}
+	installArgs := []string{
+		staging + "/fleetty", "install",
+		"--role", target.Role, "--scope", targetScope(target), "--json",
+	}
 	if target.ConfigDir != "" {
 		if output, err = runSSH(ctx, runner, target, "mkdir", "-m", "0700", staging+"/config"); err != nil {
 			result.Error = remoteFailure("create config staging directory", output, err).Error()
@@ -277,9 +308,20 @@ func statusTargets(ctx context.Context, targets []resolvedTarget, parallel int, 
 	runParallel(len(targets), parallel, func(index int) {
 		target := targets[index]
 		result := targetApply{Index: index, Name: target.Name, Action: "status"}
-		targetCtx, cancel := context.WithTimeout(ctx, time.Duration(target.TimeoutSeconds)*time.Second)
+		operationTimeout := time.Duration(max(target.TimeoutSeconds*3, 30)) * time.Second
+		targetCtx, cancel := context.WithTimeout(ctx, operationTimeout)
 		defer cancel()
-		arguments := []string{remoteBinaryPath, "doctor", "--role", target.Role, "--json"}
+		layout, layoutErr := resolveRemoteLayout(targetCtx, runner, target)
+		if layoutErr != nil {
+			result.Action = "error"
+			result.Error = layoutErr.Error()
+			results[index] = result
+			return
+		}
+		arguments := []string{
+			layout.BinaryPath, "doctor",
+			"--role", target.Role, "--scope", targetScope(target), "--json",
+		}
 		if target.Become == "sudo" {
 			arguments = append([]string{"sudo", "-n"}, arguments...)
 		}
@@ -369,6 +411,55 @@ func validSHA256(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func resolveRemoteLayout(
+	ctx context.Context,
+	runner commandRunner,
+	target resolvedTarget,
+) (remoteDeploymentLayout, error) {
+	if targetScope(target) == "system" {
+		return remoteDeploymentLayout{
+			BinaryPath: "/opt/fleetty/fleetty",
+			ConfigPath: "/etc/fleetty",
+		}, nil
+	}
+	output, err := runSSH(ctx, runner, target, "printenv", "HOME")
+	if err != nil {
+		return remoteDeploymentLayout{}, remoteFailure("resolve remote user home", output, err)
+	}
+	home := strings.TrimSpace(string(output))
+	if !safeRemoteHome(home) {
+		return remoteDeploymentLayout{}, fmt.Errorf("remote returned unsafe user home %q", safeRemoteText(home, 120))
+	}
+	return remoteDeploymentLayout{
+		BinaryPath:    filepath.Join(home, ".local", "bin", "fleetty"),
+		ConfigPath:    filepath.Join(home, ".config", "fleetty"),
+		SystemctlArgs: []string{"--user"},
+	}, nil
+}
+
+func targetScope(target resolvedTarget) string {
+	if target.Scope == "" {
+		return "system"
+	}
+	return target.Scope
+}
+
+func safeRemoteHome(path string) bool {
+	if !filepath.IsAbs(path) || path == "/" || filepath.Clean(path) != path {
+		return false
+	}
+	for _, character := range path {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '/' || character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validRemoteStagingPath(path string) bool {

@@ -141,14 +141,14 @@ func writePlans(writer io.Writer, plans []targetPlan, asJSON bool) error {
 	if asJSON {
 		return json.NewEncoder(writer).Encode(plans)
 	}
-	fmt.Fprintln(writer, "ACTION   TARGET               ROLE  STATE      REASON")
+	fmt.Fprintln(writer, "ACTION   TARGET               ROLE  SCOPE   STATE      REASON")
 	for _, plan := range plans {
 		reason := strings.Join(plan.Reasons, "; ")
 		if plan.Error != "" {
 			reason = plan.Error
 		}
-		fmt.Fprintf(writer, "%-8s %-20s %-5s %-10s %s\n",
-			strings.ToUpper(plan.Action), plan.Name, plan.Role, plan.State, reason)
+		fmt.Fprintf(writer, "%-8s %-20s %-5s %-7s %-10s %s\n",
+			strings.ToUpper(plan.Action), plan.Name, plan.Role, plan.Scope, plan.State, reason)
 	}
 	return nil
 }

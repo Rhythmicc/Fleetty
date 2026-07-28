@@ -285,6 +285,9 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cpuHistory = appendHistory(m.cpuHistory, msg.snapshot.CPUPercent, 60)
 		m.networkRXHistory = appendHistory(m.networkRXHistory, float64(msg.snapshot.NetworkRX), 60)
 		m.networkTXHistory = appendHistory(m.networkTXHistory, float64(msg.snapshot.NetworkTX), 60)
+		if len(msg.snapshot.ManagementActions) > 0 && m.admin != nil {
+			m.admin.actions = actionsFromInfo(msg.snapshot.ManagementActions)
+		}
 		m.clampProcessCursor()
 		m.clampMonitorProcessCursor(m.monitorRows)
 	case authenticationResultMsg:
@@ -474,8 +477,6 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		switch key {
 		case "esc", "q", "m":
 			m.screen, m.status, m.adminCredential = screenMonitor, "Returned to read-only monitor.", ""
-		case "1", "2":
-			m.selectAction(int(key[0] - '1'))
 		case "/":
 			m.filtering = true
 			m.status = "Type a process name, user, or PID."
@@ -495,6 +496,10 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return m.openProcess(m.cursor)
 		case "r":
 			return m.startCollect()
+		default:
+			if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+				m.selectAction(int(key[0] - '1'))
+			}
 		}
 	case screenConfirm:
 		switch key {
@@ -589,12 +594,14 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 	}
 	if m.screen == screenAdmin {
 		if y == 2 {
-			firstLabel, secondLabel := m.adminActionLabels()
-			firstWidth := compactButtonWidth("1", firstLabel)
-			if x < firstWidth {
-				m.selectAction(0)
-			} else if x > firstWidth && x < firstWidth+compactButtonWidth("2", secondLabel)+1 {
-				m.selectAction(1)
+			left := 0
+			for index := range m.admin.actions {
+				width := compactButtonWidth(strconv.Itoa(index+1), m.adminActionLabel(index))
+				if x >= left && x < left+width {
+					m.selectAction(index)
+					break
+				}
+				left += width + 1
 			}
 		} else if y == 3 {
 			m.filtering = true
@@ -764,11 +771,19 @@ func (m *monitorModel) visibleAdminProcessCount() int {
 	return min(m.adminVisibleProcessRows(), max(0, len(m.filteredProcesses())-m.processOffset))
 }
 
-func (m *monitorModel) adminActionLabels() (string, string) {
-	if usableWidth(m.width) < 54 {
-		return "Restart", "Reboot"
+func (m *monitorModel) adminActionLabel(index int) string {
+	if index < 0 || index >= len(m.admin.actions) {
+		return ""
 	}
-	return m.admin.actions[0].label, m.admin.actions[1].label
+	if usableWidth(m.width) < 54 {
+		switch m.admin.actions[index].ID {
+		case 0:
+			return "Restart"
+		case 1:
+			return "Reboot"
+		}
+	}
+	return m.admin.actions[index].label
 }
 
 func (m *monitorModel) openProcess(index int) tea.Cmd {
@@ -827,6 +842,7 @@ func (m *monitorModel) selectedProcessCanTerminate() bool {
 		m.processDetail != nil &&
 		m.detailErr == nil &&
 		m.processDetail.StartTimeTicks != 0 &&
+		m.processDetail.CanTerminate &&
 		canTerminatePID(m.selectedProcess.PID)
 }
 
@@ -1165,15 +1181,18 @@ func (m *monitorModel) adminView() string {
 		filterValue += "█"
 	}
 	filterLine := accentStyle.Render("FILTER /") + " " + inputStyle.Width(max(12, w-14)).Render(truncate(filterValue, max(8, w-18)))
-	firstLabel, secondLabel := m.adminActionLabels()
-	actions := lipgloss.JoinHorizontal(lipgloss.Top,
-		compactButton("1", firstLabel, false),
-		" ",
-		compactButton("2", secondLabel, true),
-	)
+	actionButtons := make([]string, 0, len(m.admin.actions)*2)
+	for index, action := range m.admin.actions {
+		if index > 0 {
+			actionButtons = append(actionButtons, " ")
+		}
+		actionButtons = append(actionButtons,
+			compactButton(strconv.Itoa(index+1), m.adminActionLabel(index), action.dangerous))
+	}
+	actions := lipgloss.JoinHorizontal(lipgloss.Top, actionButtons...)
 	return strings.Join([]string{
 		titleStyle.Render("MANAGEMENT MODE") + "  " + accentStyle.Render("AUTHORIZED"),
-		dimStyle.Render(truncate("Click a process for details. Host actions remain fixed and require confirmation.", w)),
+		dimStyle.Render(truncate("Available actions reflect the service account permissions and require confirmation.", w)),
 		actions,
 		filterLine,
 		btopPanel(w, "PROCESS MANAGER", fmt.Sprintf("%d/%d  ·  ROWS %d-%d", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end), strings.Join(table, "\n"), processTitleStyle, colorProcessBorder),
@@ -1526,6 +1545,7 @@ type adminAction struct {
 	label       string
 	description string
 	command     string
+	dangerous   bool
 }
 
 type adminController struct {
@@ -1535,13 +1555,33 @@ type adminController struct {
 }
 
 func newAdminController() *adminController {
+	scope := strings.ToLower(strings.TrimSpace(os.Getenv("FLEETTY_INSTALL_SCOPE")))
+	restartDefault := "systemctl restart fleetty.service"
+	if scope == "user" || scope == "" && os.Geteuid() != 0 {
+		restartDefault = "systemctl --user restart fleetty.service"
+	}
+	actions := []adminAction{
+		{
+			ID: 0, label: "Restart Fleetty", description: "Restart the Fleetty node service.",
+			command: envString("ADMIN_RESTART_SERVICE_CMD", restartDefault),
+		},
+	}
+	rebootCommand, rebootConfigured := os.LookupEnv("ADMIN_REBOOT_CMD")
+	rebootCommand = strings.TrimSpace(rebootCommand)
+	if !rebootConfigured && scope != "user" && os.Geteuid() == 0 {
+		rebootCommand = "systemctl reboot"
+	}
+	if rebootCommand != "" {
+		actions = append(actions, adminAction{
+			ID: 1, label: "Reboot machine",
+			description: "Restart the entire host. Active workloads will be interrupted.",
+			command:     rebootCommand, dangerous: true,
+		})
+	}
 	return &adminController{
 		password:     os.Getenv("ADMIN_PASSWORD"),
 		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
-		actions: []adminAction{
-			{ID: 0, label: "Restart Fleetty", description: "Restart the Fleetty node service.", command: envString("ADMIN_RESTART_SERVICE_CMD", "systemctl restart fleetty.service")},
-			{ID: 1, label: "Reboot machine", description: "Restart the entire host. Active workloads will be interrupted.", command: envString("ADMIN_REBOOT_CMD", "systemctl reboot")},
-		},
+		actions:      actions,
 	}
 }
 
@@ -1553,6 +1593,28 @@ func newRemoteAdminController() *adminController {
 }
 
 func (a *adminController) enabled() bool { return a.password != "" || a.passwordHash != "" }
+
+func (a *adminController) actionInfo() []managementActionInfo {
+	result := make([]managementActionInfo, 0, len(a.actions))
+	for _, action := range a.actions {
+		result = append(result, managementActionInfo{
+			ID: action.ID, Label: action.label,
+			Description: action.description, Dangerous: action.dangerous,
+		})
+	}
+	return result
+}
+
+func actionsFromInfo(infos []managementActionInfo) []adminAction {
+	result := make([]adminAction, 0, len(infos))
+	for _, info := range infos {
+		result = append(result, adminAction{
+			ID: info.ID, label: info.Label,
+			description: info.Description, dangerous: info.Dangerous,
+		})
+	}
+	return result
+}
 
 func (a *adminController) authenticate(password string) bool {
 	if a.passwordHash != "" {
@@ -1582,6 +1644,14 @@ type monitorSnapshot struct {
 	GPUs                    []gpuInfo
 	GPUError                string
 	Processes               []processInfo
+	ManagementActions       []managementActionInfo
+}
+
+type managementActionInfo struct {
+	ID          int
+	Label       string
+	Description string
+	Dangerous   bool
 }
 
 type gpuInfo struct {
@@ -1611,6 +1681,7 @@ type processDetail struct {
 	CWD                     string
 	StartTimeTicks          uint64
 	Redacted                bool
+	CanTerminate            bool
 }
 
 type cpuCounters struct{ total, idle uint64 }

@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/fleetty
 Environment=HOME=/root
+Environment=FLEETTY_INSTALL_SCOPE=system
 Environment=SSH_HOST=0.0.0.0
 Environment=SSH_PORT=23234
 Environment=SSH_HOST_KEY_PATH=/etc/fleetty/ssh_host_ed25519

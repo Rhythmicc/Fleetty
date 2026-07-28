@@ -21,6 +21,24 @@ func TestValidConfigName(t *testing.T) {
 	}
 }
 
+func TestEffectiveServiceEnvironmentFallsBackToUnitValues(t *testing.T) {
+	systemctl := func(arguments ...string) ([]byte, error) {
+		command := strings.Join(arguments, " ")
+		switch {
+		case strings.Contains(command, "Environment"):
+			return []byte("SSH_HOST=127.0.0.1 SSH_PORT=24234\n"), nil
+		case strings.Contains(command, "MainPID"):
+			return []byte("0\n"), nil
+		default:
+			return nil, errors.New("unexpected command")
+		}
+	}
+	environment := effectiveServiceEnvironment(systemctl, "fleetty.service")
+	if environment["SSH_HOST"] != "127.0.0.1" || environment["SSH_PORT"] != "24234" {
+		t.Fatalf("environment = %#v", environment)
+	}
+}
+
 func TestReadStagedConfigRejectsSymlinkAndSortsFiles(t *testing.T) {
 	configDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(configDir, "z.env"), []byte("Z=1\n"), 0o600); err != nil {
@@ -50,7 +68,7 @@ func TestFileTransactionCommitAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	transaction := &fileTransaction{}
-	changed, err := transaction.Replace(path, []byte("new"), 0o600, false)
+	changed, err := transaction.Replace(path, []byte("new"), 0o600, -1, -1)
 	if err != nil || !changed {
 		t.Fatalf("Replace() = %v, %v", changed, err)
 	}
@@ -58,7 +76,7 @@ func TestFileTransactionCommitAndRollback(t *testing.T) {
 	assertFileContentAndMode(t, path, "old", 0o644)
 
 	transaction = &fileTransaction{}
-	changed, err = transaction.Replace(path, []byte("new"), 0o600, false)
+	changed, err = transaction.Replace(path, []byte("new"), 0o600, -1, -1)
 	if err != nil || !changed {
 		t.Fatalf("Replace() = %v, %v", changed, err)
 	}
@@ -110,6 +128,50 @@ func TestInstallFleettyIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestInstallFleettyUserScope(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "source-fleetty")
+	if err := os.WriteFile(executable, []byte("fleetty-user"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configSource := filepath.Join(root, "staged")
+	if err := os.Mkdir(configSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configSource, "authorized_keys"), []byte("key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeInstallRunner{}
+	options := installOptions{
+		Role: "node", Scope: "user", ConfigSource: configSource,
+		ExecutableSource: executable,
+		BinaryPath:       filepath.Join(root, ".local", "bin", "fleetty"),
+		ConfigPath:       filepath.Join(root, ".config", "fleetty"),
+		UnitPath:         filepath.Join(root, ".config", "systemd", "user"),
+		SystemctlArgs:    []string{"--user"},
+		OwnerUID:         os.Geteuid(), OwnerGID: os.Getegid(),
+		Run: runner.Run,
+	}
+	result, err := installFleetty(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Scope != "user" || !result.Changed {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if !containsCommand(runner.commands, "systemctl --user start fleetty.service") {
+		t.Fatalf("user systemd was not used: %v", runner.commands)
+	}
+	unit, err := os.ReadFile(filepath.Join(options.UnitPath, "fleetty.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "ExecStart=%h/.local/bin/fleetty") ||
+		!strings.Contains(string(unit), "FLEETTY_INSTALL_SCOPE=user") {
+		t.Fatalf("unexpected user unit:\n%s", unit)
+	}
+}
+
 func TestInstallFleettyRollsBackFailedStart(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "source-fleetty")
@@ -151,6 +213,12 @@ func (runner *fakeInstallRunner) Run(name string, args ...string) ([]byte, error
 	runner.commands = append(runner.commands, command)
 	if name != "systemctl" || len(args) == 0 {
 		return nil, nil
+	}
+	if args[0] == "--user" {
+		args = args[1:]
+		if len(args) == 0 {
+			return nil, errors.New("missing systemctl command")
+		}
 	}
 	switch args[0] {
 	case "is-active":

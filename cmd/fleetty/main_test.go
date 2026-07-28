@@ -166,6 +166,20 @@ func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
 	if allowed.Error != "" {
 		t.Fatalf("management RPC rejected the correct password: %s", allowed.Error)
 	}
+	snapshot := service.Handle(nodeRPCRequest{
+		Version: nodeRPCVersion, Operation: rpcSnapshot,
+	})
+	if len(snapshot.Snapshot.ManagementActions) != 1 ||
+		snapshot.Snapshot.ManagementActions[0].Label != "Safe test action" {
+		t.Fatalf("RPC management capabilities = %#v", snapshot.Snapshot.ManagementActions)
+	}
+	model := &monitorModel{
+		admin: newRemoteAdminController(), screen: screenMonitor,
+	}
+	_, _ = model.Update(snapshotMsg{snapshot: snapshot.Snapshot})
+	if len(model.admin.actions) != 1 || model.admin.actions[0].command != "" {
+		t.Fatalf("remote management capabilities = %#v", model.admin.actions)
+	}
 	incompatible := service.Handle(nodeRPCRequest{Version: nodeRPCVersion + 1, Operation: rpcAuthenticate})
 	if incompatible.Error == "" {
 		t.Fatal("RPC should reject incompatible protocol versions")
@@ -935,10 +949,28 @@ func TestNodeRPCTimeoutCoversSSHHandshake(t *testing.T) {
 }
 
 func TestDefaultRestartCommandMatchesPackagedService(t *testing.T) {
+	t.Setenv("FLEETTY_INSTALL_SCOPE", "system")
 	t.Setenv("ADMIN_RESTART_SERVICE_CMD", "")
 	admin := newAdminController()
 	if got := admin.actions[0].command; got != "systemctl restart fleetty.service" {
 		t.Fatalf("default restart command = %q", got)
+	}
+}
+
+func TestUserScopeExposesOnlyPermittedDefaultActions(t *testing.T) {
+	t.Setenv("FLEETTY_INSTALL_SCOPE", "user")
+	t.Setenv("ADMIN_RESTART_SERVICE_CMD", "")
+	t.Setenv("ADMIN_REBOOT_CMD", "")
+	admin := newAdminController()
+	if len(admin.actions) != 1 ||
+		admin.actions[0].command != "systemctl --user restart fleetty.service" {
+		t.Fatalf("user actions = %#v", admin.actions)
+	}
+
+	t.Setenv("ADMIN_REBOOT_CMD", "systemctl reboot")
+	admin = newAdminController()
+	if len(admin.actions) != 2 || admin.actions[1].ID != 1 || !admin.actions[1].dangerous {
+		t.Fatalf("explicit user actions = %#v", admin.actions)
 	}
 }
 
@@ -1060,6 +1092,23 @@ func TestManagementCardsCanBeClicked(t *testing.T) {
 	m.handleClick(firstWidth+2, 2)
 	if m.screen != screenConfirm || m.selectedAction == nil || m.selectedAction.label != "Reboot machine" {
 		t.Fatalf("click should select reboot, got screen=%v action=%#v", m.screen, m.selectedAction)
+	}
+}
+
+func TestManagementViewSupportsSingleRootlessAction(t *testing.T) {
+	m := &monitorModel{
+		admin: &adminController{actions: []adminAction{
+			{ID: 0, label: "Restart Fleetty", command: "true"},
+		}},
+		screen: screenAdmin, width: 100, height: 30,
+	}
+	view := m.View().Content
+	if !strings.Contains(view, "Restart Fleetty") || strings.Contains(view, "Reboot machine") {
+		t.Fatalf("rootless management view = %q", view)
+	}
+	m.handleKey(testKey("2"))
+	if m.screen != screenAdmin || m.selectedAction != nil {
+		t.Fatalf("unavailable action was selected: screen=%v action=%#v", m.screen, m.selectedAction)
 	}
 }
 

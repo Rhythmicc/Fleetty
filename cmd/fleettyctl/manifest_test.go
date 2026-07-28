@@ -26,7 +26,7 @@ func TestLoadManifestResolvesTargets(t *testing.T) {
   "binary": "fleetty",
   "targets": [
     {"name":"node-1","ssh":"node-1-admin","role":"node","config_dir":"node-config"},
-    {"name":"hub","ssh":"root@hub","role":"hub","become":"none"}
+    {"name":"hub","ssh":"hub","role":"hub","scope":"user"}
   ]
 }`
 	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
@@ -39,7 +39,8 @@ func TestLoadManifestResolvesTargets(t *testing.T) {
 	if parsed.Parallel != defaultParallelism || parsed.TimeoutSeconds != defaultTimeout ||
 		len(targets) != 2 || targets[0].Binary != binary ||
 		targets[0].ConfigDir != configDir || targets[0].Become != "sudo" ||
-		targets[1].Become != "none" {
+		targets[0].Scope != "system" ||
+		targets[1].Become != "none" || targets[1].Scope != "user" {
 		t.Fatalf("unexpected manifest: parsed=%#v targets=%#v", parsed, targets)
 	}
 }
@@ -72,6 +73,12 @@ func TestLoadManifestRejectsUnsafeOrUnknownValues(t *testing.T) {
 			manifest: `{"version":1,"binary":"fleetty","targets":[
 				{"name":"node","ssh":"node","role":"node","become":"password"}]}`,
 			contains: "become",
+		},
+		{
+			name: "user scope sudo",
+			manifest: `{"version":1,"binary":"fleetty","targets":[
+				{"name":"node","ssh":"node","role":"node","scope":"user","become":"sudo"}]}`,
+			contains: "user scope",
 		},
 	}
 	for _, test := range tests {

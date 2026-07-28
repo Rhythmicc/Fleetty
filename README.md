@@ -20,16 +20,15 @@ Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终
 - 可接入多个本地或远程 Slurm 集群的队列页面；
 - 面向 NAS 的网络、存储、Docker 和 HTTP 服务监控页面。
 
-普通监控界面可以过滤进程并查看只读详情，不需要管理密码。管理模式额外提供发送 `SIGTERM`、重启监控服务和重启主机等写操作。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
+普通监控界面可以过滤进程并查看只读详情，不需要管理密码或 root 权限。管理模式可以向当前服务账户有权管理的进程发送 `SIGTERM`，并重启 Fleetty；重启主机仅在系统级安装或用户显式配置授权命令后出现。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
 
 ## 系统要求
 
 - 使用 systemd 的 Linux；
 - `amd64` 或 `arm64` 架构；
-- root 权限，用于安装和运行服务；
 - NVIDIA GPU 指标需要系统已安装驱动并能执行 `nvidia-smi`。
 
-没有 NVIDIA GPU 或 `nvidia-smi` 时，GPU 区域会显示不可用，CPU、内存、磁盘、网络和进程监控仍可正常使用。
+普通用户即可安装和运行 Fleetty。没有 NVIDIA GPU 或 `nvidia-smi` 时，GPU 区域会显示不可用，CPU、内存、磁盘、网络和进程监控仍可正常使用。Docker socket、其他用户的进程详情等指标仍遵循 Linux 原有访问权限。
 
 ## 安装
 
@@ -58,7 +57,7 @@ curl -fL \
 )
 ```
 
-准备允许访问监控端口的 SSH 公钥，然后运行内置安装器：
+准备允许访问监控端口的 SSH 公钥，然后以当前普通用户运行内置安装器：
 
 ```bash
 fleetty_config="$(mktemp -d)"
@@ -67,30 +66,58 @@ install -m 0600 "$HOME/.ssh/id_ed25519.pub" \
   "${fleetty_config}/authorized_keys"
 chmod 0755 "/tmp/fleetty_linux_${fleetty_arch}"
 
-sudo "/tmp/fleetty_linux_${fleetty_arch}" install \
+"/tmp/fleetty_linux_${fleetty_arch}" install \
   --role node \
+  --scope user \
   --config-dir "${fleetty_config}"
-sudo /opt/fleetty/fleetty doctor --role node
+"$HOME/.local/bin/fleetty" doctor --role node --scope user
 ```
 
-如需允许多人访问，将多行公钥写入同一个 `authorized_keys` 文件。服务默认监听 `0.0.0.0:23234`，但只接受该文件中登记的客户端公钥。首次启动时会自动创建 `/etc/fleetty/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
+用户安装将程序放在 `~/.local/bin/fleetty`，配置放在 `~/.config/fleetty`，并创建 `fleetty.service` systemd user unit。服务默认监听 `0.0.0.0:23234`，但只接受 `authorized_keys` 中登记的客户端公钥。如需允许多人访问，将多行公钥写入同一个文件。
+
+如果服务需要在用户完全退出后继续运行，请检查：
+
+```bash
+loginctl show-user "$USER" -p Linger
+```
+
+`Linger=no` 时可请管理员为该服务账户启用 lingering。无法使用 systemd user service 时，也可以以前台方式运行，监控功能本身不依赖 root：
+
+```bash
+SSH_HOST_KEY_PATH="$HOME/.config/fleetty/ssh_host_ed25519" \
+SSH_AUTHORIZED_KEYS_FILE="$HOME/.config/fleetty/authorized_keys" \
+"$HOME/.local/bin/fleetty" serve
+```
+
+需要统一的系统级服务以及重启主机等特权能力时，管理员可以改用：
+
+```bash
+sudo "/tmp/fleetty_linux_${fleetty_arch}" install \
+  --role node \
+  --scope system \
+  --config-dir "${fleetty_config}"
+sudo /opt/fleetty/fleetty doctor --role node --scope system
+```
+
+系统安装使用 `/opt/fleetty` 和 `/etc/fleetty`。两种安装首次启动时都会在各自配置目录创建 SSH host key，请勿在升级时删除。
 
 如果服务器启用了防火墙，请只向需要访问监控的网络开放 TCP 23234 端口。
 
 ## 可重复部署与运维
 
-Fleetty 自带幂等安装器。单机更新时，将对应架构的二进制和需要变更的配置放在目标机，然后执行：
+Fleetty 自带幂等安装器。`--scope auto` 会在普通用户下选择 `user`，在 root 下选择 `system`。单机更新示例：
 
 ```bash
-sudo ./fleetty_linux_amd64 install \
+./fleetty_linux_amd64 install \
   --role node \
+  --scope user \
   --config-dir ./node-config
-sudo /opt/fleetty/fleetty doctor --role node
+~/.local/bin/fleetty doctor --role node --scope user
 ```
 
-Hub 使用 `--role hub`。安装器会将自身原子安装到 `/opt/fleetty/fleetty`，写入并启用对应的 systemd unit；文件内容没有变化时不会重启服务。如果服务启动失败，二进制、unit 和本次配置变更会自动回滚。
+Hub 使用 `--role hub`。安装器会原子写入对应 scope 的二进制、配置和 systemd unit；文件内容没有变化时不会重启服务。如果服务启动失败，二进制、unit 和本次配置变更会自动回滚。
 
-目录中的文件会以 root 所有、`0600` 权限安装到 `/etc/fleetty`。安装器拒绝符号链接、子目录、隐藏文件和超过限制的文件，未出现在配置目录中的现有配置不会被删除。
+配置文件会由服务账户所有并使用 `0600` 权限。安装器拒绝符号链接、子目录、隐藏文件和超过限制的文件，未出现在配置目录中的现有配置不会被删除。
 
 多机环境使用 `fleettyctl` 和 JSON fleet manifest。控制端可以是 Linux 或 macOS，SSH 连接沿用本机 OpenSSH config、代理和 host key 校验：
 
@@ -142,23 +169,25 @@ fleettyctl status --file fleet.json
       "name": "gpu-1",
       "ssh": "gpu-1-admin",
       "role": "node",
+      "scope": "user",
       "config_dir": "./config/gpu-1"
     },
     {
       "name": "lab-hub",
       "ssh": "hub-admin",
       "role": "hub",
+      "scope": "system",
       "config_dir": "./config/hub"
     }
   ]
 }
 ```
 
-`binary` 和 `config_dir` 相对于 manifest 所在目录解析；单个目标可以用自己的 `binary` 覆盖全局值。`role` 只能为 `node` 或 `hub`。默认 `become` 为 `sudo`，使用 root SSH 时显式设置 `"become": "none"`。
+`binary` 和 `config_dir` 相对于 manifest 所在目录解析；单个目标可以用自己的 `binary` 覆盖全局值。`role` 只能为 `node` 或 `hub`。`scope: "user"` 默认 `become: "none"`，整个部署过程不调用 sudo；`scope: "system"` 默认使用 `become: "sudo"`，使用 root SSH 时可以显式设置 `"become": "none"`。
 
 manifest 不接受密码字段。SSH 凭据由 OpenSSH 管理，Fleetty 管理密码、RPC 私钥等敏感内容应放在目标的 `config_dir` 中，并确保该本地目录只有部署账户可读。`plan` 会比较二进制与受管配置的 SHA-256、服务启用状态和运行状态；`apply` 只处理有差异的目标，远端安装仍由同一个原子安装器完成。
 
-能够更新 Fleetty 的部署账户等同于 root 级管理员：`become: "sudo"` 要求非交互式管理员 sudo，不能把它视为低权限授权。建议使用独立的部署身份，限制其 SSH 来源、妥善保护私钥，并且不要与日常登录账户共用。
+只有 system scope 的部署账户等同于 root 级管理员：`become: "sudo"` 要求非交互式管理员 sudo，不能把它视为低权限授权。user scope 只管理该 SSH 用户自己的 Fleetty 文件和 user service，适合作为默认部署方式。
 
 ## 连接与操作
 
@@ -191,16 +220,16 @@ ssh -p 23234 monitor@example-host
 | `t` | 在进程详情页请求终止进程 |
 | `c` | 清除进程过滤条件 |
 | `1` | 重启监控服务 |
-| `2` | 重启主机 |
+| `2` | 重启主机；仅在当前服务账户具备并配置该能力时出现 |
 | `Esc` | 返回上一层 |
 
 支持鼠标的终端也可以直接点击进程和按钮。若 SSH 客户端不支持终端鼠标协议，请使用键盘操作。
 
 ## NAS 监控页面
 
-将节点配置为 `nas` 后，默认页面会改为存储服务器视图，重点展示指定物理网卡的实时吞吐、累计流量、错误与丢包，各挂载点的容量告警，以及 Docker、PM2 和 HTTP 服务的健康状态。Docker 表格包含镜像、健康检查、CPU、内存、网络 I/O、进程数、重启次数、运行时间和端口；PM2 表格包含应用状态、实例 ID、PID、CPU、内存、运行时间、重启次数和执行模式。管理模式仍然可以查看和终止进程、重启监控服务或重启主机。
+将节点配置为 `nas` 后，默认页面会改为存储服务器视图，重点展示指定物理网卡的实时吞吐、累计流量、错误与丢包，各挂载点的容量告警，以及 Docker、PM2 和 HTTP 服务的健康状态。Docker 表格包含镜像、健康检查、CPU、内存、网络 I/O、进程数、重启次数、运行时间和端口；PM2 表格包含应用状态、实例 ID、PID、CPU、内存、运行时间、重启次数和执行模式。管理模式仍然可以查看和终止有权限管理的进程、重启监控服务；重启主机取决于安装 scope 和显式授权。
 
-下载 NAS 配置示例并按实际环境修改：
+下载 NAS 配置示例并按实际环境修改。下面展示 system scope；user scope 将文件写入 `~/.config/fleetty`，并使用 `systemctl --user restart fleetty.service`：
 
 ```bash
 fleetty_release_base="https://github.com/Rhythmicc/fleetty/releases/latest/download"
@@ -233,7 +262,7 @@ sudo systemctl restart fleetty.service
 }
 ```
 
-服务以 root 运行时会通过本机 Docker socket 只读采集容器状态和资源数据。设置 `pm2_user` 后，监控程序会查找该用户已经运行的 PM2 daemon，并通过 `pm2 jlist` 读取应用状态；它不会启动 PM2 daemon，也不会修改或重启应用。HTTP 检查由节点本机发起，因此可以检查只监听 `127.0.0.1` 的服务。请只配置可信 URL；监控程序不会读取完整响应正文，也不会显示或保存容器及 PM2 应用的环境变量。
+服务账户能够读取本机 Docker socket 时，Fleetty 会只读采集容器状态和资源数据，无需为了该功能直接以 root 运行。设置 `pm2_user` 后，监控程序会查找该用户已经运行的 PM2 daemon，并通过 `pm2 jlist` 读取应用状态；rootless 部署通常应使用同一个 PM2 用户。Fleetty 不会启动 PM2 daemon，也不会修改或重启应用。HTTP 检查由节点本机发起，因此可以检查只监听 `127.0.0.1` 的服务。请只配置可信 URL；监控程序不会读取完整响应正文，也不会显示或保存容器及 PM2 应用的环境变量。
 
 ## 多服务器 Hub
 
@@ -403,16 +432,14 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
 Hub 默认监听 23235，可以和本机的 23234 节点监控服务共存：
 
 ```bash
-sudo install -o root -g root -m 0600 \
-  "$HOME/.ssh/id_ed25519.pub" \
-  /etc/fleetty/authorized_keys
-sudo install -o root -g root -m 0644 \
-  fleetty-hub.service \
-  /etc/systemd/system/fleetty-hub.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now fleetty-hub.service
-sudo systemctl status fleetty-hub.service
+./fleetty_linux_amd64 install \
+  --role hub \
+  --scope user \
+  --config-dir ./hub-config
+~/.local/bin/fleetty doctor --role hub --scope user
 ```
+
+`hub-config` 至少应包含 `authorized_keys` 和 `nodes.json`，以及配置引用的 RPC/Slurm 私钥。system scope 在安装命令前使用 `sudo` 并指定 `--scope system`。
 
 连接 Hub：
 
@@ -466,18 +493,18 @@ unset monitor_admin_password
 
 printf '%s\n' \
   "ADMIN_PASSWORD_HASH=${monitor_admin_hash}" \
-  "ADMIN_RESTART_SERVICE_CMD=systemctl restart fleetty.service" \
-  "ADMIN_REBOOT_CMD=systemctl reboot" |
-  sudo tee /etc/fleetty/admin.env >/dev/null
-sudo chmod 0600 /etc/fleetty/admin.env
-sudo systemctl restart fleetty.service
+  >"$HOME/.config/fleetty/admin.env"
+chmod 0600 "$HOME/.config/fleetty/admin.env"
+systemctl --user restart fleetty.service
 ```
 
-监控服务以 root 运行，才能显示全部进程并执行受控管理操作。建议限制监听端口的来源范围，并妥善保管管理密码。
+user scope 的管理模式可以终止该 Linux 用户拥有的进程，并重启 Fleetty user service；其他用户的进程不会显示终止入口，重启主机按钮默认不存在。如果管理员希望授予重启主机能力，可以在 `admin.env` 中显式配置经过审查的 `ADMIN_REBOOT_CMD`。
+
+system scope 将配置写入 `/etc/fleetty/admin.env`，默认提供 `systemctl restart fleetty.service` 和 `systemctl reboot`。建议限制监听端口的来源范围，并妥善保管管理密码。
 
 ## 配置
 
-默认 systemd 配置位于 `/etc/systemd/system/fleetty.service`，管理配置位于 `/etc/fleetty/admin.env`。
+user scope 的配置位于 `~/.config/fleetty`，systemd unit 位于 `~/.config/systemd/user`；system scope 分别使用 `/etc/fleetty` 和 `/etc/systemd/system`。下表中的路径展示 system scope 默认值，user unit 会自动换成用户目录。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -494,41 +521,39 @@ sudo systemctl restart fleetty.service
 | `MACHINE_CONFIG_FILE` | 空 | 节点角色、网卡、挂载点及服务检查 JSON 配置 |
 | `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
 | `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希；为空时禁用管理模式 |
-| `ADMIN_RESTART_SERVICE_CMD` | `systemctl restart fleetty.service` | 重启 Fleetty 服务命令 |
-| `ADMIN_REBOOT_CMD` | `systemctl reboot` | 重启主机命令 |
+| `ADMIN_RESTART_SERVICE_CMD` | 依 scope 自动选择 | 重启 Fleetty 服务命令 |
+| `ADMIN_REBOOT_CMD` | system scope 为 `systemctl reboot`；user scope 为空 | 重启主机命令；为空时不显示该操作 |
 
-修改 systemd 配置后执行：
+user scope 修改配置后执行：
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl restart fleetty.service
+systemctl --user daemon-reload
+systemctl --user restart fleetty.service
 ```
 
 ## 升级
 
-按照“安装”章节下载并校验新版本，然后替换可执行文件并重启对应服务。`/etc/fleetty` 中的客户端公钥、RPC 密钥、管理配置和 SSH host key 不会被覆盖。
+按照“安装”章节下载并校验新版本，然后再次运行幂等安装器：
 
 ```bash
-sudo install -o root -g root -m 0755 \
-  "/tmp/fleetty_linux_${fleetty_arch}" \
-  /opt/fleetty/fleetty
-sudo systemctl restart fleetty.service
+"/tmp/fleetty_linux_${fleetty_arch}" install --role node --scope user
 ```
 
-Hub 主机使用相同的可执行文件，替换后重启 `fleetty-hub.service`。
+system scope 在命令前使用 `sudo` 并指定 `--scope system`。已有客户端公钥、RPC 密钥、管理配置和 SSH host key 不会被删除；Hub 主机使用 `--role hub`。
 
 ## 故障排查
 
 查看服务状态和最近日志：
 
 ```bash
-sudo systemctl status fleetty.service
-sudo journalctl -u fleetty.service -n 100 --no-pager
+systemctl --user status fleetty.service
+journalctl --user -u fleetty.service -n 100 --no-pager
 ```
 
 - 无法连接：检查服务状态、TCP 23234 端口、防火墙规则和客户端公钥是否存在于 `authorized_keys`；
-- GPU 区域不可用：确认 `nvidia-smi` 能以 root 身份正常执行；
-- 管理模式不可用：检查 `/etc/fleetty/admin.env` 的权限和 `ADMIN_PASSWORD_HASH`；
+- GPU 区域不可用：确认 `nvidia-smi` 能以运行 Fleetty 的用户身份正常执行；
+- user service 在退出后停止：检查 `loginctl show-user "$USER" -p Linger`；
+- 管理模式不可用：检查对应 scope 的 `admin.env` 权限和 `ADMIN_PASSWORD_HASH`；
 - Hub 节点离线：确认 Hub 能访问节点的 TCP 23234 端口，并检查 `identity_file`、节点的 `hub_authorized_keys` 和 `host_key` 指纹；
 - 鼠标无法点击：改用键盘，或检查终端及 SSH 客户端的鼠标协议支持；
 - 界面字符错位：使用支持 Unicode 和等宽字符的终端字体。
@@ -536,12 +561,12 @@ sudo journalctl -u fleetty.service -n 100 --no-pager
 ## 卸载
 
 ```bash
-sudo systemctl disable --now fleetty.service
-sudo rm /etc/systemd/system/fleetty.service
-sudo systemctl daemon-reload
-sudo rm -r /opt/fleetty
+systemctl --user disable --now fleetty.service
+rm "$HOME/.config/systemd/user/fleetty.service"
+systemctl --user daemon-reload
+rm "$HOME/.local/bin/fleetty"
 ```
 
-如需同时删除管理配置和 SSH host key，再删除 `/etc/fleetty`。
+如需同时删除管理配置和 SSH host key，再删除 `~/.config/fleetty`。system scope 的卸载命令使用 `sudo systemctl`，对应路径为 `/etc/systemd/system/fleetty.service`、`/opt/fleetty` 和 `/etc/fleetty`。
 
-安装了 Hub 时，先执行 `sudo systemctl disable --now fleetty-hub.service`，并删除对应的 systemd 单元；`nodes.json` 中只包含节点地址和 host key 指纹，可以按需要保留或删除。
+安装了 Hub 时，将服务名换成 `fleetty-hub.service`；user scope 继续使用 `systemctl --user`，system scope 使用 `sudo systemctl`。`nodes.json` 中只包含节点地址和 host key 指纹，可以按需要保留或删除。

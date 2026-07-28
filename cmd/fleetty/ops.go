@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,15 +23,16 @@ import (
 )
 
 const (
-	fleettyBinaryPath = "/opt/fleetty/fleetty"
-	fleettyConfigDir  = "/etc/fleetty"
-	systemdUnitDir    = "/etc/systemd/system"
-	maxConfigFiles    = 128
-	maxConfigFileSize = 16 << 20
+	systemFleettyBinaryPath = "/opt/fleetty/fleetty"
+	systemFleettyConfigDir  = "/etc/fleetty"
+	systemdUnitDir          = "/etc/systemd/system"
+	maxConfigFiles          = 128
+	maxConfigFileSize       = 16 << 20
 )
 
 type commandResult struct {
 	Role         string   `json:"role"`
+	Scope        string   `json:"scope"`
 	Service      string   `json:"service"`
 	Changed      bool     `json:"changed"`
 	ChangedFiles []string `json:"changed_files,omitempty"`
@@ -45,12 +47,66 @@ type doctorCheck struct {
 
 type doctorResult struct {
 	Role    string         `json:"role"`
+	Scope   string         `json:"scope"`
 	Healthy bool           `json:"healthy"`
 	Build   buildinfo.Info `json:"build"`
 	Checks  []doctorCheck  `json:"checks"`
 }
 
 type systemCommandRunner func(name string, args ...string) ([]byte, error)
+
+type deploymentLayout struct {
+	Scope         string
+	BinaryPath    string
+	ConfigPath    string
+	UnitPath      string
+	SystemctlArgs []string
+	OwnerUID      int
+	OwnerGID      int
+}
+
+func resolveDeploymentLayout(scope string) (deploymentLayout, error) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" || scope == "auto" {
+		if os.Geteuid() == 0 {
+			scope = "system"
+		} else {
+			scope = "user"
+		}
+	}
+	switch scope {
+	case "system":
+		if os.Geteuid() != 0 {
+			return deploymentLayout{}, errors.New("system installation requires root; use --scope user")
+		}
+		return deploymentLayout{
+			Scope: "system", BinaryPath: systemFleettyBinaryPath,
+			ConfigPath: systemFleettyConfigDir, UnitPath: systemdUnitDir,
+			OwnerUID: 0, OwnerGID: 0,
+		}, nil
+	case "user":
+		if os.Geteuid() == 0 {
+			return deploymentLayout{}, errors.New("user installation must run as the intended service user, without sudo")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return deploymentLayout{}, fmt.Errorf("resolve user home: %w", err)
+		}
+		if strings.TrimSpace(home) == "" || !filepath.IsAbs(home) {
+			return deploymentLayout{}, errors.New("user home must be an absolute path")
+		}
+		return deploymentLayout{
+			Scope:         "user",
+			BinaryPath:    filepath.Join(home, ".local", "bin", "fleetty"),
+			ConfigPath:    filepath.Join(home, ".config", "fleetty"),
+			UnitPath:      filepath.Join(home, ".config", "systemd", "user"),
+			SystemctlArgs: []string{"--user"},
+			OwnerUID:      os.Geteuid(), OwnerGID: os.Getegid(),
+		}, nil
+	default:
+		return deploymentLayout{}, fmt.Errorf("scope must be auto, user, or system")
+	}
+}
 
 func runOperations(args []string, stdout, stderr io.Writer) (bool, error) {
 	if len(args) == 0 || args[0] == "serve" {
@@ -89,8 +145,8 @@ func writeOperationsUsage(writer io.Writer) {
 
 Usage:
   fleetty serve
-  fleetty install --role node|hub [--config-dir PATH] [--json]
-  fleetty doctor --role node|hub [--json]
+  fleetty install --role node|hub [--scope auto|user|system] [--config-dir PATH] [--json]
+  fleetty doctor --role node|hub [--scope auto|user|system] [--json]
   fleetty version [--json]`)
 }
 
@@ -98,6 +154,7 @@ func runInstallCommand(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	role := flags.String("role", "", "installation role: node or hub")
+	scope := flags.String("scope", "auto", "installation scope: auto, user, or system")
 	configDir := flags.String("config-dir", "", "staged flat configuration directory")
 	asJSON := flags.Bool("json", false, "write machine-readable JSON")
 	if err := flags.Parse(args); err != nil {
@@ -106,12 +163,19 @@ func runInstallCommand(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("install does not accept positional arguments")
 	}
+	layout, err := resolveDeploymentLayout(*scope)
+	if err != nil {
+		return err
+	}
 	result, err := installFleetty(installOptions{
 		Role: *role, ConfigSource: *configDir,
 		ExecutableSource: executablePath(),
-		BinaryPath:       fleettyBinaryPath, ConfigPath: fleettyConfigDir, UnitPath: systemdUnitDir,
-		RequireRootOwnership: true,
-		Run:                  runSystemCommand,
+		Scope:            layout.Scope, BinaryPath: layout.BinaryPath,
+		ConfigPath: layout.ConfigPath, UnitPath: layout.UnitPath,
+		SystemctlArgs: layout.SystemctlArgs,
+		OwnerUID:      layout.OwnerUID, OwnerGID: layout.OwnerGID,
+		EnforcePlatform: true,
+		Run:             runSystemCommand,
 	})
 	if err != nil {
 		return err
@@ -121,32 +185,41 @@ func runInstallCommand(args []string, stdout, stderr io.Writer) error {
 	}
 	change := "unchanged"
 	if result.Changed {
-		change = "updated: " + strings.Join(result.ChangedFiles, ", ")
+		change = "service state updated"
+		if len(result.ChangedFiles) > 0 {
+			change = "updated: " + strings.Join(result.ChangedFiles, ", ")
+		}
 	}
-	_, err = fmt.Fprintf(stdout, "Fleetty %s installed (%s, %s, %s)\n", result.Role, result.Service, result.State, change)
+	_, err = fmt.Fprintf(stdout, "Fleetty %s installed for %s scope (%s, %s, %s)\n",
+		result.Role, result.Scope, result.Service, result.State, change)
 	return err
 }
 
 type installOptions struct {
-	Role                 string
-	ConfigSource         string
-	ExecutableSource     string
-	BinaryPath           string
-	ConfigPath           string
-	UnitPath             string
-	RequireRootOwnership bool
-	Run                  systemCommandRunner
+	Role             string
+	Scope            string
+	ConfigSource     string
+	ExecutableSource string
+	BinaryPath       string
+	ConfigPath       string
+	UnitPath         string
+	SystemctlArgs    []string
+	OwnerUID         int
+	OwnerGID         int
+	EnforcePlatform  bool
+	Run              systemCommandRunner
 }
 
 func installFleetty(options installOptions) (commandResult, error) {
-	if runtime.GOOS != "linux" && options.BinaryPath == fleettyBinaryPath {
+	if runtime.GOOS != "linux" && options.EnforcePlatform {
 		return commandResult{}, errors.New("installation is supported only on Linux")
 	}
-	if os.Geteuid() != 0 && options.BinaryPath == fleettyBinaryPath {
-		return commandResult{}, errors.New("installation requires root; use sudo -n for automation")
-	}
 	options.Role = strings.TrimSpace(options.Role)
-	unit, service, err := deployassets.ServiceUnit(options.Role)
+	if options.Scope == "" {
+		options.Scope = "system"
+		options.OwnerUID, options.OwnerGID = -1, -1
+	}
+	unit, service, err := deployassets.ServiceUnit(options.Role, options.Scope)
 	if err != nil {
 		return commandResult{}, err
 	}
@@ -160,13 +233,13 @@ func installFleetty(options installOptions) (commandResult, error) {
 	if err != nil {
 		return commandResult{}, err
 	}
-	if err := ensureManagedDirectory(filepath.Dir(options.BinaryPath), 0o755, options.RequireRootOwnership); err != nil {
+	if err := ensureManagedDirectory(filepath.Dir(options.BinaryPath), 0o755, options.OwnerUID, options.OwnerGID); err != nil {
 		return commandResult{}, err
 	}
-	if err := ensureManagedDirectory(options.ConfigPath, 0o700, options.RequireRootOwnership); err != nil {
+	if err := ensureManagedDirectory(options.ConfigPath, 0o700, options.OwnerUID, options.OwnerGID); err != nil {
 		return commandResult{}, err
 	}
-	if err := ensureManagedDirectory(options.UnitPath, 0o755, options.RequireRootOwnership); err != nil {
+	if err := ensureManagedDirectory(options.UnitPath, 0o755, options.OwnerUID, options.OwnerGID); err != nil {
 		return commandResult{}, err
 	}
 
@@ -176,7 +249,7 @@ func installFleetty(options installOptions) (commandResult, error) {
 	}
 	transaction := &fileTransaction{}
 	replace := func(path string, data []byte, mode os.FileMode, label string) error {
-		changed, replaceErr := transaction.Replace(path, data, mode, options.RequireRootOwnership)
+		changed, replaceErr := transaction.Replace(path, data, mode, options.OwnerUID, options.OwnerGID)
 		if changed {
 			transaction.changedFiles = append(transaction.changedFiles, label)
 		}
@@ -199,27 +272,34 @@ func installFleetty(options installOptions) (commandResult, error) {
 		}
 	}
 
-	wasActive := commandSucceeds(options.Run, "systemctl", "is-active", "--quiet", service)
-	wasEnabled := commandSucceeds(options.Run, "systemctl", "is-enabled", "--quiet", service)
+	systemctl := func(arguments ...string) ([]byte, error) {
+		return options.Run("systemctl", append(append([]string(nil), options.SystemctlArgs...), arguments...)...)
+	}
+	systemctlSucceeds := func(arguments ...string) bool {
+		_, commandErr := systemctl(arguments...)
+		return commandErr == nil
+	}
+	wasActive := systemctlSucceeds("is-active", "--quiet", service)
+	wasEnabled := systemctlSucceeds("is-enabled", "--quiet", service)
 	restore := func() {
 		transaction.Rollback()
-		_, _ = options.Run("systemctl", "daemon-reload")
+		_, _ = systemctl("daemon-reload")
 		if wasEnabled {
-			_, _ = options.Run("systemctl", "enable", service)
+			_, _ = systemctl("enable", service)
 		} else {
-			_, _ = options.Run("systemctl", "disable", service)
+			_, _ = systemctl("disable", service)
 		}
 		if wasActive {
-			_, _ = options.Run("systemctl", "restart", service)
+			_, _ = systemctl("restart", service)
 		} else {
-			_, _ = options.Run("systemctl", "stop", service)
+			_, _ = systemctl("stop", service)
 		}
 	}
-	if output, runErr := options.Run("systemctl", "daemon-reload"); runErr != nil {
+	if output, runErr := systemctl("daemon-reload"); runErr != nil {
 		restore()
 		return commandResult{}, commandFailure("systemctl daemon-reload", output, runErr)
 	}
-	if output, runErr := options.Run("systemctl", "enable", service); runErr != nil {
+	if output, runErr := systemctl("enable", service); runErr != nil {
 		restore()
 		return commandResult{}, commandFailure("enable "+service, output, runErr)
 	}
@@ -230,16 +310,16 @@ func installFleetty(options installOptions) (commandResult, error) {
 	switch {
 	case !wasActive:
 		action = "start"
-		actionOutput, actionErr = options.Run("systemctl", "start", service)
+		actionOutput, actionErr = systemctl("start", service)
 	case filesChanged:
 		action = "restart"
-		actionOutput, actionErr = options.Run("systemctl", "restart", service)
+		actionOutput, actionErr = systemctl("restart", service)
 	}
 	if actionErr != nil {
 		restore()
 		return commandResult{}, commandFailure(action+" "+service, actionOutput, actionErr)
 	}
-	if !commandSucceeds(options.Run, "systemctl", "is-active", "--quiet", service) {
+	if !systemctlSucceeds("is-active", "--quiet", service) {
 		restore()
 		return commandResult{}, fmt.Errorf("%s did not become active; installation rolled back", service)
 	}
@@ -247,7 +327,7 @@ func installFleetty(options installOptions) (commandResult, error) {
 		return commandResult{}, err
 	}
 	return commandResult{
-		Role: options.Role, Service: service,
+		Role: options.Role, Scope: options.Scope, Service: service,
 		Changed:      filesChanged || !wasActive || !wasEnabled,
 		ChangedFiles: transaction.changedFiles, State: "active",
 	}, nil
@@ -334,7 +414,7 @@ func (transaction *fileTransaction) Replace(
 	path string,
 	data []byte,
 	mode os.FileMode,
-	requireRootOwnership bool,
+	ownerUID, ownerGID int,
 ) (bool, error) {
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
@@ -344,7 +424,7 @@ func (transaction *fileTransaction) Replace(
 		if readErr != nil {
 			return false, readErr
 		}
-		ownershipMatches := !requireRootOwnership || ownedByRoot(info)
+		ownershipMatches := ownerUID < 0 || ownedBy(info, ownerUID, ownerGID)
 		if byteutil.Equal(existing, data) && info.Mode().Perm() == mode.Perm() && ownershipMatches {
 			return false, nil
 		}
@@ -365,8 +445,8 @@ func (transaction *fileTransaction) Replace(
 		cleanup()
 		return false, err
 	}
-	if requireRootOwnership {
-		if err = temporary.Chown(0, 0); err != nil {
+	if ownerUID >= 0 && (ownerUID != os.Geteuid() || ownerGID != os.Getegid()) {
+		if err = temporary.Chown(ownerUID, ownerGID); err != nil {
 			_ = temporary.Close()
 			cleanup()
 			return false, err
@@ -416,7 +496,7 @@ func (transaction *fileTransaction) Replace(
 	return true, nil
 }
 
-func ensureManagedDirectory(path string, mode os.FileMode, requireRootOwnership bool) error {
+func ensureManagedDirectory(path string, mode os.FileMode, ownerUID, ownerGID int) error {
 	if err := os.MkdirAll(path, mode); err != nil {
 		return err
 	}
@@ -430,17 +510,20 @@ func ensureManagedDirectory(path string, mode os.FileMode, requireRootOwnership 
 	if err := os.Chmod(path, mode); err != nil {
 		return err
 	}
-	if requireRootOwnership {
-		if err := os.Chown(path, 0, 0); err != nil {
+	if ownerUID >= 0 && !ownedBy(info, ownerUID, ownerGID) {
+		if os.Geteuid() != 0 {
+			return fmt.Errorf("%s is not owned by the current user", path)
+		}
+		if err := os.Chown(path, ownerUID, ownerGID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func ownedByRoot(info os.FileInfo) bool {
+func ownedBy(info os.FileInfo, uid, gid int) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == 0 && stat.Gid == 0
+	return ok && int(stat.Uid) == uid && int(stat.Gid) == gid
 }
 
 func (transaction *fileTransaction) Rollback() {
@@ -472,6 +555,7 @@ func runDoctorCommand(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	role := flags.String("role", "", "installation role: node or hub")
+	scope := flags.String("scope", "auto", "installation scope: auto, user, or system")
 	asJSON := flags.Bool("json", false, "write machine-readable JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -479,7 +563,11 @@ func runDoctorCommand(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("doctor does not accept positional arguments")
 	}
-	result, err := doctorFleetty(strings.TrimSpace(*role), runSystemCommand)
+	layout, err := resolveDeploymentLayout(*scope)
+	if err != nil {
+		return err
+	}
+	result, err := doctorFleetty(strings.TrimSpace(*role), layout, runSystemCommand)
 	if *asJSON {
 		if encodeErr := json.NewEncoder(stdout).Encode(result); encodeErr != nil {
 			return encodeErr
@@ -492,12 +580,12 @@ func runDoctorCommand(args []string, stdout, stderr io.Writer) error {
 	return err
 }
 
-func doctorFleetty(role string, runner systemCommandRunner) (doctorResult, error) {
-	_, service, err := deployassets.ServiceUnit(role)
+func doctorFleetty(role string, layout deploymentLayout, runner systemCommandRunner) (doctorResult, error) {
+	_, service, err := deployassets.ServiceUnit(role, layout.Scope)
 	if err != nil {
 		return doctorResult{}, err
 	}
-	result := doctorResult{Role: role, Healthy: true, Build: buildinfo.Current()}
+	result := doctorResult{Role: role, Scope: layout.Scope, Healthy: true, Build: buildinfo.Current()}
 	add := func(name, status, message string) {
 		result.Checks = append(result.Checks, doctorCheck{Name: name, Status: status, Message: message})
 		if status == "fail" {
@@ -518,37 +606,40 @@ func doctorFleetty(role string, runner systemCommandRunner) (doctorResult, error
 			add(name, "fail", path+" is not a regular file")
 		case executable && info.Mode().Perm()&0o111 == 0:
 			add(name, "fail", path+" is not executable")
-		case !ownedByRoot(info):
-			add(name, "fail", path+" must be owned by root")
+		case !ownedBy(info, layout.OwnerUID, layout.OwnerGID):
+			add(name, "fail", path+" has an unexpected owner")
 		default:
 			add(name, "pass", path)
 		}
 	}
-	checkRegularFile("binary", fleettyBinaryPath, true)
-	checkRegularFile("systemd-unit", filepath.Join(systemdUnitDir, service), false)
-	if info, statErr := os.Lstat(fleettyConfigDir); statErr != nil {
+	checkRegularFile("binary", layout.BinaryPath, true)
+	checkRegularFile("systemd-unit", filepath.Join(layout.UnitPath, service), false)
+	if info, statErr := os.Lstat(layout.ConfigPath); statErr != nil {
 		add("config-directory", "fail", statErr.Error())
-	} else if !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ownedByRoot(info) {
-		add("config-directory", "fail", "must be root-owned and inaccessible to group and others")
+	} else if !info.IsDir() || info.Mode().Perm()&0o077 != 0 ||
+		!ownedBy(info, layout.OwnerUID, layout.OwnerGID) {
+		add("config-directory", "fail", "must be owner-only and owned by the service account")
 	} else {
-		add("config-directory", "pass", fleettyConfigDir)
+		add("config-directory", "pass", layout.ConfigPath)
 	}
-	if commandSucceeds(runner, "systemctl", "is-active", "--quiet", service) {
+	systemctl := func(arguments ...string) ([]byte, error) {
+		return runner("systemctl", append(append([]string(nil), layout.SystemctlArgs...), arguments...)...)
+	}
+	systemctlSucceeds := func(arguments ...string) bool {
+		_, commandErr := systemctl(arguments...)
+		return commandErr == nil
+	}
+	if systemctlSucceeds("is-active", "--quiet", service) {
 		add("service-active", "pass", service)
 	} else {
 		add("service-active", "fail", service+" is not active")
 	}
-	if commandSucceeds(runner, "systemctl", "is-enabled", "--quiet", service) {
+	if systemctlSucceeds("is-enabled", "--quiet", service) {
 		add("service-enabled", "pass", service)
 	} else {
 		add("service-enabled", "fail", service+" is not enabled")
 	}
-	hostKey := filepath.Join(fleettyConfigDir, "ssh_host_ed25519")
-	if role == "hub" {
-		hostKey = filepath.Join(fleettyConfigDir, "hub_host_ed25519")
-	}
-	checkRegularFile("ssh-host-key", hostKey, false)
-	if references, scanErr := legacyConfigReferences(fleettyConfigDir); scanErr != nil {
+	if references, scanErr := legacyConfigReferences(layout.ConfigPath); scanErr != nil {
 		add("configuration", "fail", scanErr.Error())
 	} else if len(references) > 0 {
 		add("configuration", "fail", "legacy references: "+strings.Join(references, ", "))
@@ -557,7 +648,7 @@ func doctorFleetty(role string, runner systemCommandRunner) (doctorResult, error
 	}
 	switch role {
 	case "node":
-		machinePath := filepath.Join(fleettyConfigDir, "machine.json")
+		machinePath := filepath.Join(layout.ConfigPath, "machine.json")
 		if _, statErr := os.Stat(machinePath); errors.Is(statErr, os.ErrNotExist) {
 			add("config-schema", "pass", "default GPU node profile")
 		} else if statErr != nil {
@@ -568,7 +659,7 @@ func doctorFleetty(role string, runner systemCommandRunner) (doctorResult, error
 			add("config-schema", "pass", machinePath)
 		}
 	case "hub":
-		hubPath := filepath.Join(fleettyConfigDir, "nodes.json")
+		hubPath := filepath.Join(layout.ConfigPath, "nodes.json")
 		if _, loadErr := loadHubConfig(hubPath); loadErr != nil {
 			add("config-schema", "fail", loadErr.Error())
 		} else {
@@ -580,27 +671,38 @@ func doctorFleetty(role string, runner systemCommandRunner) (doctorResult, error
 	if role == "hub" {
 		port = "23235"
 	}
-	if output, showErr := runner("systemctl", "show", service, "--property", "Environment", "--value"); showErr == nil {
-		for _, field := range strings.Fields(string(output)) {
-			if value, found := strings.CutPrefix(field, "SSH_PORT="); found && value != "" {
-				port = strings.Trim(value, `"'`)
-			}
-			if value, found := strings.CutPrefix(field, "SSH_HOST="); found && value != "" {
-				value = strings.Trim(value, `"'`)
-				if value != "0.0.0.0" && value != "::" {
-					host = value
-				}
-			}
-		}
+	hostKey := filepath.Join(layout.ConfigPath, "ssh_host_ed25519")
+	if role == "hub" {
+		hostKey = filepath.Join(layout.ConfigPath, "hub_host_ed25519")
+	}
+	environment := effectiveServiceEnvironment(systemctl, service)
+	if value := strings.TrimSpace(environment["SSH_PORT"]); value != "" {
+		port = value
+	}
+	if value := strings.TrimSpace(environment["SSH_HOST"]); value != "" &&
+		value != "0.0.0.0" && value != "::" {
+		host = value
+	}
+	if value := strings.TrimSpace(environment["SSH_HOST_KEY_PATH"]); value != "" {
+		hostKey = value
 	}
 	address := net.JoinHostPort(host, port)
-	connection, dialErr := net.DialTimeout("tcp", address, 750*time.Millisecond)
+	var dialErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		var connection net.Conn
+		connection, dialErr = net.DialTimeout("tcp", address, 250*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if dialErr != nil {
 		add("ssh-port", "fail", address+": "+dialErr.Error())
 	} else {
-		_ = connection.Close()
 		add("ssh-port", "pass", address)
 	}
+	checkRegularFile("ssh-host-key", hostKey, false)
 	if role == "node" {
 		if _, lookupErr := exec.LookPath("nvidia-smi"); lookupErr != nil {
 			add("nvidia-smi", "warn", "not installed; GPU metrics will be unavailable")
@@ -608,10 +710,56 @@ func doctorFleetty(role string, runner systemCommandRunner) (doctorResult, error
 			add("nvidia-smi", "pass", "available")
 		}
 	}
+	if layout.Scope == "user" {
+		output, lingerErr := runner(
+			"loginctl", "show-user", strconv.Itoa(os.Getuid()), "--property", "Linger", "--value",
+		)
+		if lingerErr != nil {
+			add("user-linger", "warn", "could not determine whether the user service survives logout")
+		} else if strings.TrimSpace(string(output)) == "yes" {
+			add("user-linger", "pass", "enabled")
+		} else {
+			add("user-linger", "warn", "disabled; the service may stop after the last login session ends")
+		}
+	}
 	if !result.Healthy {
 		return result, errors.New("Fleetty doctor found failed checks")
 	}
 	return result, nil
+}
+
+func effectiveServiceEnvironment(
+	systemctl func(...string) ([]byte, error),
+	service string,
+) map[string]string {
+	result := make(map[string]string)
+	if output, err := systemctl("show", service, "--property", "Environment", "--value"); err == nil {
+		for _, field := range strings.Fields(string(output)) {
+			name, value, found := strings.Cut(field, "=")
+			if found && name != "" {
+				result[name] = strings.Trim(value, `"'`)
+			}
+		}
+	}
+	output, err := systemctl("show", service, "--property", "MainPID", "--value")
+	if err != nil {
+		return result
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil || pid <= 0 {
+		return result
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	if err != nil {
+		return result
+	}
+	for _, field := range strings.Split(string(data), "\x00") {
+		name, value, found := strings.Cut(field, "=")
+		if found && name != "" {
+			result[name] = value
+		}
+	}
+	return result
 }
 
 func legacyConfigReferences(path string) ([]string, error) {
