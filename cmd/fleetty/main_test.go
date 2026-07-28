@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -54,8 +55,8 @@ func TestAdminAuthenticationAndSelection(t *testing.T) {
 	admin := &adminController{
 		password: "correct horse battery staple",
 		actions: []adminAction{
-			{label: "Restart monitor service", command: "true"},
-			{label: "Reboot machine", command: "true"},
+			{label: "Restart monitor service", operation: managementRestartService},
+			{label: "Reboot machine", operation: managementRebootHost},
 		},
 	}
 	m := &monitorModel{admin: admin, screen: screenMonitor}
@@ -146,10 +147,13 @@ func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
 	admin := &adminController{
 		password: "node-secret",
 		actions: []adminAction{
-			{ID: 0, label: "Safe test action", command: "true"},
+			{ID: 0, label: "Safe test action", operation: managementRestartService, target: "fleetty.service"},
 		},
 	}
 	service := newNodeRPCService(admin, machineConfig{Profile: machineProfileGPU})
+	service.backend.runManagement = func(context.Context, privilegedRequest) (string, error) {
+		return "ok", nil
+	}
 
 	denied := service.Handle(nodeRPCRequest{
 		Version:   nodeRPCVersion,
@@ -180,7 +184,7 @@ func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
 		admin: newRemoteAdminController(), screen: screenMonitor,
 	}
 	_, _ = model.Update(snapshotMsg{snapshot: snapshot.Snapshot})
-	if len(model.admin.actions) != 1 || model.admin.actions[0].command != "" {
+	if len(model.admin.actions) != 1 || model.admin.actions[0].operation != "" {
 		t.Fatalf("remote management capabilities = %#v", model.admin.actions)
 	}
 	incompatible := service.Handle(nodeRPCRequest{Version: nodeRPCVersion + 1, Operation: rpcAuthenticate})
@@ -887,6 +891,113 @@ func TestCompactPM2Error(t *testing.T) {
 	}
 }
 
+func TestDarwinMetricParsers(t *testing.T) {
+	pageSize, pages, err := parseDarwinVMStat([]byte(`Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               100.
+Pages active:                             200.
+Pages inactive:                            30.
+Pages speculative:                         10.
+`))
+	if err != nil || pageSize != 16384 || pages["Pages inactive"] != 30 {
+		t.Fatalf("vm_stat parser = pageSize %d pages %#v err %v", pageSize, pages, err)
+	}
+
+	devices, err := parseDarwinNetstat([]byte(`Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+en0 1500 <Link#4> aa:bb 10 2 1200 20 3 3400 0
+en0 1500 192.0.2 192.0.2.1 10 - 1200 20 - 3400 -
+lo0 16384 <Link#1> 1 0 100 1 0 100 0
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := devices["en0"]; got.rx != 1200 || got.tx != 3400 || got.rxErrors != 2 || got.txErrors != 3 {
+		t.Fatalf("netstat parser = %#v", devices)
+	}
+
+	for value, want := range map[string]uint64{
+		"01:02":      62,
+		"03:04:05":   11045,
+		"2-03:04:05": 183845,
+	} {
+		if got, parseErr := parseBSDProcessElapsed(value); parseErr != nil || got != want {
+			t.Fatalf("parseBSDProcessElapsed(%q) = %d, %v; want %d", value, got, parseErr, want)
+		}
+	}
+}
+
+func TestDarwinCurrentProcessDetail(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS integration check")
+	}
+	detail, err := readDarwinProcessDetail(os.Getpid(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.PID != os.Getpid() || detail.StartTimeTicks == 0 || detail.CommandLine == "" {
+		t.Fatalf("current process detail = %#v", detail)
+	}
+}
+
+func TestGeneralProfileOmitsGPUSection(t *testing.T) {
+	model := &monitorModel{
+		profile: machineProfileGeneral, width: 100, height: 30,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryTotal: 8 << 30, DiskTotal: 1 << 40,
+		},
+	}
+	rendered := model.monitorView()
+	if strings.Contains(rendered, " GPU ") || strings.Contains(rendered, "NVIDIA") {
+		t.Fatalf("general profile unexpectedly rendered GPU panel\n%s", rendered)
+	}
+}
+
+func TestManagementOperationsAreStructuredAndAllowlisted(t *testing.T) {
+	t.Setenv("FLEETTY_INSTALL_SCOPE", "user")
+	t.Setenv("FLEETTY_PRIVILEGED_SOCKET", "")
+	t.Setenv("ADMIN_RESTART_SERVICE_CMD", "touch /tmp/should-not-run")
+	t.Setenv("ADMIN_REBOOT_CMD", "sh -c anything")
+	actions := defaultAdminActions("linux", "user", 1000, "")
+	if len(actions) != 1 ||
+		actions[0].operation != managementRestartService ||
+		actions[0].target != "fleetty.service" {
+		t.Fatalf("legacy command environment affected actions: %#v", actions)
+	}
+	if _, err := executeLocalManagement(context.Background(), privilegedRequest{
+		Operation: managementRestartService, Target: "attacker.service",
+	}); err == nil {
+		t.Fatal("non-allowlisted service was accepted")
+	}
+	if _, err := executePrivilegedRequest(privilegedRequest{
+		Version: privilegedProtocolVersion, Operation: managementTerminateProcess, PID: 1,
+	}, "fleetty.service"); err == nil {
+		t.Fatal("privileged helper accepted PID 1")
+	}
+	if _, err := executePrivilegedRequest(privilegedRequest{
+		Version: privilegedProtocolVersion + 1, Operation: managementRebootHost,
+	}, "fleetty.service"); err == nil {
+		t.Fatal("privileged helper accepted an incompatible protocol")
+	}
+}
+
+func TestPrivilegedSocketPreparationRejectsRegularFile(t *testing.T) {
+	path := t.TempDir() + "/privileged.sock"
+	if err := os.WriteFile(path, []byte("not a socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := preparePrivilegedSocketPath(path); err == nil {
+		t.Fatal("regular file was accepted as a replaceable privileged socket")
+	}
+}
+
+func TestTopRejectsInvalidThemeBeforeStartingTerminal(t *testing.T) {
+	var output, diagnostics strings.Builder
+	err := runTopCommand([]string{"--theme", "sepia"}, strings.NewReader(""), &output, &diagnostics)
+	if err == nil || !strings.Contains(err.Error(), "theme") {
+		t.Fatalf("invalid top theme error = %v", err)
+	}
+}
+
 func TestNASServiceOverviewShowsCollectionErrors(t *testing.T) {
 	model := &monitorModel{
 		width: 80,
@@ -990,29 +1101,26 @@ func TestNodeRPCTimeoutCoversSSHHandshake(t *testing.T) {
 	}
 }
 
-func TestDefaultRestartCommandMatchesPackagedService(t *testing.T) {
-	t.Setenv("FLEETTY_INSTALL_SCOPE", "system")
-	t.Setenv("ADMIN_RESTART_SERVICE_CMD", "")
-	admin := newAdminController()
-	if got := admin.actions[0].command; got != "systemctl restart fleetty.service" {
-		t.Fatalf("default restart command = %q", got)
+func TestDefaultRestartActionMatchesPackagedService(t *testing.T) {
+	actions := defaultAdminActions("linux", "system", 0, "")
+	action := actions[0]
+	if action.operation != managementRestartService || action.target != "fleetty.service" {
+		t.Fatalf("default restart action = %#v", action)
 	}
 }
 
 func TestUserScopeExposesOnlyPermittedDefaultActions(t *testing.T) {
-	t.Setenv("FLEETTY_INSTALL_SCOPE", "user")
-	t.Setenv("ADMIN_RESTART_SERVICE_CMD", "")
-	t.Setenv("ADMIN_REBOOT_CMD", "")
-	admin := newAdminController()
-	if len(admin.actions) != 1 ||
-		admin.actions[0].command != "systemctl --user restart fleetty.service" {
-		t.Fatalf("user actions = %#v", admin.actions)
+	actions := defaultAdminActions("linux", "user", 1000, "")
+	if len(actions) != 1 ||
+		actions[0].operation != managementRestartService ||
+		actions[0].privileged {
+		t.Fatalf("user actions = %#v", actions)
 	}
 
-	t.Setenv("ADMIN_REBOOT_CMD", "systemctl reboot")
-	admin = newAdminController()
-	if len(admin.actions) != 2 || admin.actions[1].ID != 1 || !admin.actions[1].dangerous {
-		t.Fatalf("explicit user actions = %#v", admin.actions)
+	actions = defaultAdminActions("linux", "user", 1000, "/run/fleetty/privileged.sock")
+	if len(actions) != 2 || actions[1].ID != 1 ||
+		!actions[1].dangerous || !actions[1].privileged {
+		t.Fatalf("privileged user actions = %#v", actions)
 	}
 }
 
@@ -1125,8 +1233,8 @@ func TestSSHConnectionLimiterReleasesClosedConnections(t *testing.T) {
 func TestManagementCardsCanBeClicked(t *testing.T) {
 	m := &monitorModel{
 		admin: &adminController{actions: []adminAction{
-			{label: "Restart monitor service", command: "true"},
-			{label: "Reboot machine", command: "true"},
+			{label: "Restart monitor service", operation: managementRestartService},
+			{label: "Reboot machine", operation: managementRebootHost},
 		}},
 		screen: screenAdmin,
 	}
@@ -1140,7 +1248,7 @@ func TestManagementCardsCanBeClicked(t *testing.T) {
 func TestManagementViewSupportsSingleRootlessAction(t *testing.T) {
 	m := &monitorModel{
 		admin: &adminController{actions: []adminAction{
-			{ID: 0, label: "Restart Fleetty", command: "true"},
+			{ID: 0, label: "Restart Fleetty", operation: managementRestartService},
 		}},
 		screen: screenAdmin, width: 100, height: 30,
 	}

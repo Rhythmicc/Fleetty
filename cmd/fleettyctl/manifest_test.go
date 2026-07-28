@@ -26,7 +26,8 @@ func TestLoadManifestResolvesTargets(t *testing.T) {
   "binary": "fleetty",
   "targets": [
     {"name":"node-1","ssh":"node-1-admin","role":"node","config_dir":"node-config"},
-    {"name":"hub","ssh":"hub","role":"hub","scope":"user"}
+    {"name":"hub","ssh":"hub","role":"hub","scope":"user"},
+    {"name":"node-1-helper","ssh":"node-1-admin","role":"privileged-helper"}
   ]
 }`
 	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
@@ -37,10 +38,11 @@ func TestLoadManifestResolvesTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if parsed.Parallel != defaultParallelism || parsed.TimeoutSeconds != defaultTimeout ||
-		len(targets) != 2 || targets[0].Binary != binary ||
+		len(targets) != 3 || targets[0].Binary != binary ||
 		targets[0].ConfigDir != configDir || targets[0].Become != "sudo" ||
 		targets[0].Scope != "system" ||
-		targets[1].Become != "none" || targets[1].Scope != "user" {
+		targets[1].Become != "none" || targets[1].Scope != "user" ||
+		targets[2].Role != "privileged-helper" || targets[2].Scope != "system" {
 		t.Fatalf("unexpected manifest: parsed=%#v targets=%#v", parsed, targets)
 	}
 }
@@ -79,6 +81,12 @@ func TestLoadManifestRejectsUnsafeOrUnknownValues(t *testing.T) {
 			manifest: `{"version":1,"binary":"fleetty","targets":[
 				{"name":"node","ssh":"node","role":"node","scope":"user","become":"sudo"}]}`,
 			contains: "user scope",
+		},
+		{
+			name: "user helper",
+			manifest: `{"version":1,"binary":"fleetty","targets":[
+				{"name":"helper","ssh":"node","role":"privileged-helper","scope":"user"}]}`,
+			contains: "system scope",
 		},
 	}
 	for _, test := range tests {

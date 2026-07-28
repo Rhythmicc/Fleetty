@@ -14,6 +14,7 @@ func TestServiceUnitsMatchScope(t *testing.T) {
 	}{
 		{role: "node", scope: "system", service: "fleetty.service", contains: "User=root"},
 		{role: "hub", scope: "system", service: "fleetty-hub.service", contains: "User=root"},
+		{role: "privileged-helper", scope: "system", service: "fleetty-privileged.service", contains: "CapabilityBoundingSet=CAP_KILL CAP_SYS_BOOT"},
 		{role: "node", scope: "user", service: "fleetty.service", contains: "ExecStart=%h/.local/bin/fleetty"},
 		{role: "hub", scope: "user", service: "fleetty-hub.service", contains: "ExecStart=%h/.local/bin/fleetty"},
 	} {

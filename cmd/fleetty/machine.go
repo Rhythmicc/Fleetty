@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -229,6 +230,9 @@ func (c *metricsCollector) collectNetwork(snapshot *monitorSnapshot) error {
 }
 
 func readNetworkDevices() (map[string]networkDeviceCounters, error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinNetworkDevices()
+	}
 	data, err := os.ReadFile("/proc/net/dev")
 	if err != nil {
 		return nil, err
@@ -257,6 +261,9 @@ func readNetworkDevices() (map[string]networkDeviceCounters, error) {
 }
 
 func readDefaultNetworkInterface() string {
+	if runtime.GOOS == "darwin" {
+		return readDarwinDefaultNetworkInterface()
+	}
 	data, err := os.ReadFile("/proc/net/route")
 	if err != nil {
 		return ""
@@ -311,6 +318,9 @@ func readFilesystems(configured []string) []filesystemInfo {
 }
 
 func mountedDevices() map[string]string {
+	if runtime.GOOS == "darwin" {
+		return readDarwinMountedDevices()
+	}
 	data, err := os.ReadFile("/proc/self/mounts")
 	if err != nil {
 		return nil

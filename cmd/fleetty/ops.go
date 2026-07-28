@@ -116,6 +116,10 @@ func runOperations(args []string, stdout, stderr io.Writer) (bool, error) {
 		return false, nil
 	}
 	switch args[0] {
+	case "top":
+		return true, runTopCommand(args[1:], os.Stdin, stdout, stderr)
+	case "privileged-helper":
+		return true, runPrivilegedHelperCommand(args[1:], stdout, stderr)
 	case "version":
 		flags := flag.NewFlagSet("version", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -144,16 +148,18 @@ func writeOperationsUsage(writer io.Writer) {
 	fmt.Fprintln(writer, `Fleetty
 
 Usage:
+  fleetty top [--config PATH] [--theme dark|light]
   fleetty serve
-  fleetty install --role node|hub [--scope auto|user|system] [--config-dir PATH] [--json]
-  fleetty doctor --role node|hub [--scope auto|user|system] [--json]
+  fleetty privileged-helper [--socket PATH] [--group NAME] [--service fleetty.service]
+  fleetty install --role node|hub|privileged-helper [--scope auto|user|system] [--config-dir PATH] [--json]
+  fleetty doctor --role node|hub|privileged-helper [--scope auto|user|system] [--json]
   fleetty version [--json]`)
 }
 
 func runInstallCommand(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	role := flags.String("role", "", "installation role: node or hub")
+	role := flags.String("role", "", "installation role: node, hub, or privileged-helper")
 	scope := flags.String("scope", "auto", "installation scope: auto, user, or system")
 	configDir := flags.String("config-dir", "", "staged flat configuration directory")
 	asJSON := flags.Bool("json", false, "write machine-readable JSON")
@@ -554,7 +560,7 @@ func (transaction *fileTransaction) Commit() error {
 func runDoctorCommand(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	role := flags.String("role", "", "installation role: node or hub")
+	role := flags.String("role", "", "installation role: node, hub, or privileged-helper")
 	scope := flags.String("scope", "auto", "installation scope: auto, user, or system")
 	asJSON := flags.Bool("json", false, "write machine-readable JSON")
 	if err := flags.Parse(args); err != nil {
@@ -645,6 +651,28 @@ func doctorFleetty(role string, layout deploymentLayout, runner systemCommandRun
 		add("configuration", "fail", "legacy references: "+strings.Join(references, ", "))
 	} else {
 		add("configuration", "pass", "no legacy deployment paths")
+	}
+	if role == "privileged-helper" {
+		socketPath := "/run/fleetty/privileged.sock"
+		info, statErr := os.Lstat(socketPath)
+		switch {
+		case statErr != nil:
+			add("privileged-socket", "fail", statErr.Error())
+		case info.Mode()&os.ModeSocket == 0:
+			add("privileged-socket", "fail", socketPath+" is not a Unix socket")
+		default:
+			connection, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
+			if dialErr != nil {
+				add("privileged-socket", "fail", dialErr.Error())
+			} else {
+				_ = connection.Close()
+				add("privileged-socket", "pass", socketPath)
+			}
+		}
+		if !result.Healthy {
+			return result, errors.New("Fleetty doctor found failed checks")
+		}
+		return result, nil
 	}
 	switch role {
 	case "node":

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -903,7 +904,12 @@ func (m *monitorModel) monitorView() string {
 	if m.profile == machineProfileNAS || m.snapshot.Profile == machineProfileNAS {
 		return m.nasView()
 	}
-	layout := newDashboardLayout(m.width, m.height, len(m.snapshot.GPUs), m.snapshot.GPUError != "")
+	showGPU := m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU
+	gpuCount := len(m.snapshot.GPUs)
+	if !showGPU {
+		gpuCount = -1
+	}
+	layout := newDashboardLayout(m.width, m.height, gpuCount, showGPU && m.snapshot.GPUError != "")
 	w := layout.width
 	header := dashboardHeader(w, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
 	if m.snapshot.CollectedAt.IsZero() {
@@ -935,7 +941,10 @@ func (m *monitorModel) monitorView() string {
 		},
 	}
 	metricRows := renderMetricRows(metrics, layout)
-	gpu := m.gpuPanel(layout)
+	gpu := ""
+	if showGPU {
+		gpu = m.gpuPanel(layout)
+	}
 	slurm := ""
 	m.queuePanelY = -1
 	if m.slurmQueue != nil {
@@ -953,7 +962,10 @@ func (m *monitorModel) monitorView() string {
 	if m.loadErr != nil {
 		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
 	}
-	sections := []string{header, metricRows, gpu}
+	sections := []string{header, metricRows}
+	if gpu != "" {
+		sections = append(sections, gpu)
+	}
 	if slurm != "" {
 		m.queuePanelY = renderedSectionsHeight(sections)
 		sections = append(sections, slurm)
@@ -1345,8 +1357,10 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 	}
 	compactGPU := width < 112
 	metricLines := ((4 + cols - 1) / cols) * 5 // three content lines plus border
-	gpuContentLines := 0
-	if gpuUnavailable {
+	gpuContentLines := -2
+	if gpuCount < 0 {
+		gpuContentLines = -2
+	} else if gpuUnavailable {
 		gpuContentLines = 1
 	} else if compactGPU {
 		gpuContentLines = gpuCount * 3
@@ -1356,7 +1370,7 @@ func newDashboardLayout(width, height, gpuCount int, gpuUnavailable bool) dashbo
 	if !gpuUnavailable && gpuCount == 0 {
 		gpuContentLines = 1
 	}
-	gpuLines := gpuContentLines + 2 // rounded border
+	gpuLines := max(0, gpuContentLines+2) // rounded border
 	// Header, metric cards, GPU panel, process panel headings/border, and footer.
 	headerLines := 1
 	if width < 54 {
@@ -1544,7 +1558,9 @@ type adminAction struct {
 	ID          int
 	label       string
 	description string
-	command     string
+	operation   managementOperation
+	target      string
+	privileged  bool
 	dangerous   bool
 }
 
@@ -1556,33 +1572,35 @@ type adminController struct {
 
 func newAdminController() *adminController {
 	scope := strings.ToLower(strings.TrimSpace(os.Getenv("FLEETTY_INSTALL_SCOPE")))
-	restartDefault := "systemctl restart fleetty.service"
-	if scope == "user" || scope == "" && os.Geteuid() != 0 {
-		restartDefault = "systemctl --user restart fleetty.service"
-	}
-	actions := []adminAction{
-		{
-			ID: 0, label: "Restart Fleetty", description: "Restart the Fleetty node service.",
-			command: envString("ADMIN_RESTART_SERVICE_CMD", restartDefault),
-		},
-	}
-	rebootCommand, rebootConfigured := os.LookupEnv("ADMIN_REBOOT_CMD")
-	rebootCommand = strings.TrimSpace(rebootCommand)
-	if !rebootConfigured && scope != "user" && os.Geteuid() == 0 {
-		rebootCommand = "systemctl reboot"
-	}
-	if rebootCommand != "" {
-		actions = append(actions, adminAction{
-			ID: 1, label: "Reboot machine",
-			description: "Restart the entire host. Active workloads will be interrupted.",
-			command:     rebootCommand, dangerous: true,
-		})
-	}
 	return &adminController{
 		password:     os.Getenv("ADMIN_PASSWORD"),
 		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
-		actions:      actions,
+		actions:      defaultAdminActions(runtime.GOOS, scope, os.Geteuid(), privilegedSocketPath()),
 	}
+}
+
+func defaultAdminActions(goos, scope string, effectiveUID int, privilegedSocket string) []adminAction {
+	if goos != "linux" {
+		return nil
+	}
+	userScope := scope == "user" || scope == "" && effectiveUID != 0
+	actions := []adminAction{
+		{
+			ID: 0, label: "Restart Fleetty", description: "Restart the Fleetty node service.",
+			operation: managementRestartService, target: "fleetty.service",
+			privileged: !userScope && effectiveUID != 0,
+		},
+	}
+	if (!userScope && effectiveUID == 0) || strings.TrimSpace(privilegedSocket) != "" {
+		actions = append(actions, adminAction{
+			ID: 1, label: "Reboot machine",
+			description: "Restart the entire host. Active workloads will be interrupted.",
+			operation:   managementRebootHost,
+			privileged:  effectiveUID != 0,
+			dangerous:   true,
+		})
+	}
+	return actions
 }
 
 func newRemoteAdminController() *adminController {
@@ -1726,17 +1744,27 @@ func (c *metricsCollector) collectSummary() (monitorSnapshot, error) {
 func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorSnapshot, error) {
 	s := monitorSnapshot{CollectedAt: time.Now()}
 	var errs []string
-	if counters, err := readCPUCounters(); err != nil {
-		errs = append(errs, "cpu: "+err.Error())
-	} else {
-		if c.haveCPU {
-			totalDelta := counters.total - c.previousCPU.total
-			idleDelta := counters.idle - c.previousCPU.idle
-			if totalDelta > 0 {
-				s.CPUPercent = 100 * float64(totalDelta-idleDelta) / float64(totalDelta)
-			}
+	if runtime.GOOS == "darwin" {
+		value, err := readDarwinCPUPercent()
+		if err != nil {
+			errs = append(errs, "cpu: "+err.Error())
+		} else {
+			s.CPUPercent = value
+			c.haveCPU = true
 		}
-		c.previousCPU, c.haveCPU = counters, true
+	} else {
+		if counters, err := readCPUCounters(); err != nil {
+			errs = append(errs, "cpu: "+err.Error())
+		} else {
+			if c.haveCPU {
+				totalDelta := counters.total - c.previousCPU.total
+				idleDelta := counters.idle - c.previousCPU.idle
+				if totalDelta > 0 {
+					s.CPUPercent = 100 * float64(totalDelta-idleDelta) / float64(totalDelta)
+				}
+			}
+			c.previousCPU, c.haveCPU = counters, true
+		}
 	}
 	if used, total, err := readMemory(); err != nil {
 		errs = append(errs, "memory: "+err.Error())
@@ -1796,6 +1824,9 @@ func readCPUCounters() (cpuCounters, error) {
 }
 
 func readMemory() (used, total uint64, err error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinMemory()
+	}
 	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0, 0, err
@@ -1855,6 +1886,9 @@ func readNetwork() (netCounters, error) {
 }
 
 func readLoadAverage() string {
+	if runtime.GOOS == "darwin" {
+		return readDarwinLoadAverage()
+	}
 	b, err := os.ReadFile("/proc/loadavg")
 	if err != nil {
 		return "load unavailable"
@@ -1901,6 +1935,9 @@ func parseGPUs(output []byte) []gpuInfo {
 }
 
 func readProcesses() ([]processInfo, error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinProcesses()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,comm=", "--sort=-pcpu").Output()
@@ -1933,6 +1970,9 @@ func readProcesses() ([]processInfo, error) {
 }
 
 func readProcessDetailWithSensitive(pid int, includeSensitive bool) (processDetail, error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinProcessDetail(pid, includeSensitive)
+	}
 	if pid <= 0 {
 		return processDetail{}, errors.New("invalid PID")
 	}
@@ -1992,6 +2032,9 @@ func applyProcessDetailPolicy(detail *processDetail, includeSensitive bool) {
 }
 
 func readProcessStartTicks(pid int) (uint64, error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinProcessStart(pid)
+	}
 	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return 0, err

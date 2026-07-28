@@ -4,7 +4,7 @@
   <img src="docs/images/fleetty-hero.webp" alt="Fleetty 统一连接 GPU 计算节点、存储节点和集群队列" width="100%">
 </p>
 
-Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终端控制台。连接专用 SSH 端口后会直接进入终端仪表盘，不会获得服务器 shell。
+Fleetty 是一个面向个人电脑、计算服务器、存储节点和 Slurm 集群的终端监控控制台。它既可以作为本地 `top` 使用，也可以通过专用 SSH 端口提供不会暴露服务器 shell 的远程仪表盘。
 
 它以单一可执行文件运行，适合为运维人员或服务器使用者提供统一、受控的主机状态入口。
 
@@ -18,13 +18,14 @@ Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终
 - 随终端尺寸自动调整的响应式布局；
 - 每个 SSH 会话独立的深色、浅色主题；
 - 鼠标和键盘操作；
+- Linux 与 macOS 本地 `fleetty top` 模式；
 - 密码保护的管理模式；
 - 可选的多服务器 Hub 首页；
 - 内置幂等安装器、健康检查和批量 fleet 运维工具；
 - 可接入多个本地或远程 Slurm 集群的队列页面；
 - 面向 NAS 的网络、存储、Docker 和 HTTP 服务监控页面。
 
-普通监控界面可以过滤进程并查看只读详情，不需要管理密码或 root 权限。管理模式可以向当前服务账户有权管理的进程发送 `SIGTERM`，并重启 Fleetty；重启主机仅在系统级安装或用户显式配置授权命令后出现。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
+普通监控界面可以过滤进程并查看只读详情，不需要管理密码或 root 权限。管理模式可以向当前服务账户有权管理的进程发送 `SIGTERM`，并重启 Fleetty；可选的最小权限助手可以额外授权跨用户终止进程和重启主机。所有管理请求均为固定的结构化操作，不执行用户提供的 shell 命令。危险操作需要再次确认，PID 1 和监控程序自身不能从界面终止。
 
 ## 界面预览
 
@@ -59,13 +60,55 @@ Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终
 
 ## 系统要求
 
-- 使用 systemd 的 Linux；
-- `amd64` 或 `arm64` 架构；
+- 本地监控支持 macOS，以及常见 Linux 发行版；
+- SSH 节点、Hub 和特权助手需要使用 systemd 的 Linux；
+- 支持 `amd64` 和 `arm64` 架构；
 - NVIDIA GPU 指标需要系统已安装驱动并能执行 `nvidia-smi`。
 
-普通用户即可安装和运行 Fleetty。没有 NVIDIA GPU 或 `nvidia-smi` 时，GPU 区域会显示不可用，CPU、内存、磁盘、网络和进程监控仍可正常使用。Docker socket、其他用户的进程详情等指标仍遵循 Linux 原有访问权限。
+普通用户即可安装和运行 Fleetty。macOS 本地模式显示 CPU、内存、磁盘、网络和进程，不显示 NVIDIA GPU 区域。Linux 没有 `nvidia-smi` 时，其他指标仍可正常使用。Docker socket、其他用户的进程详情等指标始终遵循操作系统原有访问权限。
 
 ## 安装
+
+### macOS 本地监控
+
+根据 Mac 的处理器下载二进制并校验：
+
+```bash
+case "$(uname -m)" in
+  x86_64) fleetty_arch=amd64 ;;
+  arm64) fleetty_arch=arm64 ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+fleetty_release_base="https://github.com/Rhythmicc/fleetty/releases/latest/download"
+fleetty_asset="fleetty_darwin_${fleetty_arch}"
+
+curl -fL -o "/tmp/${fleetty_asset}" \
+  "${fleetty_release_base}/${fleetty_asset}"
+curl -fL -o /tmp/fleetty-checksums.txt \
+  "${fleetty_release_base}/checksums.txt"
+
+fleetty_expected="$(
+  awk -v asset="${fleetty_asset}" '$2 == asset { print $1 }' \
+    /tmp/fleetty-checksums.txt
+)"
+fleetty_actual="$(shasum -a 256 "/tmp/${fleetty_asset}" | awk '{ print $1 }')"
+test -n "${fleetty_expected}"
+test "${fleetty_expected}" = "${fleetty_actual}"
+
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "/tmp/${fleetty_asset}" "$HOME/.local/bin/fleetty"
+```
+
+直接启动本地仪表盘：
+
+```bash
+"$HOME/.local/bin/fleetty" top
+```
+
+`fleetty top --theme light` 使用浅色主题。该模式不启动后台服务、不开放网络端口，也不需要 root；`q` 退出，`t` 切换主题，`/` 过滤进程，方向键、回车和鼠标可以选择并查看进程详情。
+
+### Linux SSH 节点
 
 从 [GitHub Releases](https://github.com/Rhythmicc/fleetty/releases) 下载当前架构的最新版本：
 
@@ -218,7 +261,7 @@ fleettyctl status --file fleet.json
 }
 ```
 
-`binary` 和 `config_dir` 相对于 manifest 所在目录解析；单个目标可以用自己的 `binary` 覆盖全局值。`role` 只能为 `node` 或 `hub`。`scope: "user"` 默认 `become: "none"`，整个部署过程不调用 sudo；`scope: "system"` 默认使用 `become: "sudo"`，使用 root SSH 时可以显式设置 `"become": "none"`。
+`binary` 和 `config_dir` 相对于 manifest 所在目录解析；单个目标可以用自己的 `binary` 覆盖全局值。`role` 可以为 `node`、`hub` 或仅支持 system scope 的 `privileged-helper`。`scope: "user"` 默认 `become: "none"`，整个部署过程不调用 sudo；`scope: "system"` 默认使用 `become: "sudo"`，使用 root SSH 时可以显式设置 `"become": "none"`。
 
 manifest 不接受密码字段。SSH 凭据由 OpenSSH 管理，Fleetty 管理密码、RPC 私钥等敏感内容应放在目标的 `config_dir` 中，并确保该本地目录只有部署账户可读。`plan` 会比较二进制与受管配置的 SHA-256、服务启用状态和运行状态；`apply` 只处理有差异的目标，远端安装仍由同一个原子安装器完成。
 
@@ -533,9 +576,43 @@ chmod 0600 "$HOME/.config/fleetty/admin.env"
 systemctl --user restart fleetty.service
 ```
 
-user scope 的管理模式可以终止该 Linux 用户拥有的进程，并重启 Fleetty user service；其他用户的进程不会显示终止入口，重启主机按钮默认不存在。如果管理员希望授予重启主机能力，可以在 `admin.env` 中显式配置经过审查的 `ADMIN_REBOOT_CMD`。
+user scope 的管理模式可以终止该用户拥有的进程，并重启 Fleetty user service；其他用户的进程不会显示终止入口，重启主机按钮默认不存在。system scope 将配置写入 `/etc/fleetty/admin.env`，默认提供重启系统服务和主机的固定操作。
 
-system scope 将配置写入 `/etc/fleetty/admin.env`，默认提供 `systemctl restart fleetty.service` 和 `systemctl reboot`。建议限制监听端口的来源范围，并妥善保管管理密码。
+需要在保持 Fleetty 主服务为普通用户的同时授权少量系统操作时，可以安装可选的特权助手。先创建只能访问助手 socket 的系统组，并把 Fleetty 服务用户加入该组：
+
+```bash
+getent group fleetty >/dev/null || sudo groupadd --system fleetty
+sudo usermod -aG fleetty "$USER"
+```
+
+重新登录以刷新用户组，然后使用同一个 Fleetty 二进制安装助手：
+
+```bash
+sudo "$HOME/.local/bin/fleetty" install \
+  --role privileged-helper \
+  --scope system
+sudo /opt/fleetty/fleetty doctor \
+  --role privileged-helper \
+  --scope system
+```
+
+在 user scope 的 `admin.env` 中启用本地 socket：
+
+```bash
+printf '%s\n' \
+  'FLEETTY_PRIVILEGED_SOCKET=/run/fleetty/privileged.sock' \
+  >>"$HOME/.config/fleetty/admin.env"
+chmod 0600 "$HOME/.config/fleetty/admin.env"
+systemctl --user restart fleetty.service
+```
+
+助手以独立的加固服务运行，只接受以下操作：
+
+- 重启固定的 `fleetty.service`；
+- 重启主机；
+- 对经过 PID 启动时间复核且不是 PID 1 的进程发送 `SIGTERM`。
+
+Unix socket 的组权限决定哪些本地账户可以调用助手。协议不接受可执行文件、命令行或 shell 字符串，每次请求都会记录调用进程的 UID、GID、PID、操作类型、目标和结果。
 
 ## 配置
 
@@ -556,8 +633,7 @@ user scope 的配置位于 `~/.config/fleetty`，systemd unit 位于 `~/.config/
 | `MACHINE_CONFIG_FILE` | 空 | 节点角色、网卡、挂载点及服务检查 JSON 配置 |
 | `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
 | `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希；为空时禁用管理模式 |
-| `ADMIN_RESTART_SERVICE_CMD` | 依 scope 自动选择 | 重启 Fleetty 服务命令 |
-| `ADMIN_REBOOT_CMD` | system scope 为 `systemctl reboot`；user scope 为空 | 重启主机命令；为空时不显示该操作 |
+| `FLEETTY_PRIVILEGED_SOCKET` | 空 | 可选的特权助手 Unix socket；通常为 `/run/fleetty/privileged.sock` |
 
 user scope 修改配置后执行：
 

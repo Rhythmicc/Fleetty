@@ -482,6 +482,9 @@ func serviceForRole(role string) string {
 	if role == "hub" {
 		return "fleetty-hub.service"
 	}
+	if role == "privileged-helper" {
+		return "fleetty-privileged.service"
+	}
 	return "fleetty.service"
 }
 

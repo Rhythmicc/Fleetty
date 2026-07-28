@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"syscall"
 	"time"
 
@@ -24,18 +22,21 @@ type monitorBackend interface {
 }
 
 type localMonitorBackend struct {
-	collector *metricsCollector
-	admin     *adminController
-	user      string
-	remote    string
+	collector     *metricsCollector
+	admin         *adminController
+	privileged    *privilegedClient
+	runManagement func(context.Context, privilegedRequest) (string, error)
+	user          string
+	remote        string
 }
 
 func newLocalMonitorBackend(admin *adminController, machine machineConfig, user, remote string) *localMonitorBackend {
 	return &localMonitorBackend{
-		collector: newMetricsCollector(machine),
-		admin:     admin,
-		user:      user,
-		remote:    remote,
+		collector:  newMetricsCollector(machine),
+		admin:      admin,
+		privileged: newPrivilegedClient(privilegedSocketPath()),
+		user:       user,
+		remote:     remote,
 	}
 }
 
@@ -51,7 +52,7 @@ func (b *localMonitorBackend) ProcessDetail(pid int, password string) (processDe
 	includeSensitive := password != "" && b.admin.authenticate(password)
 	detail, err := readProcessDetailWithSensitive(pid, includeSensitive)
 	if err == nil {
-		detail.CanTerminate = os.Geteuid() == 0 || detail.UID == os.Geteuid()
+		detail.CanTerminate = os.Geteuid() == 0 || detail.UID == os.Geteuid() || b.privileged != nil
 	}
 	return detail, err
 }
@@ -70,9 +71,17 @@ func (b *localMonitorBackend) TerminateProcess(pid int, expectedStartTicks uint6
 	if expectedStartTicks == 0 || currentStartTicks != expectedStartTicks {
 		return errors.New("process identity changed; reload details")
 	}
-	process, err := os.FindProcess(pid)
-	if err == nil {
-		err = process.Signal(syscall.SIGTERM)
+	if b.privileged != nil && os.Geteuid() != 0 {
+		_, err = b.privileged.Execute(context.Background(), privilegedRequest{
+			Operation: managementTerminateProcess,
+			PID:       pid, StartTimeTicks: expectedStartTicks,
+		})
+	} else {
+		var process *os.Process
+		process, err = os.FindProcess(pid)
+		if err == nil {
+			err = process.Signal(syscall.SIGTERM)
+		}
 	}
 	log.Info("Process termination requested", "pid", pid, "signal", "SIGTERM", "user", b.user, "remote", b.remote, "error", err)
 	return err
@@ -94,9 +103,21 @@ func (b *localMonitorBackend) RunAction(actionID int, password string) (string, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "sh", "-c", action.command).CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		err = fmt.Errorf("timed out")
+	request := privilegedRequest{
+		Operation: action.operation,
+		Target:    action.target,
+	}
+	var output string
+	var err error
+	if b.runManagement != nil {
+		output, err = b.runManagement(ctx, request)
+	} else if action.privileged {
+		if b.privileged == nil {
+			return "", errors.New("privileged helper is unavailable")
+		}
+		output, err = b.privileged.Execute(ctx, request)
+	} else {
+		output, err = executeLocalManagement(ctx, request)
 	}
 	log.Info("Management action requested", "action", action.label, "user", b.user, "remote", b.remote, "error", err)
 	return string(output), err

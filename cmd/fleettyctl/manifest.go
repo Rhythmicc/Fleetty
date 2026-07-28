@@ -143,14 +143,17 @@ func (manifest *fleetManifest) validateAndResolve() ([]resolvedTarget, error) {
 		if !safeSSHTarget(target.SSH) {
 			return nil, fmt.Errorf("target %q has invalid ssh destination %q", target.Name, target.SSH)
 		}
-		if target.Role != "node" && target.Role != "hub" {
-			return nil, fmt.Errorf("target %q role must be node or hub", target.Name)
+		if target.Role != "node" && target.Role != "hub" && target.Role != "privileged-helper" {
+			return nil, fmt.Errorf("target %q role must be node, hub, or privileged-helper", target.Name)
 		}
 		if target.Scope == "" {
 			target.Scope = "system"
 		}
 		if target.Scope != "system" && target.Scope != "user" {
 			return nil, fmt.Errorf("target %q scope must be system or user", target.Name)
+		}
+		if target.Role == "privileged-helper" && target.Scope != "system" {
+			return nil, fmt.Errorf("target %q privileged-helper requires system scope", target.Name)
 		}
 		if target.Become == "" {
 			if target.Scope == "user" {

@@ -47,6 +47,10 @@ jobs:
               go build -trimpath -ldflags="${ldflags}" \
               -o "dist/fleetty_linux_${fleetty_arch}" \
               ./cmd/fleetty
+            CGO_ENABLED=0 GOOS=darwin GOARCH="${fleetty_arch}" \
+              go build -trimpath -ldflags="${ldflags}" \
+              -o "dist/fleetty_darwin_${fleetty_arch}" \
+              ./cmd/fleetty
           done
           for fleettyctl_os in linux darwin; do
             for fleettyctl_arch in amd64 arm64; do
@@ -60,12 +64,13 @@ jobs:
           cp deploy/fleetty-hub.service dist/fleetty-hub.service
           cp deploy/fleetty-user.service dist/fleetty-user.service
           cp deploy/fleetty-hub-user.service dist/fleetty-hub-user.service
+          cp deploy/fleetty-privileged.service dist/fleetty-privileged.service
           cp deploy/fleet.example.json dist/fleet.example.json
           cp deploy/hub-nodes.example.json dist/hub-nodes.example.json
           cp deploy/machine-nas.example.json dist/machine-nas.example.json
           (
             cd dist
-            sha256sum fleetty_linux_* fleettyctl_* fleetty*.service *.example.json > checksums.txt
+            sha256sum fleetty_linux_* fleetty_darwin_* fleettyctl_* fleetty*.service *.example.json > checksums.txt
           )
 
       - name: Create GitHub release

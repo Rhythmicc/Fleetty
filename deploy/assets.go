@@ -17,6 +17,9 @@ var userNodeService []byte
 //go:embed fleetty-hub-user.service
 var userHubService []byte
 
+//go:embed fleetty-privileged.service
+var privilegedService []byte
+
 func ServiceUnit(role, scope string) ([]byte, string, error) {
 	switch role {
 	case "node":
@@ -32,6 +35,10 @@ func ServiceUnit(role, scope string) ([]byte, string, error) {
 		}
 		if scope == "system" {
 			return append([]byte(nil), hubService...), "fleetty-hub.service", nil
+		}
+	case "privileged-helper":
+		if scope == "system" {
+			return append([]byte(nil), privilegedService...), "fleetty-privileged.service", nil
 		}
 	}
 	return nil, "", fmt.Errorf("unsupported role %q or scope %q", role, scope)
