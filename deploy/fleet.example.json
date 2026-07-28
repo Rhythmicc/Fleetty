@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "binary": "./fleetty_linux_amd64",
+  "parallel": 4,
+  "timeout_seconds": 15,
+  "targets": [
+    {
+      "name": "gpu-1",
+      "ssh": "gpu-1-admin",
+      "role": "node",
+      "config_dir": "./config/gpu-1"
+    },
+    {
+      "name": "nas-1",
+      "ssh": "nas-1-admin",
+      "role": "node",
+      "config_dir": "./config/nas-1"
+    },
+    {
+      "name": "lab-hub",
+      "ssh": "hub-admin",
+      "role": "hub",
+      "config_dir": "./config/hub"
+    }
+  ]
+}

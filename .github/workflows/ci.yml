@@ -27,11 +27,16 @@ jobs:
       - name: Check formatting
         shell: bash
         run: |
-          unformatted="$(gofmt -l ./cmd)"
+          unformatted="$(gofmt -l $(git ls-files '*.go'))"
           test -z "${unformatted}" || {
             printf 'Files require gofmt:\n%s\n' "${unformatted}"
             exit 1
           }
+
+      - name: Check module files
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
 
       - name: Test with race detector
         run: go test -race ./...
@@ -49,4 +54,12 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH="${fleetty_arch}" \
               go build -trimpath -o "/tmp/fleetty_${fleetty_arch}" \
               ./cmd/fleetty
+          done
+          for fleettyctl_os in linux darwin; do
+            for fleettyctl_arch in amd64 arm64; do
+              CGO_ENABLED=0 GOOS="${fleettyctl_os}" GOARCH="${fleettyctl_arch}" \
+                go build -trimpath \
+                -o "/tmp/fleettyctl_${fleettyctl_os}_${fleettyctl_arch}" \
+                ./cmd/fleettyctl
+            done
           done

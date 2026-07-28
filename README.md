@@ -16,6 +16,7 @@ Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终
 - 鼠标和键盘操作；
 - 密码保护的管理模式；
 - 可选的多服务器 Hub 首页；
+- 内置幂等安装器、健康检查和批量 fleet 运维工具；
 - 可接入多个本地或远程 Slurm 集群的队列页面；
 - 面向 NAS 的网络、存储、Docker 和 HTTP 服务监控页面。
 
@@ -47,9 +48,6 @@ curl -fL \
   -o "/tmp/fleetty_linux_${fleetty_arch}" \
   "${fleetty_release_base}/fleetty_linux_${fleetty_arch}"
 curl -fL \
-  -o /tmp/fleetty.service \
-  "${fleetty_release_base}/fleetty.service"
-curl -fL \
   -o /tmp/fleetty-checksums.txt \
   "${fleetty_release_base}/checksums.txt"
 
@@ -60,32 +58,107 @@ curl -fL \
 )
 ```
 
-安装程序和 systemd 服务：
+准备允许访问监控端口的 SSH 公钥，然后运行内置安装器：
 
 ```bash
-sudo install -d -o root -g root -m 0755 /opt/fleetty
-sudo install -d -o root -g root -m 0700 /etc/fleetty
-sudo install -o root -g root -m 0755 \
-  "/tmp/fleetty_linux_${fleetty_arch}" \
-  /opt/fleetty/fleetty
-sudo install -o root -g root -m 0644 \
-  /tmp/fleetty.service \
-  /etc/systemd/system/fleetty.service
+fleetty_config="$(mktemp -d)"
+chmod 0700 "${fleetty_config}"
+install -m 0600 "$HOME/.ssh/id_ed25519.pub" \
+  "${fleetty_config}/authorized_keys"
+chmod 0755 "/tmp/fleetty_linux_${fleetty_arch}"
 
-# 允许当前操作者的 SSH 公钥连接监控端口。
-# 如需允许多人访问，可将多行公钥写入同一个文件。
-sudo install -o root -g root -m 0600 \
-  "$HOME/.ssh/id_ed25519.pub" \
-  /etc/fleetty/authorized_keys
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now fleetty.service
-sudo systemctl status fleetty.service
+sudo "/tmp/fleetty_linux_${fleetty_arch}" install \
+  --role node \
+  --config-dir "${fleetty_config}"
+sudo /opt/fleetty/fleetty doctor --role node
 ```
 
-服务默认监听 `0.0.0.0:23234`，但只接受 `/etc/fleetty/authorized_keys` 中登记的客户端公钥。首次启动时会自动创建 `/etc/fleetty/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
+如需允许多人访问，将多行公钥写入同一个 `authorized_keys` 文件。服务默认监听 `0.0.0.0:23234`，但只接受该文件中登记的客户端公钥。首次启动时会自动创建 `/etc/fleetty/ssh_host_ed25519`，请勿在升级时删除该文件，否则 SSH host key 会发生变化。
 
 如果服务器启用了防火墙，请只向需要访问监控的网络开放 TCP 23234 端口。
+
+## 可重复部署与运维
+
+Fleetty 自带幂等安装器。单机更新时，将对应架构的二进制和需要变更的配置放在目标机，然后执行：
+
+```bash
+sudo ./fleetty_linux_amd64 install \
+  --role node \
+  --config-dir ./node-config
+sudo /opt/fleetty/fleetty doctor --role node
+```
+
+Hub 使用 `--role hub`。安装器会将自身原子安装到 `/opt/fleetty/fleetty`，写入并启用对应的 systemd unit；文件内容没有变化时不会重启服务。如果服务启动失败，二进制、unit 和本次配置变更会自动回滚。
+
+目录中的文件会以 root 所有、`0600` 权限安装到 `/etc/fleetty`。安装器拒绝符号链接、子目录、隐藏文件和超过限制的文件，未出现在配置目录中的现有配置不会被删除。
+
+多机环境使用 `fleettyctl` 和 JSON fleet manifest。控制端可以是 Linux 或 macOS，SSH 连接沿用本机 OpenSSH config、代理和 host key 校验：
+
+```bash
+fleetty_release_base="https://github.com/Rhythmicc/fleetty/releases/latest/download"
+fleettyctl_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$(uname -m)" in
+  x86_64) fleettyctl_arch=amd64 ;;
+  arm64|aarch64) fleettyctl_arch=arm64 ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+fleettyctl_asset="fleettyctl_${fleettyctl_os}_${fleettyctl_arch}"
+curl -fL \
+  -o "./${fleettyctl_asset}" \
+  "${fleetty_release_base}/${fleettyctl_asset}"
+curl -fL \
+  -o ./fleetty-checksums.txt \
+  "${fleetty_release_base}/checksums.txt"
+fleettyctl_expected="$(
+  awk -v asset="${fleettyctl_asset}" '$2 == asset { print $1 }' \
+    ./fleetty-checksums.txt
+)"
+if [ "${fleettyctl_os}" = "darwin" ]; then
+  fleettyctl_actual="$(shasum -a 256 "./${fleettyctl_asset}" | awk '{ print $1 }')"
+else
+  fleettyctl_actual="$(sha256sum "./${fleettyctl_asset}" | awk '{ print $1 }')"
+fi
+test -n "${fleettyctl_expected}"
+test "${fleettyctl_expected}" = "${fleettyctl_actual}"
+mv "./${fleettyctl_asset}" ./fleettyctl
+chmod 0755 ./fleettyctl
+
+fleettyctl validate --file fleet.json
+fleettyctl plan --file fleet.json
+fleettyctl apply --file fleet.json --yes
+fleettyctl status --file fleet.json
+```
+
+示例：
+
+```json
+{
+  "version": 1,
+  "binary": "./fleetty_linux_amd64",
+  "parallel": 4,
+  "timeout_seconds": 15,
+  "targets": [
+    {
+      "name": "gpu-1",
+      "ssh": "gpu-1-admin",
+      "role": "node",
+      "config_dir": "./config/gpu-1"
+    },
+    {
+      "name": "lab-hub",
+      "ssh": "hub-admin",
+      "role": "hub",
+      "config_dir": "./config/hub"
+    }
+  ]
+}
+```
+
+`binary` 和 `config_dir` 相对于 manifest 所在目录解析；单个目标可以用自己的 `binary` 覆盖全局值。`role` 只能为 `node` 或 `hub`。默认 `become` 为 `sudo`，使用 root SSH 时显式设置 `"become": "none"`。
+
+manifest 不接受密码字段。SSH 凭据由 OpenSSH 管理，Fleetty 管理密码、RPC 私钥等敏感内容应放在目标的 `config_dir` 中，并确保该本地目录只有部署账户可读。`plan` 会比较二进制与受管配置的 SHA-256、服务启用状态和运行状态；`apply` 只处理有差异的目标，远端安装仍由同一个原子安装器完成。
+
+能够更新 Fleetty 的部署账户等同于 root 级管理员：`become: "sudo"` 要求非交互式管理员 sudo，不能把它视为低权限授权。建议使用独立的部署身份，限制其 SSH 来源、妥善保护私钥，并且不要与日常登录账户共用。
 
 ## 连接与操作
 

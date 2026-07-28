@@ -33,6 +33,18 @@ import (
 const refreshInterval = time.Second
 
 func main() {
+	handled, err := runOperations(os.Args[1:], os.Stdout, os.Stderr)
+	if handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fleetty:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	runServer()
+}
+
+func runServer() {
 	host := envString("SSH_HOST", "0.0.0.0")
 	port := envString("SSH_PORT", "23234")
 	hostKeyPath := envString("SSH_HOST_KEY_PATH", ".ssh/fleetty_ed25519")

@@ -32,24 +32,38 @@ jobs:
       - name: Scan reachable vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
-      - name: Build Linux release assets
+      - name: Build release assets
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w \
+            -X github.com/Rhythmicc/fleetty/internal/buildinfo.Version=${GITHUB_REF_NAME} \
+            -X github.com/Rhythmicc/fleetty/internal/buildinfo.Commit=${GITHUB_SHA} \
+            -X github.com/Rhythmicc/fleetty/internal/buildinfo.BuildDate=${build_date}"
           for fleetty_arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="${fleetty_arch}" \
-              go build -trimpath -ldflags="-s -w" \
+              go build -trimpath -ldflags="${ldflags}" \
               -o "dist/fleetty_linux_${fleetty_arch}" \
               ./cmd/fleetty
           done
+          for fleettyctl_os in linux darwin; do
+            for fleettyctl_arch in amd64 arm64; do
+              CGO_ENABLED=0 GOOS="${fleettyctl_os}" GOARCH="${fleettyctl_arch}" \
+                go build -trimpath -ldflags="${ldflags}" \
+                -o "dist/fleettyctl_${fleettyctl_os}_${fleettyctl_arch}" \
+                ./cmd/fleettyctl
+            done
+          done
           cp deploy/fleetty.service dist/fleetty.service
           cp deploy/fleetty-hub.service dist/fleetty-hub.service
+          cp deploy/fleet.example.json dist/fleet.example.json
           cp deploy/hub-nodes.example.json dist/hub-nodes.example.json
           cp deploy/machine-nas.example.json dist/machine-nas.example.json
           (
             cd dist
-            sha256sum fleetty_linux_* fleetty*.service *.example.json > checksums.txt
+            sha256sum fleetty_linux_* fleettyctl_* fleetty*.service *.example.json > checksums.txt
           )
 
       - name: Create GitHub release
