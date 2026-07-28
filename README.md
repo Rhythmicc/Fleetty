@@ -1,5 +1,9 @@
 # Fleetty
 
+<p align="center">
+  <img src="docs/images/fleetty-hero.webp" alt="Fleetty 统一连接 GPU 计算节点、存储节点和集群队列" width="100%">
+</p>
+
 Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终端控制台。连接专用 SSH 端口后会直接进入终端仪表盘，不会获得服务器 shell。
 
 它以单一可执行文件运行，适合为运维人员或服务器使用者提供统一、受控的主机状态入口。
@@ -21,6 +25,35 @@ Fleetty 是一个面向计算服务器、存储节点和 Slurm 集群的 SSH 终
 - 面向 NAS 的网络、存储、Docker 和 HTTP 服务监控页面。
 
 普通监控界面可以过滤进程并查看只读详情，不需要管理密码或 root 权限。管理模式可以向当前服务账户有权管理的进程发送 `SIGTERM`，并重启 Fleetty；重启主机仅在系统级安装或用户显式配置授权命令后出现。所有危险操作都需要再次确认，PID 1 和监控程序自身不能从界面终止。
+
+## 界面预览
+
+### Machine Hub
+
+按机器类型集中展示在线状态和核心指标，节点离线时保留最后在线时间并自动重试。
+
+<a href="docs/images/fleetty-hub.webp">
+  <img src="docs/images/fleetty-hub.webp" alt="Fleetty Machine Hub 总览" width="100%">
+</a>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <strong>GPU 计算节点</strong><br>
+      CPU、内存、磁盘、网络、GPU、Slurm 节点队列和进程统一呈现。<br><br>
+      <a href="docs/images/fleetty-gpu.webp">
+        <img src="docs/images/fleetty-gpu.webp" alt="Fleetty GPU 计算节点监控页面">
+      </a>
+    </td>
+    <td width="50%" valign="top">
+      <strong>NAS 与服务节点</strong><br>
+      突出网络、挂载点、Docker、PM2 和 HTTP 服务健康状态。<br><br>
+      <a href="docs/images/fleetty-nas.webp">
+        <img src="docs/images/fleetty-nas.webp" alt="Fleetty NAS 节点监控页面">
+      </a>
+    </td>
+  </tr>
+</table>
 
 ## 系统要求
 
