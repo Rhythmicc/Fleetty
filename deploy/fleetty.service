@@ -27,6 +27,9 @@ RestartSec=2
 UMask=0077
 User=root
 Group=root
+# The system node may collect a user's PM2 state. Keep only the capabilities
+# required to drop privileges before executing that user's PM2 client.
+AmbientCapabilities=CAP_SETUID CAP_SETGID
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

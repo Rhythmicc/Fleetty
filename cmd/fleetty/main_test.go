@@ -6,12 +6,15 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -861,6 +864,45 @@ func TestPM2ProcessParser(t *testing.T) {
 	}
 	if web.Uptime != 7200 {
 		t.Fatalf("PM2 uptime = %d, want 7200", web.Uptime)
+	}
+}
+
+func TestCompactPM2Error(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "daemon", err: errPM2DaemonNotFound, want: "running PM2 daemon not found"},
+		{name: "credential", err: fmt.Errorf("fork/exec pm2: %w", syscall.EPERM), want: "cannot switch to PM2 user"},
+		{name: "missing", err: exec.ErrNotFound, want: "pm2 command not found"},
+		{name: "timeout", err: context.DeadlineExceeded, want: "pm2 check timed out"},
+		{name: "command", err: errors.New("exit status 1"), want: "pm2 jlist failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := compactPM2Error(test.err); got != test.want {
+				t.Fatalf("compactPM2Error() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNASServiceOverviewShowsCollectionErrors(t *testing.T) {
+	model := &monitorModel{
+		width: 80,
+		snapshot: monitorSnapshot{
+			DockerError: "permission denied",
+			PM2Error:    "cannot switch to PM2 user",
+		},
+	}
+	rendered := model.nasServiceOverview(model.width)
+	for _, expected := range []string{"DOCKER", "PM2", "unavailable"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("service overview missing %q\n%s", expected, rendered)
+		}
+	}
+	if strings.Contains(rendered, "PM2 not configured") {
+		t.Fatalf("PM2 collection error was shown as not configured\n%s", rendered)
 	}
 }
 

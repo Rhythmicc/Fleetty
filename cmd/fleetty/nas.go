@@ -221,9 +221,17 @@ func (m *monitorModel) nasServiceOverview(width int) string {
 			healthyHTTP++
 		}
 	}
+	dockerHealth := healthCount(healthyContainers, len(m.snapshot.Containers))
+	if m.snapshot.DockerError != "" {
+		dockerHealth = dangerStyle.Render("unavailable")
+	}
+	pm2Health := healthCount(healthyPM2, len(m.snapshot.PM2Processes))
+	if m.snapshot.PM2Error != "" {
+		pm2Health = dangerStyle.Render("unavailable")
+	}
 	content := fmt.Sprintf("%s %s   %s %s   %s %s",
-		processTitleStyle.Render("DOCKER"), healthCount(healthyContainers, len(m.snapshot.Containers)),
-		gpuTitleStyle.Render("PM2"), healthCount(healthyPM2, len(m.snapshot.PM2Processes)),
+		processTitleStyle.Render("DOCKER"), dockerHealth,
+		gpuTitleStyle.Render("PM2"), pm2Health,
 		networkTitleStyle.Render("HTTP"), healthCount(healthyHTTP, len(m.snapshot.Services)))
 	return btopPanel(width, "SERVICES", "OVERVIEW", content, processTitleStyle, colorProcessBorder)
 }

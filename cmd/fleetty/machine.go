@@ -30,6 +30,8 @@ const (
 	serviceCheckTimeout    = 700 * time.Millisecond
 )
 
+var errPM2DaemonNotFound = errors.New("running PM2 daemon not found")
+
 type machineConfig struct {
 	Name              string            `json:"name,omitempty"`
 	Profile           string            `json:"profile,omitempty"`
@@ -622,7 +624,7 @@ func readPM2Processes(userName string) ([]pm2ProcessInfo, string) {
 	}
 	executable, environment, err := findPM2DaemonEnvironment(uint32(uid))
 	if err != nil {
-		return nil, compactCommandError(err)
+		return nil, compactPM2Error(err)
 	}
 	command := exec.CommandContext(ctx, executable, "jlist")
 	command.Env = environment
@@ -633,13 +635,31 @@ func readPM2Processes(userName string) ([]pm2ProcessInfo, string) {
 	}
 	output, err := command.Output()
 	if err != nil {
-		return nil, compactCommandError(err)
+		if ctx.Err() != nil {
+			return nil, compactPM2Error(ctx.Err())
+		}
+		return nil, compactPM2Error(err)
 	}
 	processes, err := parsePM2Processes(output, time.Now())
 	if err != nil {
-		return nil, compactCommandError(err)
+		return nil, "invalid pm2 response"
 	}
 	return processes, ""
+}
+
+func compactPM2Error(err error) string {
+	switch {
+	case errors.Is(err, errPM2DaemonNotFound):
+		return "running PM2 daemon not found"
+	case errors.Is(err, syscall.EPERM):
+		return "cannot switch to PM2 user"
+	case errors.Is(err, exec.ErrNotFound):
+		return "pm2 command not found"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "pm2 check timed out"
+	default:
+		return "pm2 jlist failed"
+	}
 }
 
 func findPM2DaemonEnvironment(uid uint32) (string, []string, error) {
@@ -692,7 +712,7 @@ func findPM2DaemonEnvironment(uid uint32) (string, []string, error) {
 		}
 		return executable, environment, nil
 	}
-	return "", nil, errors.New("running PM2 daemon not found")
+	return "", nil, errPM2DaemonNotFound
 }
 
 func parseNullEnvironment(data []byte) map[string]string {

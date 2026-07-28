@@ -28,6 +28,13 @@ func TestServiceUnitsMatchScope(t *testing.T) {
 			if test.scope == "user" && strings.Contains(string(unit), "User=root") {
 				t.Fatal("user unit must not request root")
 			}
+			if test.role == "node" && test.scope == "system" &&
+				!strings.Contains(string(unit), "AmbientCapabilities=CAP_SETUID CAP_SETGID") {
+				t.Fatal("system node unit must retain capabilities required to query a user's PM2 daemon")
+			}
+			if test.scope == "user" && strings.Contains(string(unit), "AmbientCapabilities=") {
+				t.Fatal("user unit must not request ambient capabilities")
+			}
 		})
 	}
 }
