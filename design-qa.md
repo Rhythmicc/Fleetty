@@ -7,6 +7,9 @@ final result: passed
 - Selected design source: `/Users/lianhaocheng/.codex/generated_images/019f9762-176a-77d2-81f1-3bbe404ecbde/call_idAzA3SE9wVpMKfCH77NjGPX.png`
 - Implementation capture: `/tmp/fleetty-design-qa-overview.png`
 - Combined comparison: `/tmp/fleetty-design-qa-comparison.png`
+- Alignment report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-51c194ad-91a4-405b-8993-d1ebd1c245c6.png`
+- Alignment fix capture: `/tmp/fleetty-alignment-fixed.png`
+- Alignment comparison: `/tmp/fleetty-alignment-comparison.png`
 - Reference dimensions: 1586 × 992 px
 - Implementation viewport: 160 × 40 terminal cells, rasterized at 1600 × 800 px
 - State: dark theme, Linux GPU compute node, two GPUs, Slurm enabled, live network and process data
@@ -37,6 +40,7 @@ The implementation was captured from `monitorView` with deterministic realistic 
 - Initial implementation — P2: the Overview ended around row 29 in a 40-row terminal, leaving an unstructured lower area. Fixed by making the process preview consume the exact remaining viewport height and correcting section-gap row accounting.
 - Initial implementation — P2: a one-GPU Compute panel had too much unused room. Fixed by showing renderer/tiler/core details for Apple GPUs and clock/power/temperature for NVIDIA GPUs.
 - Initial implementation — P2: normal memory usage was labeled too aggressively. Fixed by reserving WATCH/HIGH/CRITICAL for 70/80/90 percent thresholds.
+- Post-release report — P2: Apple GPU metric columns were offset because ANSI-styled labels were padded by byte length instead of visible terminal width. Fixed with a shared visible-width metric row formatter; bars now begin at column 9 and values at column 28.
 - Final comparison — P0: none.
 - Final comparison — P1: none.
 - Final comparison — P2: none.

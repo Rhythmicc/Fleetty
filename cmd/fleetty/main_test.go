@@ -21,6 +21,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -1196,6 +1197,37 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 	for lineNumber, line := range strings.Split(rendered, "\n") {
 		if got := lipgloss.Width(line); got > model.width {
 			t.Fatalf("overview line %d width = %d: %q", lineNumber, got, line)
+		}
+	}
+}
+
+func TestAppleComputeActivityMetricColumnsAlign(t *testing.T) {
+	model := &monitorModel{snapshot: monitorSnapshot{GPUs: []gpuInfo{{
+		Index: 0, Name: "Apple M5 Max", Platform: "apple",
+		Utilization: 33, RendererUtilization: 33, TilerUtilization: 26,
+		MemoryUsed: 3200 << 20, MemoryTotal: 9 << 30, CoreCount: 40,
+	}}}}
+	lines := model.computeActivityPanelSpec().lines
+	if len(lines) < 5 {
+		t.Fatalf("compute activity lines = %d, want at least 5", len(lines))
+	}
+	visibleColumn := func(line, needle string) int {
+		plain := ansi.Strip(line)
+		index := strings.Index(plain, needle)
+		if index < 0 {
+			t.Fatalf("%q not found in %q", needle, plain)
+		}
+		return lipgloss.Width(plain[:index])
+	}
+	for _, line := range lines[1:5] {
+		if got := visibleColumn(line, "█"); got != 9 {
+			t.Fatalf("metric bar starts at column %d, want 9: %q", got, ansi.Strip(line))
+		}
+	}
+	for index, suffix := range []string{"33%", "UMA", "33%", "26%"} {
+		if got := visibleColumn(lines[index+1], suffix); got != 28 {
+			t.Fatalf("%s starts at column %d, want 28: %q",
+				suffix, got, ansi.Strip(lines[index+1]))
 		}
 	}
 }

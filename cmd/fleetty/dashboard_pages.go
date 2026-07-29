@@ -377,30 +377,42 @@ func (m *monitorModel) computeActivityPanelSpec() pagePanelSpec {
 				accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
 				truncate(gpu.Name, 22),
 				statusStyle.Render(status)),
-			fmt.Sprintf("%-8s %s %3.0f%%",
-				dimStyle.Render("UTIL"),
-				bar(gpu.Utilization, 18), gpu.Utilization),
+			gpuMetricLine(
+				"UTIL",
+				bar(gpu.Utilization, 18),
+				statusStyle.Render(fmt.Sprintf("%.0f%%", gpu.Utilization)),
+			),
 		)
 		memoryUsage := percent(gpu.MemoryUsed, gpu.MemoryTotal)
-		lines = append(lines, fmt.Sprintf("%-8s %s  %s",
-			dimStyle.Render("MEMORY"),
+		_, memoryStyle := gpuLoadStatus(memoryUsage)
+		lines = append(lines, gpuMetricLine(
+			"MEMORY",
 			bar(memoryUsage, 18),
-			gpuMemoryText(gpu, 1, 1)))
+			memoryStyle.Render(gpuMemoryText(gpu, 1, 1)),
+		))
 		if len(gpus) == 1 {
 			if gpu.Platform == "apple" {
+				_, rendererStyle := gpuLoadStatus(gpu.RendererUtilization)
+				_, tilerStyle := gpuLoadStatus(gpu.TilerUtilization)
 				lines = append(lines,
-					fmt.Sprintf("%-8s %s %3.0f%%", dimStyle.Render("RENDER"),
-						bar(gpu.RendererUtilization, 18), gpu.RendererUtilization),
-					fmt.Sprintf("%-8s %s %3.0f%%", dimStyle.Render("TILER"),
-						bar(gpu.TilerUtilization, 18), gpu.TilerUtilization),
+					gpuMetricLine(
+						"RENDER",
+						bar(gpu.RendererUtilization, 18),
+						rendererStyle.Render(fmt.Sprintf("%.0f%%", gpu.RendererUtilization)),
+					),
+					gpuMetricLine(
+						"TILER",
+						bar(gpu.TilerUtilization, 18),
+						tilerStyle.Render(fmt.Sprintf("%.0f%%", gpu.TilerUtilization)),
+					),
 					gpuTitleStyle.Render(fmt.Sprintf("CORES %d", gpu.CoreCount))+
 						dimStyle.Render("  ·  Unified memory architecture"),
 				)
 			} else {
 				lines = append(lines,
-					fmt.Sprintf("%-8s %d MHz", dimStyle.Render("CLOCK"), gpu.ClockMHz),
-					fmt.Sprintf("%-8s %.0f / %.0f W", dimStyle.Render("POWER"), gpu.Power, gpu.PowerLimit),
-					fmt.Sprintf("%-8s %d°C", dimStyle.Render("TEMP"), gpu.Temperature),
+					gpuMetricLine("CLOCK", "", fmt.Sprintf("%d MHz", gpu.ClockMHz)),
+					gpuMetricLine("POWER", "", fmt.Sprintf("%.0f / %.0f W", gpu.Power, gpu.PowerLimit)),
+					gpuMetricLine("TEMP", "", fmt.Sprintf("%d°C", gpu.Temperature)),
 				)
 			}
 		}
@@ -419,6 +431,17 @@ func (m *monitorModel) computeActivityPanelSpec() pagePanelSpec {
 		title: "COMPUTE ACTIVITY", meta: meta,
 		lines: lines, titleStyle: gpuTitleStyle, borderColor: colorGPUBorder,
 	}
+}
+
+func gpuMetricLine(label, visual, value string) string {
+	parts := []string{dimStyle.Render(fixedCell(label, 8, false))}
+	if visual != "" {
+		parts = append(parts, visual)
+	}
+	if value != "" {
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, " ")
 }
 
 func (m *monitorModel) networkActivityPanelSpec(width int) pagePanelSpec {
