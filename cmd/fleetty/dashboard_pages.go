@@ -281,9 +281,6 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 		if section == "" {
 			return
 		}
-		if len(sections) > 0 {
-			y++
-		}
 		sections = append(sections, section)
 		y += lipgloss.Height(section)
 	}
@@ -298,29 +295,29 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	if columns && m.height > 40 {
 		tallGrowth = m.height - 40
 	}
-	summaryGrowth := tallGrowth / 4
 	detailGrowth := tallGrowth / 2
 	detailWidth := width
 	if columns && (capabilities.Slurm || !capabilities.GPU) {
 		detailWidth = (width - 1) / 2
 	}
-	network := m.networkActivityPanelSpec(detailWidth, rich, 5+detailGrowth)
+	networkGrowth := detailGrowth
+	if columns && !capabilities.GPU {
+		networkGrowth = 2
+	}
+	network := m.networkActivityPanelSpec(detailWidth, rich, 5+networkGrowth)
 	queueRows := 4
 	if rich {
 		queueRows = 7 + detailGrowth
 	}
 	queue := m.nodeQueuePanelSpec(queueRows, detailWidth)
 	networkRendered := false
-	summaryTarget := max(pagePanelLineHeight(host), pagePanelLineHeight(compute)) + summaryGrowth
+	summaryTarget := max(pagePanelLineHeight(host), pagePanelLineHeight(compute))
 	detailTarget := max(pagePanelLineHeight(network), pagePanelLineHeight(queue))
 
 	switch {
 	case columns && capabilities.GPU:
 		appendSection(renderPagePanelRowAtLeast(width, summaryTarget, host, compute))
 	case columns:
-		if !capabilities.Slurm {
-			summaryTarget += detailGrowth
-		}
 		appendSection(renderPagePanelRowAtLeast(width, summaryTarget, host, network))
 		networkRendered = true
 	default:
@@ -346,8 +343,7 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	headerHeight := 2
 	footerHeight := 1
 	processOverhead := 3
-	gapBeforeProcesses := 1
-	availableRows := m.height - headerHeight - footerHeight - y - gapBeforeProcesses - processOverhead
+	availableRows := m.height - headerHeight - footerHeight - y - processOverhead
 	// Taller terminals grow the summary/detail regions first. Every row left in
 	// the process panel then becomes a real process row, keeping the component's
 	// information density coupled to its rendered height.
@@ -355,16 +351,13 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	processRows := processPanelRows
 	processPanel := m.renderOverviewProcesses(width, processPanelRows, processRows)
 	processY := y
-	if len(sections) > 0 {
-		processY++
-	}
 	appendSection(processPanel)
 	placement := widgetPlacement{
 		ID: dashboardPanelProcesses, X: 0, Y: processY,
 		Width: width, Height: lipgloss.Height(processPanel),
 		ProcessRows: processRows, ProcessRowStart: 2,
 	}
-	return strings.Join(sections, "\n\n"), []widgetPlacement{placement}
+	return strings.Join(sections, "\n"), []widgetPlacement{placement}
 }
 
 func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
@@ -533,6 +526,8 @@ func (m *monitorModel) computeActivityPanelSpec() pagePanelSpec {
 					gpuTitleStyle.Render(fmt.Sprintf("CORES %d", gpu.CoreCount))+
 						dimStyle.Render("  ·  Unified memory architecture"),
 					dimStyle.Render("API Metal  ·  Memory shared with the system"),
+					dimStyle.Render("ARCH Integrated Apple Silicon GPU"),
+					dimStyle.Render("SOURCE IOKit AGXAccelerator  ·  Refresh 1s"),
 				)
 			} else {
 				lines = append(lines,

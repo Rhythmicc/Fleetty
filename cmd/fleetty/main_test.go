@@ -1193,6 +1193,9 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 	if strings.Contains(rendered, "╭─ BATTERY") {
 		t.Fatalf("battery should live in the header, not a card:\n%s", rendered)
 	}
+	if strings.Contains(rendered, "\n\n") {
+		t.Fatalf("overview cards should be adjacent without blank separator rows:\n%s", rendered)
+	}
 	if got := lipgloss.Height(rendered); got != model.height {
 		t.Fatalf("overview height = %d, want %d\n%s", got, model.height, rendered)
 	}
@@ -1226,8 +1229,8 @@ func TestAppleComputeActivityMetricColumnsAlign(t *testing.T) {
 		MemoryUsed: 3200 << 20, MemoryTotal: 9 << 30, CoreCount: 40,
 	}}}}
 	lines := model.computeActivityPanelSpec().lines
-	if len(lines) < 5 {
-		t.Fatalf("compute activity lines = %d, want at least 5", len(lines))
+	if len(lines) != 10 {
+		t.Fatalf("Apple compute activity lines = %d, want 10 to match Host Health without padding", len(lines))
 	}
 	visibleColumn := func(line, needle string) int {
 		plain := ansi.Strip(line)
@@ -1327,7 +1330,7 @@ func TestDesignedOverviewReflowsWithoutGPUOrSlurm(t *testing.T) {
 }
 
 func TestDesignedOverviewBindsProcessRowsToPanelHeight(t *testing.T) {
-	processes := make([]processInfo, 24)
+	processes := make([]processInfo, 64)
 	for index := range processes {
 		processes[index] = processInfo{
 			PID: index + 100, User: "worker", State: "S",

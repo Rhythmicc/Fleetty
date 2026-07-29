@@ -13,9 +13,13 @@ final result: passed
 - Process-height report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-41c702f2-5c78-4b90-a567-39651499529d.png`
 - Process-height implementation capture: `/tmp/fleetty-process-height.png`
 - Process-height focused comparison: `/tmp/fleetty-process-height-comparison.png`
+- Spacing report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-7ca65fcc-7985-4614-a857-02604983d368.png`
+- Spacing implementation capture: `/tmp/fleetty-spacing-clean.png`
+- Spacing focused comparison: `/tmp/fleetty-spacing-comparison.png`
 - Reference dimensions: 1586 × 992 px
 - Implementation viewport: 160 × 40 terminal cells, rasterized at 1807 × 956 px with one non-rendered guard column
 - Process-height viewport: 160 × 58 terminal cells; report crop 744 × 686 px, implementation 1807 × 1370 px, focused comparison normalized to two 744 × 686 regions
+- Spacing viewport: 160 × 55 terminal cells; report crop 2048 × 574 px, implementation 1807 × 1301 px, focused upper-panel comparison 1807 × 813 px
 - State: dark theme, Linux GPU compute node, two GPUs, Slurm enabled, live network and process data
 
 The implementation was captured from `monitorView` with deterministic realistic metrics. The ANSI output contains exactly 40 rendered terminal rows. The reference and implementation were placed in one side-by-side comparison image before judging visual differences.
@@ -53,6 +57,8 @@ The implementation was captured from `monitorView` with deterministic realistic 
 - Tall-window report — P1: capping the process preview at ten rows left unused terminal rows below the footer. Fixed with height-aware panel growth and separate process panel/visible-row counts, so the shell fills the viewport without turning Overview back into a process-first page.
 - Process-density report — P2: the process panel could contain blank rows after reaching a fixed ten-item preview. Fixed by deriving visible and interactive process rows directly from the allocated panel height; keyboard and mouse bounds now grow with the component.
 - Process-density post-fix evidence: the 160×58 capture renders 23 process rows between the table header and bottom border with no unused internal rows. The focused comparison confirms the reported blank region is replaced by real process entries while preserving the same panel and footer structure.
+- Spacing report — P2: tall layouts padded Host Health and Compute Activity beyond their content and inserted an empty terminal row between every Overview section. Removed summary-height growth and section separators; Apple Compute now contributes architecture and IOKit sampling metadata so its ten content rows naturally match Host Health instead of relying on blank padding.
+- Spacing post-fix evidence: the 160×55 focused comparison shows both upper cards ending immediately after meaningful content, with Network and Processes borders directly adjacent to the preceding card row. No `\n\n` separator remains in the Overview output.
 - Final comparison — P0: none.
 - Final comparison — P1: none.
 - Final comparison — P2: none.
