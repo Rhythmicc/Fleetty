@@ -119,52 +119,52 @@ func runServer() {
 // terminal programs. Every SSH session owns one small collector and Bubble Tea
 // program, so the monitor has no daemon process besides this Go binary.
 type monitorModel struct {
-	backend          monitorBackend
-	admin            *adminController
-	user             string
-	remote           string
-	nodeName         string
-	profile          string
-	width            int
-	height           int
-	snapshot         monitorSnapshot
-	loadErr          error
-	screen           screen
-	password         string
-	filter           string
-	filtering        bool
-	cursor           int
-	processOffset    int
-	monitorCursor    int
-	monitorOffset    int
-	queueOffset      int
-	selectedAction   *adminAction
-	selectedProcess  *processInfo
-	processDetail    *processDetail
-	processReadOnly  bool
-	detailErr        error
-	status           string
-	busy             bool
-	adminCredential  string
-	authFailures     int
-	authLockedUntil  time.Time
-	collecting       bool
-	cpuHistory       []float64
-	networkRXHistory []float64
-	networkTXHistory []float64
-	colorMode        colorMode
-	slurmQueue       *nodeSlurmQueue
-	monitorFocus     monitorPanelFocus
-	queueHeightDelta int
-	queuePanelY      int
-	processPanelY    int
-	processRowY      int
-	monitorRows      int
-	panelLayout      panelLayoutConfig
-	layoutPath       string
-	layoutCursor     int
-	layoutButtonY    int
-	layoutFirstRowY  int
+	backend           monitorBackend
+	admin             *adminController
+	user              string
+	remote            string
+	nodeName          string
+	profile           string
+	width             int
+	height            int
+	snapshot          monitorSnapshot
+	loadErr           error
+	screen            screen
+	password          string
+	filter            string
+	filtering         bool
+	cursor            int
+	processOffset     int
+	monitorCursor     int
+	monitorOffset     int
+	queueOffset       int
+	selectedAction    *adminAction
+	selectedProcess   *processInfo
+	processDetail     *processDetail
+	processReadOnly   bool
+	detailErr         error
+	status            string
+	busy              bool
+	adminCredential   string
+	authFailures      int
+	authLockedUntil   time.Time
+	collecting        bool
+	cpuHistory        []float64
+	networkRXHistory  []float64
+	networkTXHistory  []float64
+	colorMode         colorMode
+	slurmQueue        *nodeSlurmQueue
+	monitorFocus      monitorPanelFocus
+	monitorRows       int
+	dashboardScroll   int
+	dashboardContent  int
+	dashboardViewport int
+	widgetPlacements  []widgetPlacement
+	panelLayout       panelLayoutConfig
+	layoutPath        string
+	layoutCursor      int
+	layoutButtonY     int
+	layoutFirstRowY   int
 }
 
 type monitorPanelFocus int
@@ -347,6 +347,15 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
 		}
+	case tea.MouseWheelMsg:
+		if m.screen == screenMonitor {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				m.adjustDashboardScroll(-3)
+			case tea.MouseWheelDown:
+				m.adjustDashboardScroll(3)
+			}
+		}
 	case tea.KeyPressMsg:
 		return m, m.handleKey(msg)
 	case tea.PasteMsg:
@@ -431,13 +440,23 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 			m.status = "Focused " + m.monitorFocus.label() + "."
 		case "+", "=":
-			m.adjustFocusedPanelHeight(1)
+			m.adjustFocusedWidgetSize(1)
 		case "-", "_":
-			m.adjustFocusedPanelHeight(-1)
+			m.adjustFocusedWidgetSize(-1)
 		case "up", "k":
 			m.moveMonitorSelection(-1)
 		case "down", "j":
 			m.moveMonitorSelection(1)
+		case "pgup":
+			m.adjustDashboardScroll(-max(3, m.dashboardViewport/2))
+		case "pgdown":
+			m.adjustDashboardScroll(max(3, m.dashboardViewport/2))
+		case "home":
+			m.dashboardScroll = 0
+			m.status = "Dashboard scrolled to the first widget."
+		case "end":
+			m.dashboardScroll = max(0, m.dashboardContent-m.dashboardViewport)
+			m.status = "Dashboard scrolled to the last widget."
 		case "enter":
 			if m.effectiveMonitorFocus() == monitorFocusProcesses &&
 				!m.dashboardPanelCollapsed(dashboardPanelProcesses) {
@@ -581,6 +600,10 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.moveSelectedLayoutPanel(-1)
 		case "]", "J", "shift+down", "ctrl+down":
 			m.moveSelectedLayoutPanel(1)
+		case "-", "_", "left":
+			m.resizeSelectedLayoutPanel(-1)
+		case "+", "=", "right":
+			m.resizeSelectedLayoutPanel(1)
 		case " ", "space", "enter":
 			m.toggleSelectedLayoutPanel()
 		case "s":
@@ -628,19 +651,23 @@ func (m *monitorModel) appendFilter(text string) {
 
 func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 	if m.screen == screenMonitor {
-		if m.queuePanelY >= 0 && y >= m.queuePanelY && y < m.processPanelY {
+		if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelNodeQueue); ok &&
+			x >= placement.X && x < placement.X+placement.Width &&
+			y >= screenY && y < screenY+placement.Height {
 			m.monitorFocus = monitorFocusQueue
 			m.status = "Focused node queue. Use +/- to resize and ↑/↓ to scroll."
 			return nil
 		}
-		if y >= m.processPanelY && y < m.processRowY {
+		if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelProcesses); ok &&
+			x >= placement.X && x < placement.X+placement.Width &&
+			y >= screenY && y < screenY+placement.Height {
 			m.monitorFocus = monitorFocusProcesses
-			m.status = "Focused processes. Use +/- to resize."
+			processRowY := screenY + 3
+			if y >= processRowY && y < processRowY+placement.ProcessRows {
+				return m.openReadOnlyProcess(m.monitorOffset + y - processRowY)
+			}
+			m.status = "Focused processes. Use ↑/↓ to select or Enter for details."
 			return nil
-		}
-		if y >= m.processRowY && y < m.processRowY+m.monitorRows {
-			m.monitorFocus = monitorFocusProcesses
-			return m.openReadOnlyProcess(m.monitorOffset + y - m.processRowY)
 		}
 	}
 	if m.screen == screenAdmin {
@@ -696,7 +723,7 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 		}
 		if y >= m.layoutFirstRowY && y < m.layoutFirstRowY+len(m.panelLayout.Panels) {
 			m.layoutCursor = y - m.layoutFirstRowY
-			m.status = "Panel selected. Press Space to collapse or expand."
+			m.status = "Widget selected. Use +/- to resize or Space to hide."
 		}
 	}
 	return nil
@@ -768,29 +795,12 @@ func (m *monitorModel) effectiveMonitorFocus() monitorPanelFocus {
 	return m.monitorFocus
 }
 
-func (m *monitorModel) adjustFocusedPanelHeight(delta int) {
-	if m.slurmQueue == nil || m.dashboardPanelCollapsed(dashboardPanelNodeQueue) {
-		m.status = "This dashboard has no resizable node queue."
-		return
+func (m *monitorModel) adjustFocusedWidgetSize(delta int) {
+	id := dashboardPanelProcesses
+	if m.effectiveMonitorFocus() == monitorFocusQueue {
+		id = dashboardPanelNodeQueue
 	}
-	if m.dashboardPanelCollapsed(dashboardPanelProcesses) {
-		m.status = "Expand the process panel before resizing the shared space."
-		return
-	}
-	if m.effectiveMonitorFocus() == monitorFocusProcesses {
-		delta = -delta
-	}
-	before := m.slurmQueueRows()
-	m.queueHeightDelta += delta
-	m.queueHeightDelta = min(max(-10, m.queueHeightDelta), 10)
-	after := m.slurmQueueRows()
-	if before == after {
-		m.queueHeightDelta -= delta
-		m.status = "Panel height limit reached."
-		return
-	}
-	m.clampQueueOffset(after)
-	m.status = fmt.Sprintf("Node queue height: %d rows; process area adjusts automatically.", after)
+	m.resizeDashboardWidget(id, delta)
 }
 
 func (m *monitorModel) moveMonitorSelection(delta int) {
@@ -798,7 +808,7 @@ func (m *monitorModel) moveMonitorSelection(delta int) {
 		if m.slurmQueue == nil || len(m.slurmQueue.Jobs) == 0 {
 			return
 		}
-		rows := m.slurmQueueRows()
+		rows := widgetTableRows(m.dashboardPanelSize(dashboardPanelNodeQueue), m.height)
 		m.queueOffset = min(max(0, m.queueOffset+delta), max(0, len(m.slurmQueue.Jobs)-rows))
 		m.status = fmt.Sprintf("Node queue rows %d–%d of %d.",
 			m.queueOffset+1, min(len(m.slurmQueue.Jobs), m.queueOffset+rows), len(m.slurmQueue.Jobs))
@@ -978,124 +988,7 @@ func (m *monitorModel) monitorView() string {
 	if m.profile == machineProfileNAS || m.snapshot.Profile == machineProfileNAS {
 		return m.nasView()
 	}
-	m.ensurePanelLayout()
-	showGPU := m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU ||
-		len(m.snapshot.GPUs) > 0
-	gpuCount := len(m.snapshot.GPUs)
-	if !showGPU {
-		gpuCount = -1
-	}
-	metricCount := 4
-	if m.snapshot.Battery != nil {
-		metricCount++
-	}
-	layout := newDashboardLayoutForMetrics(m.width, m.height, gpuCount, showGPU && m.snapshot.GPUError != "", metricCount)
-	w := layout.width
-	header := dashboardHeader(w, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
-	if m.snapshot.CollectedAt.IsZero() {
-		return strings.Join([]string{header, "", panelStyle(w).Render("Collecting system metrics…")}, "\n")
-	}
-
-	metrics := m.systemMetricCards()
-	if battery := m.snapshot.Battery; battery != nil {
-		detail := battery.PowerSource
-		if battery.TimeRemaining != "" {
-			if detail != "" {
-				detail += " · "
-			}
-			detail += battery.TimeRemaining
-		}
-		if detail == "" {
-			detail = "power source unavailable"
-		}
-		metrics = append(metrics, metricCard{
-			title: "BATTERY", value: fmt.Sprintf("%.0f%%  %s", battery.Percent, strings.ToUpper(battery.Status)), detail: detail,
-			visual: metricVisualBattery, usage: battery.Percent,
-			titleStyle: batteryTitleStyle, borderColor: colorBatteryBorder,
-		})
-	}
-	footer := m.renderMonitorFooter(w)
-	if m.loadErr != nil {
-		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
-	}
-
-	panels := m.orderedDashboardPanels()
-	rendered := make(map[dashboardPanelID]string, len(panels))
-	autoCompacted := make(map[dashboardPanelID]bool)
-	fixedHeight := lipgloss.Height(header) + lipgloss.Height(footer)
-	processExpanded := false
-	for _, panel := range panels {
-		if panel.ID == dashboardPanelProcesses && !panel.Collapsed {
-			processExpanded = true
-			continue
-		}
-		content := m.renderFixedDashboardPanel(panel, metrics, layout)
-		rendered[panel.ID] = content
-		fixedHeight += lipgloss.Height(content)
-	}
-
-	layout.processRows = 0
-	if processExpanded {
-		processBaseHeight := 4
-		if len(m.filteredProcesses()) == 0 {
-			processBaseHeight++
-		}
-		switch {
-		case fixedHeight+processBaseHeight <= layout.height:
-			layout.processRows = max(0, layout.height-fixedHeight-processBaseHeight)
-			m.clampMonitorProcessCursor(layout.processRows)
-			rendered[dashboardPanelProcesses] = m.processPanel(layout)
-		case fixedHeight < layout.height:
-			rendered[dashboardPanelProcesses] = renderAutoCompactDashboardPanel(
-				layout.width, "Processes", m.dashboardPanelSummary(dashboardPanelProcesses))
-			autoCompacted[dashboardPanelProcesses] = true
-		default:
-			for _, candidate := range []dashboardPanelID{
-				dashboardPanelOverview, dashboardPanelGPU, dashboardPanelNodeQueue,
-			} {
-				if fixedHeight < layout.height {
-					break
-				}
-				if rendered[candidate] == "" || m.dashboardPanelCollapsed(candidate) {
-					continue
-				}
-				descriptor, _ := dashboardPanelByID(candidate)
-				compact := renderAutoCompactDashboardPanel(layout.width, descriptor.Label, m.dashboardPanelSummary(candidate))
-				fixedHeight += lipgloss.Height(compact) - lipgloss.Height(rendered[candidate])
-				rendered[candidate] = compact
-				autoCompacted[candidate] = true
-			}
-			if fixedHeight < layout.height {
-				rendered[dashboardPanelProcesses] = renderAutoCompactDashboardPanel(
-					layout.width, "Processes", m.dashboardPanelSummary(dashboardPanelProcesses))
-				autoCompacted[dashboardPanelProcesses] = true
-			}
-		}
-	}
-
-	m.queuePanelY, m.processPanelY, m.processRowY = -1, -1, -1
-	m.monitorRows = layout.processRows
-	sections := []string{header}
-	currentY := lipgloss.Height(header)
-	for _, panel := range panels {
-		content := rendered[panel.ID]
-		if content == "" {
-			continue
-		}
-		if !panel.Collapsed && !autoCompacted[panel.ID] {
-			switch panel.ID {
-			case dashboardPanelNodeQueue:
-				m.queuePanelY = currentY
-			case dashboardPanelProcesses:
-				m.processPanelY = currentY
-				m.processRowY = currentY + 3
-			}
-		}
-		sections = append(sections, content)
-		currentY += lipgloss.Height(content)
-	}
-	sections = append(sections, footer)
-	return strings.Join(sections, "\n")
+	return m.widgetDashboardView()
 }
 
 func (m *monitorModel) systemMetricCards() []metricCard {
@@ -1122,52 +1015,6 @@ func (m *monitorModel) systemMetricCards() []metricCard {
 			visual: metricVisualNetwork, primaryHistory: m.networkRXHistory, secondaryHistory: m.networkTXHistory,
 			titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
 		},
-	}
-}
-
-func (m *monitorModel) renderFixedDashboardPanel(panel dashboardPanelPreference, metrics []metricCard, layout dashboardLayout) string {
-	descriptor, ok := dashboardPanelByID(panel.ID)
-	if !ok {
-		return ""
-	}
-	if panel.Collapsed {
-		return renderCollapsedDashboardPanel(layout.width, descriptor.Label, m.dashboardPanelSummary(panel.ID))
-	}
-	switch panel.ID {
-	case dashboardPanelOverview:
-		return renderMetricRows(metrics, layout)
-	case dashboardPanelGPU:
-		return m.gpuPanel(layout)
-	case dashboardPanelNodeQueue:
-		return m.slurmNodePanel(layout.width, m.slurmQueueRows())
-	case dashboardPanelProcesses:
-		return renderCollapsedDashboardPanel(layout.width, descriptor.Label, m.dashboardPanelSummary(panel.ID))
-	default:
-		return ""
-	}
-}
-
-func (m *monitorModel) dashboardPanelSummary(id dashboardPanelID) string {
-	switch id {
-	case dashboardPanelOverview:
-		return fmt.Sprintf("CPU %.0f%% · MEM %.0f%% · DISK %.0f%%",
-			m.snapshot.CPUPercent,
-			percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal),
-			percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal))
-	case dashboardPanelGPU:
-		if m.snapshot.GPUError != "" {
-			return "unavailable"
-		}
-		return fmt.Sprintf("%d devices", len(m.snapshot.GPUs))
-	case dashboardPanelNodeQueue:
-		if m.slurmQueue == nil {
-			return "unavailable"
-		}
-		return fmt.Sprintf("%d jobs", len(m.slurmQueue.Jobs))
-	case dashboardPanelProcesses:
-		return fmt.Sprintf("%d processes", len(m.filteredProcesses()))
-	default:
-		return ""
 	}
 }
 
@@ -2419,11 +2266,12 @@ func (m *monitorModel) renderMonitorFooter(width int) string {
 	if m.slurmQueue != nil {
 		hints = append(hints,
 			keyHint("tab", "focus"),
-			keyHint("+/-", "height"),
+			keyHint("+/-", "size"),
 		)
 	}
 	hints = append(hints,
 		keyHint("l", "layout"),
+		keyHint("pg↑↓", "widgets"),
 		keyHint("↑↓", "select"),
 		keyHint("enter", "details"),
 		keyHint("/", "filter"),

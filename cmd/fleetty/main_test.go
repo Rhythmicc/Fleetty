@@ -518,7 +518,7 @@ func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
 		t.Fatalf("node queue order/classification = %#v", queue.Jobs)
 	}
 	detail := &monitorModel{width: 120, height: 42, slurmQueue: queue}
-	panel := detail.slurmNodePanel(120, detail.slurmQueueRows())
+	panel := detail.slurmNodePanel(120, widgetTableRows(widgetSizeLarge, detail.height))
 	for _, expected := range []string{"NODE QUEUE", "WEIGHT", "QOS", "urgent", "70000", "RUNNING", "NEXT", "QUEUED", "active", "first", "later"} {
 		if !strings.Contains(panel, expected) {
 			t.Fatalf("node queue panel missing %q\n%s", expected, panel)
@@ -1020,10 +1020,11 @@ func TestMacBatteryCardIsResponsive(t *testing.T) {
 	}
 	for _, size := range []struct{ width, height int }{{160, 40}, {100, 30}, {60, 24}} {
 		model.width, model.height = size.width, size.height
-		rendered := model.monitorView()
-		if !strings.Contains(rendered, "BATTERY") || !strings.Contains(rendered, "57%") {
-			t.Fatalf("%dx%d battery card missing:\n%s", size.width, size.height, rendered)
+		grid, _ := model.renderWidgetGrid(usableWidth(model.width))
+		if !strings.Contains(grid, "BATTERY") || !strings.Contains(grid, "57%") {
+			t.Fatalf("%dx%d battery widget missing:\n%s", size.width, size.height, grid)
 		}
+		rendered := model.monitorView()
 		if got := lipgloss.Height(rendered); got > size.height {
 			t.Fatalf("%dx%d battery view height = %d", size.width, size.height, got)
 		}
@@ -1051,11 +1052,15 @@ func TestAppleGPUAndBatteryFitSmallTerminal(t *testing.T) {
 			Processes: []processInfo{{PID: 42, User: "alice", State: "R", Command: "metal-worker"}},
 		},
 	}
-	rendered := model.monitorView()
-	for _, expected := range []string{"GPU", "Apple M5 Max", "RENDER", "TILER", "BATTERY", "PROCESSES", "AUTO COMPACT"} {
-		if !strings.Contains(rendered, expected) {
-			t.Fatalf("small Apple dashboard missing %q:\n%s", expected, rendered)
+	grid, _ := model.renderWidgetGrid(usableWidth(model.width))
+	for _, expected := range []string{"GPU", "Apple M5 Max", "RENDER", "TILER", "BATTERY", "PROCESSES"} {
+		if !strings.Contains(grid, expected) {
+			t.Fatalf("small Apple widget grid missing %q:\n%s", expected, grid)
 		}
+	}
+	rendered := model.monitorView()
+	if !strings.Contains(rendered, "↕") {
+		t.Fatalf("small Apple dashboard did not expose widget scrolling:\n%s", rendered)
 	}
 	if got := lipgloss.Height(rendered); got > model.height {
 		t.Fatalf("small Apple dashboard height = %d, want <= %d\n%s", got, model.height, rendered)
@@ -1064,6 +1069,42 @@ func TestAppleGPUAndBatteryFitSmallTerminal(t *testing.T) {
 		if got := lipgloss.Width(line); got > model.width {
 			t.Fatalf("small Apple dashboard line %d width = %d\n%q", lineNumber, got, line)
 		}
+	}
+}
+
+func TestWidgetDashboardBreakpointsAndScrolling(t *testing.T) {
+	for _, test := range []struct {
+		width, columns int
+	}{{60, 1}, {80, 2}, {120, 3}, {160, 4}} {
+		if got := widgetGridColumns(test.width); got != test.columns {
+			t.Fatalf("widgetGridColumns(%d) = %d, want %d", test.width, got, test.columns)
+		}
+	}
+
+	model := &monitorModel{
+		screen: screenMonitor, width: 60, height: 14,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1,
+			Processes: []processInfo{{PID: 42, User: "alice", State: "R", Command: "worker"}},
+		},
+	}
+	_ = model.monitorView()
+	if model.dashboardContent <= model.dashboardViewport {
+		t.Fatalf("test dashboard unexpectedly fits: content=%d viewport=%d",
+			model.dashboardContent, model.dashboardViewport)
+	}
+	_, _ = model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if model.dashboardScroll != 3 {
+		t.Fatalf("mouse wheel scroll = %d, want 3", model.dashboardScroll)
+	}
+	model.handleKey(testKey("end"))
+	wantEnd := model.dashboardContent - model.dashboardViewport
+	if model.dashboardScroll != wantEnd {
+		t.Fatalf("end scroll = %d, want %d", model.dashboardScroll, wantEnd)
+	}
+	model.handleKey(testKey("home"))
+	if model.dashboardScroll != 0 {
+		t.Fatalf("home scroll = %d, want 0", model.dashboardScroll)
 	}
 }
 
@@ -1426,18 +1467,22 @@ func TestReadOnlyDashboardResizesPanelsAndOpensProcessDetails(t *testing.T) {
 			Cluster: "Test Cluster", Node: "gpu01", CollectedAt: time.Now(), Jobs: jobs,
 		},
 	}
-	initialRows := m.slurmQueueRows()
-	if initialRows != 6 {
-		t.Fatalf("default node queue rows = %d, want 6", initialRows)
+	m.ensurePanelLayout()
+	if got := m.panelLayout.Panels[6].Size; got != widgetSizeLarge {
+		t.Fatalf("default node queue size = %s, want large", got)
+	}
+	m.handleKey(testKey("-"))
+	if got := m.panelLayout.Panels[6].Size; got != widgetSizeMedium {
+		t.Fatalf("focused queue did not shrink: size=%s", got)
 	}
 	m.handleKey(testKey("+"))
-	if got := m.slurmQueueRows(); got != initialRows+1 {
-		t.Fatalf("focused queue did not grow: rows=%d", got)
+	if got := m.panelLayout.Panels[6].Size; got != widgetSizeLarge {
+		t.Fatalf("focused queue did not grow: size=%s", got)
 	}
 	m.handleKey(testKey("tab"))
-	m.handleKey(testKey("+"))
-	if got := m.slurmQueueRows(); got != initialRows {
-		t.Fatalf("growing focused process panel should shrink queue: rows=%d", got)
+	m.handleKey(testKey("-"))
+	if got := m.panelLayout.Panels[7].Size; got != widgetSizeMedium {
+		t.Fatalf("focused process widget did not shrink: size=%s", got)
 	}
 
 	for _, size := range []struct{ width, height int }{{160, 54}, {120, 48}, {100, 36}, {60, 24}} {
@@ -1454,10 +1499,11 @@ func TestReadOnlyDashboardResizesPanelsAndOpensProcessDetails(t *testing.T) {
 	}
 	m.width, m.height = 120, 48
 	_ = m.monitorView()
-	if m.processRowY <= m.processPanelY || m.monitorRows < 1 {
-		t.Fatalf("invalid process hit area: panel=%d row=%d rows=%d", m.processPanelY, m.processRowY, m.monitorRows)
+	placement, processPanelY, ok := m.visibleWidgetPlacement(dashboardPanelProcesses)
+	if !ok || placement.ProcessRows < 1 {
+		t.Fatalf("invalid process hit area: placement=%#v y=%d", placement, processPanelY)
 	}
-	command := m.handleClick(4, m.processRowY)
+	command := m.handleClick(placement.X+2, processPanelY+3)
 	if command == nil || m.screen != screenProcessDetail || !m.processReadOnly ||
 		m.selectedProcess == nil || m.selectedProcess.PID != processes[0].PID {
 		t.Fatalf("read-only click selection failed: screen=%v readonly=%t process=%#v", m.screen, m.processReadOnly, m.selectedProcess)
@@ -1505,8 +1551,10 @@ func TestPanelLayoutPersistenceNormalizesRegistry(t *testing.T) {
 		t.Fatalf("normalized panels = %#v", loaded.Panels)
 	}
 	if loaded.Panels[0].ID != dashboardPanelProcesses ||
-		loaded.Panels[1].ID != dashboardPanelOverview ||
-		!loaded.Panels[1].Collapsed {
+		loaded.Panels[0].Size != widgetSizeLarge ||
+		loaded.Panels[1].ID != dashboardPanelCPU ||
+		!loaded.Panels[1].Collapsed ||
+		loaded.Panels[1].Size != widgetSizeSmall {
 		t.Fatalf("saved order or collapsed state lost: %#v", loaded.Panels)
 	}
 	for _, panel := range loaded.Panels {
@@ -1531,20 +1579,25 @@ func TestReadOnlyLayoutEditorReordersCollapsesAndSaves(t *testing.T) {
 		t.Fatalf("layout shortcut opened screen %v", m.screen)
 	}
 	view := m.View().Content
-	if !strings.Contains(view, "DASHBOARD PANELS") || !strings.Contains(view, "SYSTEM OVERVIEW") {
+	if !strings.Contains(view, "DASHBOARD PANELS") ||
+		!strings.Contains(view, "CPU") || !strings.Contains(view, "NETWORK") {
 		t.Fatalf("layout editor missing registry rows:\n%s", view)
 	}
 
 	m.handleKey(testKey("down"))
-	if m.selectedLayoutPanel().ID != dashboardPanelGPU {
+	if m.selectedLayoutPanel().ID != dashboardPanelMemory {
 		t.Fatalf("selected panel = %#v", m.selectedLayoutPanel())
+	}
+	m.handleKey(testKey("+"))
+	if m.selectedLayoutPanel().Size != widgetSizeMedium {
+		t.Fatalf("plus did not enlarge selected widget: %#v", m.selectedLayoutPanel())
 	}
 	m.handleKey(testKey("space"))
 	if !m.selectedLayoutPanel().Collapsed {
-		t.Fatal("space did not collapse selected panel")
+		t.Fatal("space did not hide selected widget")
 	}
 	m.handleKey(testKey("K"))
-	if m.panelLayout.Panels[0].ID != dashboardPanelGPU || m.layoutCursor != 0 {
+	if m.panelLayout.Panels[0].ID != dashboardPanelMemory || m.layoutCursor != 0 {
 		t.Fatalf("panel was not moved up: %#v", m.panelLayout.Panels)
 	}
 	m.handleKey(testKey("s"))
@@ -1552,7 +1605,8 @@ func TestReadOnlyLayoutEditorReordersCollapsesAndSaves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Panels[0].ID != dashboardPanelGPU || !loaded.Panels[0].Collapsed {
+	if loaded.Panels[0].ID != dashboardPanelMemory ||
+		!loaded.Panels[0].Collapsed || loaded.Panels[0].Size != widgetSizeMedium {
 		t.Fatalf("saved layout = %#v", loaded.Panels)
 	}
 	m.handleKey(testKey("esc"))
@@ -1578,11 +1632,11 @@ func TestLayoutEditorSupportsMouseAndNarrowTerminals(t *testing.T) {
 		}
 	}
 	m.handleClick(3, m.layoutFirstRowY+2)
-	if m.layoutCursor != 2 || m.selectedLayoutPanel().ID != dashboardPanelNodeQueue {
+	if m.layoutCursor != 2 || m.selectedLayoutPanel().ID != dashboardPanelDisk {
 		t.Fatalf("mouse selected panel = %#v at cursor %d", m.selectedLayoutPanel(), m.layoutCursor)
 	}
 	m.handleClick(1, m.layoutButtonY)
-	if m.layoutCursor != 1 || m.panelLayout.Panels[1].ID != dashboardPanelNodeQueue {
+	if m.layoutCursor != 1 || m.panelLayout.Panels[1].ID != dashboardPanelDisk {
 		t.Fatalf("mouse move-up button did not reorder panels: %#v", m.panelLayout.Panels)
 	}
 }
@@ -1591,10 +1645,14 @@ func TestDashboardPanelOrderAndCollapseAffectRendering(t *testing.T) {
 	m := &monitorModel{
 		width: 100, height: 30, profile: machineProfileGeneral,
 		panelLayout: panelLayoutConfig{Panels: []dashboardPanelPreference{
-			{ID: dashboardPanelProcesses},
-			{ID: dashboardPanelOverview, Collapsed: true},
-			{ID: dashboardPanelGPU},
-			{ID: dashboardPanelNodeQueue},
+			{ID: dashboardPanelProcesses, Size: widgetSizeLarge},
+			{ID: dashboardPanelCPU, Collapsed: true, Size: widgetSizeSmall},
+			{ID: dashboardPanelMemory, Size: widgetSizeSmall},
+			{ID: dashboardPanelDisk, Collapsed: true, Size: widgetSizeSmall},
+			{ID: dashboardPanelNetwork, Collapsed: true, Size: widgetSizeMedium},
+			{ID: dashboardPanelBattery, Collapsed: true, Size: widgetSizeSmall},
+			{ID: dashboardPanelGPU, Collapsed: true, Size: widgetSizeLarge},
+			{ID: dashboardPanelNodeQueue, Collapsed: true, Size: widgetSizeLarge},
 		}},
 		snapshot: monitorSnapshot{
 			CollectedAt: time.Now(), Profile: machineProfileGeneral,
@@ -1602,20 +1660,22 @@ func TestDashboardPanelOrderAndCollapseAffectRendering(t *testing.T) {
 			Processes: []processInfo{{PID: 42, User: "alice", State: "R", Command: "trainer"}},
 		},
 	}
-	rendered := m.monitorView()
+	rendered, placements := m.renderWidgetGrid(usableWidth(m.width))
 	processIndex := strings.Index(rendered, "PROCESSES")
-	overviewIndex := strings.Index(rendered, "SYSTEM OVERVIEW")
-	if processIndex < 0 || overviewIndex < 0 || processIndex >= overviewIndex {
+	memoryIndex := strings.Index(rendered, "MEMORY")
+	if processIndex < 0 || memoryIndex < 0 || processIndex >= memoryIndex {
 		t.Fatalf("custom panel order not applied:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "COLLAPSED") {
-		t.Fatalf("collapsed panel summary missing:\n%s", rendered)
+	if len(placements) != 2 ||
+		placements[0].ID != dashboardPanelProcesses ||
+		placements[1].ID != dashboardPanelMemory {
+		t.Fatalf("hidden widgets remained in grid: %#v", placements)
 	}
-	if strings.Contains(rendered, "GPU") {
-		t.Fatalf("unavailable GPU panel should be capability-hidden:\n%s", rendered)
+	if placements[0].Width != usableWidth(m.width) {
+		t.Fatalf("large process widget width = %d, want %d", placements[0].Width, usableWidth(m.width))
 	}
-	if got := lipgloss.Height(rendered); got > m.height {
-		t.Fatalf("custom layout height = %d, want <= %d", got, m.height)
+	if placements[1].Width >= usableWidth(m.width) {
+		t.Fatalf("small memory widget unexpectedly spans the full grid: %#v", placements[1])
 	}
 }
 

@@ -13,35 +13,71 @@ import (
 )
 
 const (
-	panelLayoutVersion     = 1
+	panelLayoutVersion     = 2
 	maxPanelLayoutFileSize = 64 << 10
 )
 
 type dashboardPanelID string
 
 const (
-	dashboardPanelOverview  dashboardPanelID = "overview"
+	dashboardPanelOverview  dashboardPanelID = "overview" // legacy v1 group
+	dashboardPanelCPU       dashboardPanelID = "cpu"
+	dashboardPanelMemory    dashboardPanelID = "memory"
+	dashboardPanelDisk      dashboardPanelID = "disk"
+	dashboardPanelNetwork   dashboardPanelID = "network"
+	dashboardPanelBattery   dashboardPanelID = "battery"
 	dashboardPanelGPU       dashboardPanelID = "gpu"
 	dashboardPanelNodeQueue dashboardPanelID = "node_queue"
 	dashboardPanelProcesses dashboardPanelID = "processes"
+)
+
+type widgetSize string
+
+const (
+	widgetSizeSmall  widgetSize = "small"
+	widgetSizeMedium widgetSize = "medium"
+	widgetSizeLarge  widgetSize = "large"
 )
 
 type dashboardPanelDescriptor struct {
 	ID          dashboardPanelID
 	Label       string
 	Description string
+	DefaultSize widgetSize
 	Available   func(*monitorModel) bool
 }
 
 var dashboardPanelRegistry = []dashboardPanelDescriptor{
 	{
-		ID: dashboardPanelOverview, Label: "System overview",
-		Description: "CPU, memory, disk, network, and platform metrics",
-		Available:   func(*monitorModel) bool { return true },
+		ID: dashboardPanelCPU, Label: "CPU",
+		Description: "Processor utilization, load, and recent history",
+		DefaultSize: widgetSizeSmall, Available: func(*monitorModel) bool { return true },
+	},
+	{
+		ID: dashboardPanelMemory, Label: "Memory",
+		Description: "Memory utilization and available capacity",
+		DefaultSize: widgetSizeSmall, Available: func(*monitorModel) bool { return true },
+	},
+	{
+		ID: dashboardPanelDisk, Label: "Disk",
+		Description: "Root filesystem utilization and capacity",
+		DefaultSize: widgetSizeSmall, Available: func(*monitorModel) bool { return true },
+	},
+	{
+		ID: dashboardPanelNetwork, Label: "Network",
+		Description: "Receive/transmit rate, totals, and recent history",
+		DefaultSize: widgetSizeMedium, Available: func(*monitorModel) bool { return true },
+	},
+	{
+		ID: dashboardPanelBattery, Label: "Battery",
+		Description: "Charge, power source, status, and remaining time",
+		DefaultSize: widgetSizeSmall,
+		Available:   func(m *monitorModel) bool { return m.snapshot.Battery != nil },
 	},
 	{
 		ID: dashboardPanelGPU, Label: "GPU",
 		Description: "GPU load, memory, engines, and hardware telemetry",
+		DefaultSize: widgetSizeLarge,
 		Available: func(m *monitorModel) bool {
 			return m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU ||
 				len(m.snapshot.GPUs) > 0
@@ -50,18 +86,19 @@ var dashboardPanelRegistry = []dashboardPanelDescriptor{
 	{
 		ID: dashboardPanelNodeQueue, Label: "Node queue",
 		Description: "Slurm jobs assigned or eligible for this node",
-		Available:   func(m *monitorModel) bool { return m.slurmQueue != nil },
+		DefaultSize: widgetSizeLarge, Available: func(m *monitorModel) bool { return m.slurmQueue != nil },
 	},
 	{
 		ID: dashboardPanelProcesses, Label: "Processes",
 		Description: "Read-only process list and details",
-		Available:   func(*monitorModel) bool { return true },
+		DefaultSize: widgetSizeLarge, Available: func(*monitorModel) bool { return true },
 	},
 }
 
 type dashboardPanelPreference struct {
 	ID        dashboardPanelID `json:"id"`
 	Collapsed bool             `json:"collapsed,omitempty"`
+	Size      widgetSize       `json:"size,omitempty"`
 }
 
 type panelLayoutConfig struct {
@@ -72,12 +109,13 @@ type panelLayoutConfig struct {
 func defaultPanelLayout() panelLayoutConfig {
 	panels := make([]dashboardPanelPreference, 0, len(dashboardPanelRegistry))
 	for _, descriptor := range dashboardPanelRegistry {
-		panels = append(panels, dashboardPanelPreference{ID: descriptor.ID})
+		panels = append(panels, dashboardPanelPreference{ID: descriptor.ID, Size: descriptor.DefaultSize})
 	}
 	return panelLayoutConfig{Version: panelLayoutVersion, Panels: panels}
 }
 
 func normalizePanelLayout(layout panelLayoutConfig) panelLayoutConfig {
+	layout = migrateLegacyPanelLayout(layout)
 	known := make(map[dashboardPanelID]struct{}, len(dashboardPanelRegistry))
 	for _, descriptor := range dashboardPanelRegistry {
 		known[descriptor.ID] = struct{}{}
@@ -91,15 +129,53 @@ func normalizePanelLayout(layout panelLayoutConfig) panelLayoutConfig {
 		if _, duplicate := seen[panel.ID]; duplicate {
 			continue
 		}
+		descriptor, _ := dashboardPanelByID(panel.ID)
+		panel.Size = normalizeWidgetSize(panel.Size, descriptor.DefaultSize)
 		normalized.Panels = append(normalized.Panels, panel)
 		seen[panel.ID] = struct{}{}
 	}
 	for _, descriptor := range dashboardPanelRegistry {
 		if _, ok := seen[descriptor.ID]; !ok {
-			normalized.Panels = append(normalized.Panels, dashboardPanelPreference{ID: descriptor.ID})
+			normalized.Panels = append(normalized.Panels, dashboardPanelPreference{
+				ID: descriptor.ID, Size: descriptor.DefaultSize,
+			})
 		}
 	}
 	return normalized
+}
+
+func migrateLegacyPanelLayout(layout panelLayoutConfig) panelLayoutConfig {
+	if len(layout.Panels) == 0 {
+		return defaultPanelLayout()
+	}
+	var migrated []dashboardPanelPreference
+	for _, panel := range layout.Panels {
+		if panel.ID != dashboardPanelOverview {
+			migrated = append(migrated, panel)
+			continue
+		}
+		for _, id := range []dashboardPanelID{
+			dashboardPanelCPU, dashboardPanelMemory, dashboardPanelDisk,
+			dashboardPanelNetwork, dashboardPanelBattery,
+		} {
+			descriptor, _ := dashboardPanelByID(id)
+			migrated = append(migrated, dashboardPanelPreference{
+				ID: id, Collapsed: panel.Collapsed, Size: descriptor.DefaultSize,
+			})
+		}
+	}
+	layout.Version = panelLayoutVersion
+	layout.Panels = migrated
+	return layout
+}
+
+func normalizeWidgetSize(size, fallback widgetSize) widgetSize {
+	switch size {
+	case widgetSizeSmall, widgetSizeMedium, widgetSizeLarge:
+		return size
+	default:
+		return fallback
+	}
 }
 
 func dashboardPanelByID(id dashboardPanelID) (dashboardPanelDescriptor, bool) {
@@ -138,6 +214,20 @@ func (m *monitorModel) dashboardPanelCollapsed(id dashboardPanelID) bool {
 		}
 	}
 	return false
+}
+
+func (m *monitorModel) dashboardPanelSize(id dashboardPanelID) widgetSize {
+	m.ensurePanelLayout()
+	for _, panel := range m.panelLayout.Panels {
+		if panel.ID == id {
+			return panel.Size
+		}
+	}
+	descriptor, ok := dashboardPanelByID(id)
+	if ok {
+		return descriptor.DefaultSize
+	}
+	return widgetSizeSmall
 }
 
 func (m *monitorModel) setDashboardPanelCollapsed(id dashboardPanelID, collapsed bool) {
@@ -182,9 +272,9 @@ func (m *monitorModel) toggleSelectedLayoutPanel() {
 		return
 	}
 	panel.Collapsed = !panel.Collapsed
-	state := "expanded"
+	state := "visible"
 	if panel.Collapsed {
-		state = "collapsed"
+		state = "hidden"
 	}
 	descriptor, _ := dashboardPanelByID(panel.ID)
 	m.status = fmt.Sprintf("%s %s.", descriptor.Label, state)
@@ -198,10 +288,47 @@ func (m *monitorModel) toggleSelectedLayoutPanel() {
 	}
 }
 
+func (m *monitorModel) resizeSelectedLayoutPanel(delta int) {
+	panel := m.selectedLayoutPanel()
+	if panel == nil {
+		return
+	}
+	m.resizeWidgetPreference(panel, delta)
+}
+
+func (m *monitorModel) resizeDashboardWidget(id dashboardPanelID, delta int) {
+	m.ensurePanelLayout()
+	for index := range m.panelLayout.Panels {
+		if m.panelLayout.Panels[index].ID == id {
+			m.resizeWidgetPreference(&m.panelLayout.Panels[index], delta)
+			return
+		}
+	}
+}
+
+func (m *monitorModel) resizeWidgetPreference(panel *dashboardPanelPreference, delta int) {
+	sizes := []widgetSize{widgetSizeSmall, widgetSizeMedium, widgetSizeLarge}
+	current := 0
+	for index, size := range sizes {
+		if panel.Size == size {
+			current = index
+			break
+		}
+	}
+	target := min(max(0, current+delta), len(sizes)-1)
+	if target == current {
+		m.status = "Widget size limit reached."
+		return
+	}
+	panel.Size = sizes[target]
+	descriptor, _ := dashboardPanelByID(panel.ID)
+	m.status = fmt.Sprintf("%s size: %s.", descriptor.Label, strings.ToUpper(string(panel.Size)))
+}
+
 func (m *monitorModel) resetPanelLayout() {
 	m.panelLayout = defaultPanelLayout()
 	m.layoutCursor = 0
-	m.status = "Default panel order and visibility restored for this session."
+	m.status = "Default widget order, sizes, and visibility restored for this session."
 }
 
 type layoutEditorButton struct {
@@ -212,7 +339,9 @@ type layoutEditorButton struct {
 var layoutEditorButtons = []layoutEditorButton{
 	{key: "K", label: "move up", action: func(m *monitorModel) { m.moveSelectedLayoutPanel(-1) }},
 	{key: "J", label: "move down", action: func(m *monitorModel) { m.moveSelectedLayoutPanel(1) }},
-	{key: "space", label: "collapse", action: func(m *monitorModel) { m.toggleSelectedLayoutPanel() }},
+	{key: "-", label: "smaller", action: func(m *monitorModel) { m.resizeSelectedLayoutPanel(-1) }},
+	{key: "+", label: "larger", action: func(m *monitorModel) { m.resizeSelectedLayoutPanel(1) }},
+	{key: "space", label: "hide", action: func(m *monitorModel) { m.toggleSelectedLayoutPanel() }},
 	{key: "s", label: "save", action: func(m *monitorModel) {
 		if err := savePanelLayout(m.layoutPath, m.panelLayout); err != nil {
 			m.status = "Could not save layout: " + err.Error()
@@ -249,11 +378,12 @@ func (m *monitorModel) layoutView() string {
 		if !available {
 			state = processIdleStyle.Render("○ AUTO HIDDEN")
 		} else if panel.Collapsed {
-			state = processWaitingStyle.Render("◆ COLLAPSED")
+			state = processWaitingStyle.Render("◆ HIDDEN")
 		}
 		labelWidth := min(22, max(12, contentWidth/4))
 		prefix := fmt.Sprintf("%d  %-*s", index+1, labelWidth, strings.ToUpper(descriptor.Label))
-		line := accentStyle.Render(prefix) + "  " + state
+		size := gpuTitleStyle.Render(strings.ToUpper(string(panel.Size)))
+		line := accentStyle.Render(prefix) + "  " + size + "  " + state
 		remaining := contentWidth - lipgloss.Width(line) - 3
 		if remaining > 12 {
 			line += dimStyle.Render("  ·  " + truncate(descriptor.Description, remaining))
@@ -277,7 +407,7 @@ func renderLayoutFooter(width int, status string, canSave bool) string {
 	if canSave {
 		saveHint = "s saves for this local user"
 	}
-	hint := "[↑↓] select  [K/J] reorder  [space] collapse  [esc] apply  ·  " + saveHint
+	hint := "[↑↓] select  [K/J] reorder  [-/+] size  [space] hide  [esc] apply  ·  " + saveHint
 	if strings.TrimSpace(status) != "" && width >= 90 {
 		hint += "  ·  " + status
 	}
@@ -294,36 +424,6 @@ func (m *monitorModel) handleLayoutButtonClick(x int) {
 		}
 		left += buttonWidth + 1
 	}
-}
-
-func renderCollapsedDashboardPanel(width int, label, summary string) string {
-	return renderCompactDashboardPanel(width, label, summary, "COLLAPSED")
-}
-
-func renderAutoCompactDashboardPanel(width int, label, summary string) string {
-	return renderCompactDashboardPanel(width, label, summary, "AUTO COMPACT")
-}
-
-func renderCompactDashboardPanel(width int, label, summary, state string) string {
-	width = max(20, width)
-	innerWidth := width - 2
-	borderStyle := lipgloss.NewStyle().Foreground(colorPanelBorder)
-	meta := " " + state
-	if summary != "" {
-		meta += " · " + summary
-	}
-	meta += " "
-	if lipgloss.Width(meta) > width/2 {
-		meta = " " + state + " "
-	}
-	titleWidth := max(4, width-lipgloss.Width(meta)-6)
-	title := " " + truncate(strings.ToUpper(label), titleWidth) + " "
-	fill := max(1, innerWidth-1-lipgloss.Width(title)-lipgloss.Width(meta))
-	return borderStyle.Render("╭─") +
-		processTitleStyle.Render(title) +
-		borderStyle.Render(strings.Repeat("─", fill)) +
-		dimStyle.Render(meta) +
-		borderStyle.Render("╮")
 }
 
 func truncateANSI(value string, width int) string {
@@ -364,7 +464,7 @@ func loadPanelLayout(path string) (panelLayoutConfig, error) {
 	if err := json.Unmarshal(data, &layout); err != nil {
 		return defaultPanelLayout(), fmt.Errorf("parse layout: %w", err)
 	}
-	if layout.Version != 0 && layout.Version != panelLayoutVersion {
+	if layout.Version < 0 || layout.Version > panelLayoutVersion {
 		return defaultPanelLayout(), fmt.Errorf("unsupported layout version %d", layout.Version)
 	}
 	return normalizePanelLayout(layout), nil

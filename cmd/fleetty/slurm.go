@@ -1216,23 +1216,6 @@ func slurmDisplayState(display slurmDisplayJob) (string, lipgloss.Style) {
 	}
 }
 
-func (m *monitorModel) slurmQueueRows() int {
-	if m.slurmQueue == nil {
-		return 0
-	}
-	limit := 6
-	switch {
-	case m.height < 34:
-		limit = 1
-	case m.height < 42:
-		limit = 3
-	case m.height >= 54:
-		limit = 8
-	}
-	limit = min(max(1, limit+m.queueHeightDelta), 12)
-	return min(limit, max(1, len(m.slurmQueue.Jobs)))
-}
-
 func (m *monitorModel) clampQueueOffset(rows int) {
 	if m.slurmQueue == nil || len(m.slurmQueue.Jobs) == 0 {
 		m.queueOffset = 0
