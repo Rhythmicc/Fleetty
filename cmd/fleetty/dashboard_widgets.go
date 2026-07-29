@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -195,6 +197,9 @@ func (m *monitorModel) renderDashboardWidget(preference dashboardPanelPreference
 		if !ok {
 			return "", 0
 		}
+		if preference.Size == widgetSizeLarge {
+			return m.renderLargeSystemMetricWidget(preference.ID, card, width), 0
+		}
 		return renderMetricWidget(card, width, preference.Size), 0
 	case dashboardPanelGPU:
 		return m.renderGPUWidget(width, preference.Size), 0
@@ -295,6 +300,156 @@ func renderMetricCurrentLevel(card metricCard, width int) string {
 	default:
 		return bar(card.usage, width)
 	}
+}
+
+func (m *monitorModel) renderLargeSystemMetricWidget(id dashboardPanelID, card metricCard, width int) string {
+	switch id {
+	case dashboardPanelCPU:
+		return m.renderLargeProcessMetricWidget(card, width, false)
+	case dashboardPanelMemory:
+		return m.renderLargeProcessMetricWidget(card, width, true)
+	case dashboardPanelDisk:
+		return m.renderLargeDiskWidget(card, width)
+	case dashboardPanelBattery:
+		return m.renderLargeBatteryWidget(card, width)
+	default:
+		return renderMetricWidget(card, width, widgetSizeLarge)
+	}
+}
+
+func (m *monitorModel) renderLargeProcessMetricWidget(card metricCard, width int, byMemory bool) string {
+	contentWidth := max(4, width-4)
+	processes := append([]processInfo(nil), m.snapshot.Processes...)
+	sort.SliceStable(processes, func(i, j int) bool {
+		if byMemory {
+			if processes[i].RSS != processes[j].RSS {
+				return processes[i].RSS > processes[j].RSS
+			}
+		} else if processes[i].CPU != processes[j].CPU {
+			return processes[i].CPU > processes[j].CPU
+		}
+		return processes[i].PID < processes[j].PID
+	})
+	section := "TOP CPU PROCESSES"
+	if byMemory {
+		section = "TOP MEMORY PROCESSES"
+	}
+	lines := []string{
+		valueStyle.Render(truncate(card.value, contentWidth)),
+		dimStyle.Render(truncate(card.detail, contentWidth)),
+		renderMetricVisual(card, contentWidth),
+		"",
+		card.titleStyle.Render(section),
+		metricProcessHeader(contentWidth),
+	}
+	if len(processes) == 0 {
+		lines = append(lines, dimStyle.Render("Process attribution is unavailable for this sample."))
+	} else {
+		limit := min(5, len(processes))
+		for _, process := range processes[:limit] {
+			lines = append(lines, renderMetricProcessRow(process, contentWidth))
+		}
+	}
+	return btopPanel(
+		width, card.title, "LARGE · TOP PROCESSES", strings.Join(lines, "\n"),
+		card.titleStyle, card.borderColor,
+	)
+}
+
+func metricProcessHeader(width int) string {
+	nameWidth := max(8, width-31)
+	header := fmt.Sprintf("%-7s %-*s %9s %11s",
+		"PID", nameWidth, "APPLICATION", "CPU", "RSS")
+	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
+}
+
+func renderMetricProcessRow(process processInfo, width int) string {
+	nameWidth := max(8, width-31)
+	return strings.Join([]string{
+		dimStyle.Render(fixedCell(strconv.Itoa(process.PID), 7, false)),
+		processStateStyle(process.State).Render(fixedCell(metricProcessName(process.Command), nameWidth, false)),
+		valueStyle.Render(fixedCell(fmt.Sprintf("%.1f%%", process.CPU), 9, true)),
+		memoryTitleStyle.Render(fixedCell(bytes(process.RSS), 11, true)),
+	}, " ")
+}
+
+func metricProcessName(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "unknown"
+	}
+	name := filepath.Base(fields[0])
+	switch name {
+	case "python", "python3", "node", "bash", "sh":
+		if len(fields) > 1 && !strings.HasPrefix(fields[1], "-") {
+			name += " " + filepath.Base(fields[1])
+		}
+	}
+	return sanitizeTerminalText(name)
+}
+
+func (m *monitorModel) renderLargeDiskWidget(card metricCard, width int) string {
+	contentWidth := max(4, width-4)
+	free := counterDelta(m.snapshot.DiskTotal, m.snapshot.DiskUsed)
+	usage := percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal)
+	status, statusStyle := capacityStatus(usage)
+	lines := []string{
+		valueStyle.Render(truncate(card.value, contentWidth)),
+		dimStyle.Render(fmt.Sprintf("FREE %s  ·  %s USED", bytes(free), card.detail)),
+		renderMetricVisual(card, contentWidth),
+		"",
+		diskTitleStyle.Render("CAPACITY BREAKDOWN"),
+		fmt.Sprintf("%-10s %s", "USED", valueStyle.Render(bytes(m.snapshot.DiskUsed))),
+		fmt.Sprintf("%-10s %s", "AVAILABLE", valueStyle.Render(bytes(free))),
+		fmt.Sprintf("%-10s %s", "TOTAL", valueStyle.Render(bytes(m.snapshot.DiskTotal))),
+		fmt.Sprintf("%-10s %s", "PRESSURE", statusStyle.Render(status)),
+	}
+	return btopPanel(
+		width, card.title, "LARGE · CAPACITY", strings.Join(lines, "\n"),
+		card.titleStyle, card.borderColor,
+	)
+}
+
+func capacityStatus(usage float64) (string, lipgloss.Style) {
+	switch {
+	case usage >= 95:
+		return "CRITICAL", dangerStyle
+	case usage >= 85:
+		return "HIGH", processWaitingStyle
+	case usage >= 70:
+		return "WATCH", warningStyle
+	default:
+		return "HEALTHY", processRunningStyle
+	}
+}
+
+func (m *monitorModel) renderLargeBatteryWidget(card metricCard, width int) string {
+	contentWidth := max(4, width-4)
+	battery := m.snapshot.Battery
+	if battery == nil {
+		return ""
+	}
+	remaining := battery.TimeRemaining
+	if remaining == "" {
+		remaining = "not reported"
+	}
+	source := battery.PowerSource
+	if source == "" {
+		source = "unknown"
+	}
+	lines := []string{
+		valueStyle.Render(truncate(card.value, contentWidth)),
+		batteryBar(card.usage, contentWidth),
+		"",
+		batteryTitleStyle.Render("POWER DETAILS"),
+		fmt.Sprintf("%-14s %s", "SOURCE", valueStyle.Render(source)),
+		fmt.Sprintf("%-14s %s", "STATE", valueStyle.Render(strings.ToUpper(battery.Status))),
+		fmt.Sprintf("%-14s %s", "REMAINING", valueStyle.Render(remaining)),
+	}
+	return btopPanel(
+		width, card.title, "LARGE · POWER", strings.Join(lines, "\n"),
+		card.titleStyle, card.borderColor,
+	)
 }
 
 func (m *monitorModel) renderLargeNetworkWidget(card metricCard, width int) string {

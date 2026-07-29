@@ -1163,6 +1163,52 @@ func TestLargeNetworkWidgetAddsProcessTrafficDetails(t *testing.T) {
 	}
 }
 
+func TestLargeSystemWidgetsAddMetricSpecificDetails(t *testing.T) {
+	model := &monitorModel{
+		width: 100, height: 32,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(),
+			CPUPercent:  42, LoadAverage: "load 2.0 · 1.5 · 1.0",
+			MemoryUsed: 8 << 30, MemoryTotal: 16 << 30,
+			DiskUsed: 60 << 30, DiskTotal: 100 << 30,
+			Battery: &batteryInfo{
+				Percent: 72, Status: "discharging",
+				PowerSource: "Battery Power", TimeRemaining: "3h10m remaining",
+			},
+			Processes: []processInfo{
+				{PID: 42, Command: "python trainer.py", State: "R", CPU: 88, RSS: 4 << 30},
+				{PID: 84, Command: "/usr/bin/cache-worker", State: "S", CPU: 3, RSS: 6 << 30},
+			},
+		},
+		cpuHistory: []float64{20, 42},
+	}
+	for _, test := range []struct {
+		id       dashboardPanelID
+		expected []string
+	}{
+		{dashboardPanelCPU, []string{"TOP CPU PROCESSES", "python trainer.py", "88.0%"}},
+		{dashboardPanelMemory, []string{"TOP MEMORY PROCESSES", "cache-worker", "6.0 GiB"}},
+		{dashboardPanelDisk, []string{"CAPACITY BREAKDOWN", "AVAILABLE", "40.0 GiB", "HEALTHY"}},
+		{dashboardPanelBattery, []string{"POWER DETAILS", "Battery Power", "3h10m remaining"}},
+	} {
+		card, ok := model.metricWidgetCard(test.id)
+		if !ok {
+			t.Fatalf("metric card %s unavailable", test.id)
+		}
+		rendered := model.renderLargeSystemMetricWidget(test.id, card, 80)
+		for _, expected := range test.expected {
+			if !strings.Contains(rendered, expected) {
+				t.Fatalf("large %s widget missing %q:\n%s", test.id, expected, rendered)
+			}
+		}
+		for lineNumber, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > 80 {
+				t.Fatalf("large %s line %d width = %d: %q", test.id, lineNumber, got, line)
+			}
+		}
+	}
+}
+
 func TestManagementOperationsAreStructuredAndAllowlisted(t *testing.T) {
 	t.Setenv("FLEETTY_INSTALL_SCOPE", "user")
 	t.Setenv("FLEETTY_PRIVILEGED_SOCKET", "")
