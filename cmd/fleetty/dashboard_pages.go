@@ -348,11 +348,11 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	processOverhead := 3
 	gapBeforeProcesses := 1
 	availableRows := m.height - headerHeight - footerHeight - y - gapBeforeProcesses - processOverhead
-	// Keep the process preview bounded while allowing its panel to absorb the
-	// last few rows. Taller terminals first grow the summary/detail regions, so
-	// the overview remains balanced and its border always reaches the footer.
+	// Taller terminals grow the summary/detail regions first. Every row left in
+	// the process panel then becomes a real process row, keeping the component's
+	// information density coupled to its rendered height.
 	processPanelRows := max(3, availableRows)
-	processRows := min(10, processPanelRows)
+	processRows := processPanelRows
 	processPanel := m.renderOverviewProcesses(width, processPanelRows, processRows)
 	processY := y
 	if len(sections) > 0 {

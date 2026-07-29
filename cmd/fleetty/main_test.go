@@ -1326,7 +1326,7 @@ func TestDesignedOverviewReflowsWithoutGPUOrSlurm(t *testing.T) {
 	}
 }
 
-func TestDesignedOverviewFillsTallTerminalWithoutGrowingProcessPreview(t *testing.T) {
+func TestDesignedOverviewBindsProcessRowsToPanelHeight(t *testing.T) {
 	processes := make([]processInfo, 24)
 	for index := range processes {
 		processes[index] = processInfo{
@@ -1350,11 +1350,15 @@ func TestDesignedOverviewFillsTallTerminalWithoutGrowingProcessPreview(t *testin
 	if got := lipgloss.Height(rendered); got != model.height {
 		t.Fatalf("tall overview height = %d, want %d\n%s", got, model.height, rendered)
 	}
-	if model.monitorRows != 10 {
-		t.Fatalf("interactive process rows = %d, want 10", model.monitorRows)
+	if model.monitorRows <= 10 {
+		t.Fatalf("interactive process rows = %d, want more than 10 in the tall panel", model.monitorRows)
 	}
-	if strings.Contains(rendered, "job-10") {
-		t.Fatalf("overview rendered more than ten process rows:\n%s", rendered)
+	if !strings.Contains(rendered, fmt.Sprintf("job-%02d", model.monitorRows-1)) {
+		t.Fatalf("last process row for panel height is missing:\n%s", rendered)
+	}
+	if model.monitorRows < len(processes) &&
+		strings.Contains(rendered, fmt.Sprintf("job-%02d", model.monitorRows)) {
+		t.Fatalf("overview rendered beyond its process panel capacity:\n%s", rendered)
 	}
 }
 

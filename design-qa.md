@@ -10,8 +10,12 @@ final result: passed
 - Alignment report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-51c194ad-91a4-405b-8993-d1ebd1c245c6.png`
 - Alignment fix capture: `/tmp/fleetty-alignment-fixed.png`
 - Alignment comparison: `/tmp/fleetty-alignment-comparison.png`
+- Process-height report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-41c702f2-5c78-4b90-a567-39651499529d.png`
+- Process-height implementation capture: `/tmp/fleetty-process-height.png`
+- Process-height focused comparison: `/tmp/fleetty-process-height-comparison.png`
 - Reference dimensions: 1586 × 992 px
 - Implementation viewport: 160 × 40 terminal cells, rasterized at 1807 × 956 px with one non-rendered guard column
+- Process-height viewport: 160 × 58 terminal cells; report crop 744 × 686 px, implementation 1807 × 1370 px, focused comparison normalized to two 744 × 686 regions
 - State: dark theme, Linux GPU compute node, two GPUs, Slurm enabled, live network and process data
 
 The implementation was captured from `monitorView` with deterministic realistic metrics. The ANSI output contains exactly 40 rendered terminal rows. The reference and implementation were placed in one side-by-side comparison image before judging visual differences.
@@ -32,7 +36,7 @@ The implementation was captured from `monitorView` with deterministic realistic 
 ## Responsive and interaction checks
 
 - Overview, Compute, Network and Processes fit at 160×40, 100×30 and 60×24 cells without horizontal overflow.
-- Overview also fills a 160×58 terminal exactly: taller layouts expand summary and detail panels first, keep the process preview at ten interactive rows, and place the footer on the final row.
+- Overview also fills a 160×58 terminal exactly: taller layouts expand summary and detail panels first, bind process information rows to the remaining panel height, and place the footer on the final row.
 - Missing GPU and Slurm capabilities remove their regions and allow Host Health, Network Activity and Processes to reflow into the available width.
 - Keyboard navigation works with `1`–`4`, `Tab`, `Shift+Tab`, arrows, Enter and `/`.
 - Mouse page tabs and process rows use view-derived hitboxes.
@@ -47,6 +51,8 @@ The implementation was captured from `monitorView` with deterministic realistic 
 - Richness audit — P1: the first implementation reproduced panel positions but collapsed the reference's information hierarchy. The header omitted OS, uptime and capability context; Host Health omitted CPU identity and labeled load windows; Network lacked distinct history and attribution structure; Compute omitted NVIDIA workload identity; and the process list consumed most of the page. Fixed by enriching each overview module, adding capability-backed metadata, and bounding the process preview.
 - Richness audit — P2: a deterministic Slurm capture displayed an incorrect multi-hour refresh age because the view compared fixture time with wall-clock time. Fixed by measuring queue age against the snapshot collection time.
 - Tall-window report — P1: capping the process preview at ten rows left unused terminal rows below the footer. Fixed with height-aware panel growth and separate process panel/visible-row counts, so the shell fills the viewport without turning Overview back into a process-first page.
+- Process-density report — P2: the process panel could contain blank rows after reaching a fixed ten-item preview. Fixed by deriving visible and interactive process rows directly from the allocated panel height; keyboard and mouse bounds now grow with the component.
+- Process-density post-fix evidence: the 160×58 capture renders 23 process rows between the table header and bottom border with no unused internal rows. The focused comparison confirms the reported blank region is replaced by real process entries while preserving the same panel and footer structure.
 - Final comparison — P0: none.
 - Final comparison — P1: none.
 - Final comparison — P2: none.
