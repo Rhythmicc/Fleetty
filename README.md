@@ -14,6 +14,7 @@ Fleetty 是一个面向个人电脑、计算服务器、存储节点和 Slurm �
 - 内存与根磁盘容量、使用率；
 - 网络实时收发速率、累计流量和最近 60 秒趋势；
 - NVIDIA GPU 利用率、显存、核心频率、温度和功率；
+- NVIDIA GPU UUID、驱动版本以及当前 GPU 计算进程与所属用户；
 - 按 CPU 排序的进程列表、状态颜色、过滤和只读详情；
 - Overview、Compute、Network 和 Processes 四个专用页面；
 - 根据 GPU、Slurm、电池和服务能力自动重排的响应式界面；
@@ -110,7 +111,7 @@ install -m 0755 "/tmp/${fleetty_asset}" "$HOME/.local/bin/fleetty"
 
 `fleetty top --theme light` 使用浅色主题。Apple Silicon Mac 会通过 IOKit 显示 GPU 总负载、渲染器与 Tiler 利用率、核心数和已使用/已分配的统一内存，无需 root。MacBook 的电量、充放电状态、剩余时间和电源来源显示在顶部状态栏中；没有电池的桌面 Mac 会自动省略这些信息。该模式不启动后台服务、不开放网络端口，也不需要 root。
 
-默认界面提供 Overview、Compute、Network 和 Processes 四个页面，可按 `1`–`4` 直接切换，也可以使用 `Tab` / `Shift+Tab` 顺序浏览。Fleetty 只显示当前平台能够提供的数据：没有 GPU 或 Slurm 的主机会自动隐藏对应区域，周围面板随终端宽高重新排布并利用空出的空间。方向键、回车和鼠标可以选择并查看进程详情，`/` 过滤进程，`t` 切换主题，`q` 退出。
+默认界面提供 Overview、Compute、Network 和 Processes 四个页面，可按 `1`–`4` 直接切换，也可以使用 `Tab` / `Shift+Tab` 顺序浏览。Overview 集中展示主机系统与运行时长、CPU/内存/磁盘健康度、GPU 工作负载、60 秒网络历史、应用流量、Slurm 节点队列和有限条进程摘要；完整进程列表保留在 Processes 页面。Fleetty 只显示当前平台能够提供的数据：没有 GPU 或 Slurm 的主机会自动隐藏对应区域，周围面板随终端宽高重新排布并利用空出的空间。方向键、回车和鼠标可以选择并查看进程详情，`/` 过滤进程，`t` 切换主题，`q` 退出。
 
 高级用户可以按 `l` 打开小组件布局编辑器。CPU、内存、磁盘、网络、电池、GPU、节点队列和进程都可以调整顺序、隐藏，并选择 `SMALL`、`MEDIUM` 或 `LARGE` 尺寸。大尺寸组件会增加指标种类和表格行，而不仅是放大图表；例如 macOS 上的大尺寸网络组件会通过系统 `nettop` 数据展示按应用和进程划分的实时上下行速率与累计流量。布局调整不需要管理权限：使用 `K` / `J` 调整顺序、`-` / `+` 调整尺寸、`Space` 隐藏或显示，鼠标也可以直接操作。退出编辑器后进入自定义页面，按 `1`–`4` 可随时返回专用页面。在本地模式中按 `s` 会保存到当前用户的配置目录；也可以通过 `--layout PATH` 或 `FLEETTY_LAYOUT_FILE` 指定布局文件。
 

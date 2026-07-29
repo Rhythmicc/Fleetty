@@ -1798,6 +1798,10 @@ type monitorSnapshot struct {
 	CollectedAt             time.Time
 	Profile                 string
 	NodeName                string
+	OSName                  string
+	CPUModel                string
+	CPUCores                int
+	Uptime                  uint64
 	CPUPercent              float64
 	LoadAverage             string
 	MemoryUsed, MemoryTotal uint64
@@ -1838,6 +1842,8 @@ type managementActionInfo struct {
 type gpuInfo struct {
 	Index                   int
 	Name                    string
+	UUID                    string
+	DriverVersion           string
 	Platform                string
 	Utilization             float64
 	RendererUtilization     float64
@@ -1847,6 +1853,14 @@ type gpuInfo struct {
 	Temperature             int
 	ClockMHz                int
 	Power, PowerLimit       float64
+	Workloads               []gpuWorkloadInfo
+}
+
+type gpuWorkloadInfo struct {
+	PID        int
+	User       string
+	Name       string
+	MemoryUsed uint64
 }
 
 type processInfo struct {
@@ -1880,6 +1894,7 @@ type cpuCounters struct{ total, idle uint64 }
 
 type metricsCollector struct {
 	config             machineConfig
+	identity           systemIdentity
 	previousCPU        cpuCounters
 	previousNet        netCounters
 	previousInterfaces map[string]networkDeviceCounters
@@ -1908,6 +1923,7 @@ func counterDelta(current, previous uint64) uint64 {
 func newMetricsCollector(config machineConfig) *metricsCollector {
 	return &metricsCollector{
 		config:             config,
+		identity:           readSystemIdentity(),
 		previousInterfaces: make(map[string]networkDeviceCounters),
 		previousProcessNet: make(map[int]processNetworkCounters),
 	}
@@ -1923,6 +1939,10 @@ func (c *metricsCollector) collectSummary() (monitorSnapshot, error) {
 
 func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorSnapshot, error) {
 	s := monitorSnapshot{CollectedAt: time.Now()}
+	s.OSName = c.identity.OSName
+	s.CPUModel = c.identity.CPUModel
+	s.CPUCores = c.identity.CPUCores
+	s.Uptime = uptimeSeconds(c.identity, s.CollectedAt)
 	var errs []string
 	if runtime.GOOS == "darwin" {
 		value, err := readDarwinCPUPercent()
@@ -1975,6 +1995,7 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 			errs = append(errs, "processes: "+err.Error())
 		} else {
 			s.Processes = processes
+			attachGPUWorkloadUsers(s.GPUs, processes)
 		}
 	}
 	if len(errs) > 0 {
@@ -2089,35 +2110,90 @@ func readLoadAverage() string {
 func readGPUs() ([]gpuInfo, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw,power.limit", "--format=csv,noheader,nounits").Output()
+	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw,power.limit,driver_version", "--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil, compactCommandError(err)
 	}
-	return parseGPUs(output), ""
+	gpus := parseGPUs(output)
+	workloadCtx, workloadCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer workloadCancel()
+	if workloadOutput, workloadErr := exec.CommandContext(
+		workloadCtx, "nvidia-smi",
+		"--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+		"--format=csv,noheader,nounits",
+	).Output(); workloadErr == nil {
+		workloads := parseGPUWorkloads(workloadOutput)
+		for index := range gpus {
+			gpus[index].Workloads = workloads[gpus[index].UUID]
+		}
+	}
+	return gpus, ""
 }
 
 func parseGPUs(output []byte) []gpuInfo {
 	var gpus []gpuInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		parts := strings.Split(line, ",")
-		if len(parts) != 9 {
+		if len(parts) != 9 && len(parts) != 11 {
 			continue
 		}
+		for index := range parts {
+			parts[index] = strings.TrimSpace(parts[index])
+		}
 		index, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-		util, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-		memUsed, _ := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
-		memTotal, _ := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
-		temp, _ := strconv.Atoi(strings.TrimSpace(parts[5]))
-		clockMHz, _ := strconv.Atoi(strings.TrimSpace(parts[6]))
-		power, _ := strconv.ParseFloat(strings.TrimSpace(parts[7]), 64)
-		powerLimit, _ := strconv.ParseFloat(strings.TrimSpace(parts[8]), 64)
+		nameIndex, utilIndex := 1, 2
+		uuid, driver := "", ""
+		if len(parts) == 11 {
+			uuid, nameIndex, utilIndex, driver = parts[1], 2, 3, parts[10]
+		}
+		memUsed, _ := strconv.ParseUint(parts[utilIndex+1], 10, 64)
+		memTotal, _ := strconv.ParseUint(parts[utilIndex+2], 10, 64)
+		util, _ := strconv.ParseFloat(parts[utilIndex], 64)
+		temp, _ := strconv.Atoi(parts[utilIndex+3])
+		clockMHz, _ := strconv.Atoi(parts[utilIndex+4])
+		power, _ := strconv.ParseFloat(parts[utilIndex+5], 64)
+		powerLimit, _ := strconv.ParseFloat(parts[utilIndex+6], 64)
 		gpus = append(gpus, gpuInfo{
-			Index: index, Name: strings.TrimSpace(parts[1]), Utilization: util,
-			MemoryUsed: memUsed * 1024 * 1024, MemoryTotal: memTotal * 1024 * 1024,
+			Index: index, UUID: uuid, Name: parts[nameIndex], DriverVersion: driver,
+			Utilization: util,
+			MemoryUsed:  memUsed * 1024 * 1024, MemoryTotal: memTotal * 1024 * 1024,
 			Temperature: temp, ClockMHz: clockMHz, Power: power, PowerLimit: powerLimit,
 		})
 	}
 	return gpus
+}
+
+func parseGPUWorkloads(output []byte) map[string][]gpuWorkloadInfo {
+	workloads := make(map[string][]gpuWorkloadInfo)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) != 4 {
+			continue
+		}
+		uuid := strings.TrimSpace(parts[0])
+		pid, pidErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+		memoryMiB, memoryErr := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
+		if uuid == "" || pidErr != nil || pid <= 0 || memoryErr != nil {
+			continue
+		}
+		workloads[uuid] = append(workloads[uuid], gpuWorkloadInfo{
+			PID: pid, Name: sanitizeTerminalText(parts[2]), MemoryUsed: memoryMiB << 20,
+		})
+	}
+	return workloads
+}
+
+func attachGPUWorkloadUsers(gpus []gpuInfo, processes []processInfo) {
+	users := make(map[int]string, len(processes))
+	for _, process := range processes {
+		users[process.PID] = process.User
+	}
+	for gpuIndex := range gpus {
+		for workloadIndex := range gpus[gpuIndex].Workloads {
+			gpus[gpuIndex].Workloads[workloadIndex].User =
+				users[gpus[gpuIndex].Workloads[workloadIndex].PID]
+		}
+	}
 }
 
 func readProcesses() ([]processInfo, error) {

@@ -1136,6 +1136,7 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 		profile: machineProfileGeneral, nodeName: "test-node",
 		snapshot: monitorSnapshot{
 			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			OSName: "macOS 15.5", CPUModel: "Apple M5 Max", CPUCores: 12, Uptime: 5*86400 + 3600,
 			CPUPercent: 18, LoadAverage: "load 0.4 · 0.5 · 0.6",
 			MemoryUsed: 18 << 30, MemoryTotal: 64 << 30,
 			DiskUsed: 65 << 30, DiskTotal: 913 << 30,
@@ -1171,10 +1172,11 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 	rendered := model.monitorView()
 	for _, expected := range []string{
 		"1 OVERVIEW", "2 COMPUTE", "3 NETWORK", "4 PROCESSES",
-		"BAT 80% AC", "1 GPU", "SLURM",
+		"BAT 80% AC", "Caps: ", "GPU,Metal,UMA", "macOS 15.5",
 		"HOST HEALTH", "COMPUTE ACTIVITY", "NETWORK ACTIVITY",
 		"NODE QUEUE / SLURM", "TOP PROCESSES",
 		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [4 PROCESSES]",
+		"12 vCPU", "(1m 5m 15m)", "60 SECOND HISTORY", "PEAK",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("designed overview missing %q:\n%s", expected, rendered)
@@ -1198,6 +1200,22 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 		if got := lipgloss.Width(line); got > model.width {
 			t.Fatalf("overview line %d width = %d: %q", lineNumber, got, line)
 		}
+	}
+}
+
+func TestSystemIdentityParsers(t *testing.T) {
+	if got := osReleaseValue("NAME=Linux\nPRETTY_NAME=\"Ubuntu 24.04.2 LTS\"\n", "PRETTY_NAME"); got != "Ubuntu 24.04.2 LTS" {
+		t.Fatalf("PRETTY_NAME = %q", got)
+	}
+	if got := cpuInfoModel("processor: 0\nmodel name : AMD EPYC 7542 32-Core Processor\n"); got != "AMD EPYC 7542 32-Core Processor" {
+		t.Fatalf("CPU model = %q", got)
+	}
+	boot := parseDarwinBootTime("{ sec = 1720000000, usec = 0 }")
+	if got := boot.Unix(); got != 1720000000 {
+		t.Fatalf("boot time = %d", got)
+	}
+	if got := uptimeSeconds(systemIdentity{BootTime: time.Unix(100, 0)}, time.Unix(3700, 0)); got != 3600 {
+		t.Fatalf("uptime = %d", got)
 	}
 }
 
@@ -2222,6 +2240,29 @@ func TestGPUClockAndPowerParsing(t *testing.T) {
 	}
 	if got := gpuTelemetry(apple, true); got != "CORES 40 · RENDER  42% · TILER  37%" {
 		t.Fatalf("Apple GPU telemetry text = %q", got)
+	}
+}
+
+func TestGPUWorkloadAndDriverParsing(t *testing.T) {
+	gpus := parseGPUs([]byte("0, GPU-3a2b0000-1111-2222-3333-44445555f8e1, NVIDIA A100 40GB, 67, 23600, 40960, 64, 1170, 232, 250, 558.78\n"))
+	if len(gpus) != 1 {
+		t.Fatalf("parsed GPUs = %#v", gpus)
+	}
+	if gpus[0].UUID != "GPU-3a2b0000-1111-2222-3333-44445555f8e1" || gpus[0].DriverVersion != "558.78" {
+		t.Fatalf("GPU identity = %#v", gpus[0])
+	}
+	workloads := parseGPUWorkloads([]byte("GPU-3a2b0000-1111-2222-3333-44445555f8e1, 223417, /opt/train.py, 6500\n"))
+	gpus[0].Workloads = workloads[gpus[0].UUID]
+	attachGPUWorkloadUsers(gpus, []processInfo{{PID: 223417, User: "jdoe"}})
+	if len(gpus[0].Workloads) != 1 || gpus[0].Workloads[0].User != "jdoe" ||
+		gpus[0].Workloads[0].MemoryUsed != 6500<<20 {
+		t.Fatalf("GPU workloads = %#v", gpus[0].Workloads)
+	}
+	summary := ansi.Strip(gpuWorkloadSummary(gpus[0]))
+	for _, expected := range []string{"GPU-3a2b0000…f8e1", "train.py", "jdoe"} {
+		if !strings.Contains(summary, expected) {
+			t.Fatalf("workload summary missing %q: %q", expected, summary)
+		}
 	}
 }
 

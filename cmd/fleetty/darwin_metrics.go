@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -469,7 +470,8 @@ func readDarwinProcesses() ([]processInfo, error) {
 		memory, _ := strconv.ParseFloat(fields[4], 64)
 		rss, _ := strconv.ParseUint(fields[5], 10, 64)
 		elapsed, parseErr := parseBSDProcessElapsed(fields[6])
-		if parseErr != nil || fields[7] == "ps" {
+		collectorProcess := filepath.Base(fields[7])
+		if parseErr != nil || collectorProcess == "ps" || collectorProcess == "top" {
 			continue
 		}
 		processes = append(processes, processInfo{
