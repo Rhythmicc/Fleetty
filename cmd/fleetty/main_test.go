@@ -1315,14 +1315,46 @@ func TestDesignedOverviewReflowsWithoutGPUOrSlurm(t *testing.T) {
 				t.Fatalf("%dx%d overview unexpectedly contains %q:\n%s", size.width, size.height, absent, rendered)
 			}
 		}
-		if got := lipgloss.Height(rendered); got > size.height {
-			t.Fatalf("%dx%d overview height = %d", size.width, size.height, got)
+		if got := lipgloss.Height(rendered); got != size.height {
+			t.Fatalf("%dx%d overview height = %d, want %d", size.width, size.height, got, size.height)
 		}
 		for lineNumber, line := range strings.Split(rendered, "\n") {
 			if got := lipgloss.Width(line); got > size.width {
 				t.Fatalf("%dx%d line %d width = %d: %q", size.width, size.height, lineNumber, got, line)
 			}
 		}
+	}
+}
+
+func TestDesignedOverviewFillsTallTerminalWithoutGrowingProcessPreview(t *testing.T) {
+	processes := make([]processInfo, 24)
+	for index := range processes {
+		processes[index] = processInfo{
+			PID: index + 100, User: "worker", State: "S",
+			CPU: float64(24 - index), Command: fmt.Sprintf("job-%02d", index),
+		}
+	}
+	model := &monitorModel{
+		screen: screenMonitor, width: 160, height: 58,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), CPUCores: 16,
+			MemoryTotal: 64 << 30, DiskTotal: 1 << 40,
+			GPUs: []gpuInfo{{
+				Index: 0, Name: "Apple GPU", Platform: "apple",
+				MemoryTotal: 16 << 30,
+			}},
+			Processes: processes,
+		},
+	}
+	rendered := model.monitorView()
+	if got := lipgloss.Height(rendered); got != model.height {
+		t.Fatalf("tall overview height = %d, want %d\n%s", got, model.height, rendered)
+	}
+	if model.monitorRows != 10 {
+		t.Fatalf("interactive process rows = %d, want 10", model.monitorRows)
+	}
+	if strings.Contains(rendered, "job-10") {
+		t.Fatalf("overview rendered more than ten process rows:\n%s", rendered)
 	}
 }
 

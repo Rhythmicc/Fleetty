@@ -294,23 +294,34 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	}
 	host := m.hostHealthPanelSpec(summaryWidth, rich)
 	compute := m.computeActivityPanelSpec()
+	tallGrowth := 0
+	if columns && m.height > 40 {
+		tallGrowth = m.height - 40
+	}
+	summaryGrowth := tallGrowth / 4
+	detailGrowth := tallGrowth / 2
 	detailWidth := width
 	if columns && (capabilities.Slurm || !capabilities.GPU) {
 		detailWidth = (width - 1) / 2
 	}
-	network := m.networkActivityPanelSpec(detailWidth, rich)
+	network := m.networkActivityPanelSpec(detailWidth, rich, 5+detailGrowth)
 	queueRows := 4
 	if rich {
-		queueRows = 7
+		queueRows = 7 + detailGrowth
 	}
 	queue := m.nodeQueuePanelSpec(queueRows, detailWidth)
 	networkRendered := false
+	summaryTarget := max(pagePanelLineHeight(host), pagePanelLineHeight(compute)) + summaryGrowth
+	detailTarget := max(pagePanelLineHeight(network), pagePanelLineHeight(queue))
 
 	switch {
 	case columns && capabilities.GPU:
-		appendSection(renderPagePanelRow(width, host, compute))
+		appendSection(renderPagePanelRowAtLeast(width, summaryTarget, host, compute))
 	case columns:
-		appendSection(renderPagePanelRow(width, host, network))
+		if !capabilities.Slurm {
+			summaryTarget += detailGrowth
+		}
+		appendSection(renderPagePanelRowAtLeast(width, summaryTarget, host, network))
 		networkRendered = true
 	default:
 		appendSection(renderPagePanel(width, host))
@@ -321,9 +332,9 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 
 	if !networkRendered {
 		if columns && capabilities.Slurm {
-			appendSection(renderPagePanelRow(width, network, queue))
+			appendSection(renderPagePanelRowAtLeast(width, detailTarget, network, queue))
 		} else {
-			appendSection(renderPagePanel(width, network))
+			appendSection(renderPagePanelAtLeast(width, detailTarget, network))
 			if capabilities.Slurm {
 				appendSection(renderPagePanel(width, queue))
 			}
@@ -337,11 +348,12 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	processOverhead := 3
 	gapBeforeProcesses := 1
 	availableRows := m.height - headerHeight - footerHeight - y - gapBeforeProcesses - processOverhead
-	// The overview's summary panels stay information-dense while the process
-	// preview absorbs any remaining terminal height. This keeps the page flush
-	// with the footer without stretching charts or leaving an empty lower half.
-	processRows := min(10, max(3, availableRows))
-	processPanel := m.renderOverviewProcesses(width, processRows)
+	// Keep the process preview bounded while allowing its panel to absorb the
+	// last few rows. Taller terminals first grow the summary/detail regions, so
+	// the overview remains balanced and its border always reaches the footer.
+	processPanelRows := max(3, availableRows)
+	processRows := min(10, processPanelRows)
+	processPanel := m.renderOverviewProcesses(width, processPanelRows, processRows)
 	processY := y
 	if len(sections) > 0 {
 		processY++
@@ -613,13 +625,14 @@ func gpuMetricLine(label, visual, value string) string {
 	return strings.Join(parts, " ")
 }
 
-func (m *monitorModel) networkActivityPanelSpec(width int, rich bool) pagePanelSpec {
+func (m *monitorModel) networkActivityPanelSpec(width int, rich bool, detailLimit int) pagePanelSpec {
 	detailWidth := max(24, width-4)
 	summary := networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
 		networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s") + "    " +
 		dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s",
 			bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)))
-	detailTitle, details := m.networkOverviewDetails(detailWidth, 5)
+	detailLimit = max(1, detailLimit)
+	detailTitle, details := m.networkOverviewDetails(detailWidth, detailLimit)
 	if !rich {
 		lines := []string{
 			summary,
@@ -640,7 +653,7 @@ func (m *monitorModel) networkActivityPanelSpec(width int, rich bool) pagePanelS
 	if width >= 96 {
 		leftWidth := min(68, max(36, (contentWidth-3)/2))
 		rightWidth := contentWidth - leftWidth - 3
-		detailTitle, details = m.networkOverviewDetails(rightWidth, 5)
+		detailTitle, details = m.networkOverviewDetails(rightWidth, detailLimit)
 		left := []string{
 			dimStyle.Render("60 SECOND HISTORY"),
 			networkHistoryLine("RX", m.networkRXHistory, leftWidth, networkRXStyle),
@@ -805,7 +818,15 @@ func renderPagePanel(width int, spec pagePanelSpec) string {
 		spec.titleStyle, spec.borderColor)
 }
 
+func renderPagePanelAtLeast(width, lineCount int, spec pagePanelSpec) string {
+	return renderPagePanel(width, padPagePanelSpec(spec, lineCount))
+}
+
 func renderPagePanelRow(width int, specs ...pagePanelSpec) string {
+	return renderPagePanelRowAtLeast(width, 0, specs...)
+}
+
+func renderPagePanelRowAtLeast(width, lineCount int, specs ...pagePanelSpec) string {
 	if len(specs) == 0 {
 		return ""
 	}
@@ -817,6 +838,7 @@ func renderPagePanelRow(width int, specs ...pagePanelSpec) string {
 	for _, spec := range specs {
 		maxLines = max(maxLines, len(spec.lines))
 	}
+	maxLines = max(maxLines, lineCount)
 	parts := make([]string, 0, len(specs)*2)
 	for index, spec := range specs {
 		panelWidth := base
@@ -838,19 +860,41 @@ func renderPagePanelRow(width int, specs ...pagePanelSpec) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
-func (m *monitorModel) renderOverviewProcesses(width, rows int) string {
-	return m.renderProcessPreview(
-		width, rows, "TOP PROCESSES",
-		fmt.Sprintf("TOP %d · FULL LIST [4 PROCESSES]", min(rows, len(m.filteredProcesses()))),
+func pagePanelLineHeight(specs ...pagePanelSpec) int {
+	height := 0
+	for _, spec := range specs {
+		height = max(height, len(spec.lines))
+	}
+	return height
+}
+
+func padPagePanelSpec(spec pagePanelSpec, lineCount int) pagePanelSpec {
+	spec.lines = append([]string(nil), spec.lines...)
+	for len(spec.lines) < lineCount {
+		spec.lines = append(spec.lines, "")
+	}
+	return spec
+}
+
+func (m *monitorModel) renderOverviewProcesses(width, panelRows, visibleRows int) string {
+	return m.renderProcessPreviewRows(
+		width, panelRows, visibleRows, "TOP PROCESSES",
+		fmt.Sprintf("TOP %d · FULL LIST [4 PROCESSES]", min(visibleRows, len(m.filteredProcesses()))),
 	)
 }
 
 func (m *monitorModel) renderProcessPreview(width, rows int, title, meta string) string {
+	return m.renderProcessPreviewRows(width, rows, rows, title, meta)
+}
+
+func (m *monitorModel) renderProcessPreviewRows(width, panelRows, visibleRows int, title, meta string) string {
 	processes := m.filteredProcesses()
-	m.clampMonitorProcessCursor(rows)
+	panelRows = max(1, panelRows)
+	visibleRows = min(max(1, visibleRows), panelRows)
+	m.clampMonitorProcessCursor(visibleRows)
 	format := newProcessFormat(width)
 	lines := []string{processTableHeader(format.header(), width-4)}
-	end := min(len(processes), m.monitorOffset+rows)
+	end := min(len(processes), m.monitorOffset+visibleRows)
 	for index := m.monitorOffset; index < end; index++ {
 		row := format.row(processes[index])
 		if index == m.monitorCursor {
@@ -867,7 +911,7 @@ func (m *monitorModel) renderProcessPreview(width, rows int, title, meta string)
 	if len(processes) == 0 {
 		lines = append(lines, dimStyle.Render("No process data available."))
 	}
-	for len(lines) < rows+1 {
+	for len(lines) < panelRows+1 {
 		lines = append(lines, "")
 	}
 	if m.filter != "" {

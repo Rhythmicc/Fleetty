@@ -32,6 +32,7 @@ The implementation was captured from `monitorView` with deterministic realistic 
 ## Responsive and interaction checks
 
 - Overview, Compute, Network and Processes fit at 160×40, 100×30 and 60×24 cells without horizontal overflow.
+- Overview also fills a 160×58 terminal exactly: taller layouts expand summary and detail panels first, keep the process preview at ten interactive rows, and place the footer on the final row.
 - Missing GPU and Slurm capabilities remove their regions and allow Host Health, Network Activity and Processes to reflow into the available width.
 - Keyboard navigation works with `1`–`4`, `Tab`, `Shift+Tab`, arrows, Enter and `/`.
 - Mouse page tabs and process rows use view-derived hitboxes.
@@ -45,6 +46,7 @@ The implementation was captured from `monitorView` with deterministic realistic 
 - Post-release report — P2: Apple GPU metric columns were offset because ANSI-styled labels were padded by byte length instead of visible terminal width. Fixed with a shared visible-width metric row formatter; bars now begin at column 9 and values at column 28.
 - Richness audit — P1: the first implementation reproduced panel positions but collapsed the reference's information hierarchy. The header omitted OS, uptime and capability context; Host Health omitted CPU identity and labeled load windows; Network lacked distinct history and attribution structure; Compute omitted NVIDIA workload identity; and the process list consumed most of the page. Fixed by enriching each overview module, adding capability-backed metadata, and bounding the process preview.
 - Richness audit — P2: a deterministic Slurm capture displayed an incorrect multi-hour refresh age because the view compared fixture time with wall-clock time. Fixed by measuring queue age against the snapshot collection time.
+- Tall-window report — P1: capping the process preview at ten rows left unused terminal rows below the footer. Fixed with height-aware panel growth and separate process panel/visible-row counts, so the shell fills the viewport without turning Overview back into a process-first page.
 - Final comparison — P0: none.
 - Final comparison — P1: none.
 - Final comparison — P2: none.
