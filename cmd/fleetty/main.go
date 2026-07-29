@@ -176,7 +176,6 @@ const (
 	monitorPageOverview monitorPage = iota
 	monitorPageCompute
 	monitorPageNetwork
-	monitorPageProcesses
 	monitorPageCustom
 )
 
@@ -432,8 +431,6 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.switchMonitorPage(monitorPageCompute)
 		case "3":
 			m.switchMonitorPage(monitorPageNetwork)
-		case "4":
-			m.switchMonitorPage(monitorPageProcesses)
 		case "m":
 			if !m.admin.enabled() {
 				m.status = "Management mode is disabled: configure ADMIN_PASSWORD_HASH."
@@ -487,8 +484,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "up", "k":
 			if m.monitorPage == monitorPageCustom ||
 				m.monitorPage == monitorPageOverview ||
-				m.monitorPage == monitorPageCompute ||
-				m.monitorPage == monitorPageProcesses {
+				m.monitorPage == monitorPageCompute {
 				m.moveMonitorSelection(-1)
 			} else {
 				m.adjustDashboardScroll(-1)
@@ -496,8 +492,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "down", "j":
 			if m.monitorPage == monitorPageCustom ||
 				m.monitorPage == monitorPageOverview ||
-				m.monitorPage == monitorPageCompute ||
-				m.monitorPage == monitorPageProcesses {
+				m.monitorPage == monitorPageCompute {
 				m.moveMonitorSelection(1)
 			} else {
 				m.adjustDashboardScroll(1)
@@ -515,7 +510,6 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "enter":
 			if m.monitorPage == monitorPageOverview ||
 				m.monitorPage == monitorPageCompute ||
-				m.monitorPage == monitorPageProcesses ||
 				m.monitorPage == monitorPageCustom &&
 					m.effectiveMonitorFocus() == monitorFocusProcesses &&
 					!m.dashboardPanelCollapsed(dashboardPanelProcesses) {
@@ -528,9 +522,8 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 			if m.monitorPage != monitorPageOverview &&
 				m.monitorPage != monitorPageCompute &&
-				m.monitorPage != monitorPageProcesses &&
 				m.monitorPage != monitorPageCustom {
-				m.switchMonitorPage(monitorPageProcesses)
+				m.switchMonitorPage(monitorPageCompute)
 			}
 			m.monitorFocus = monitorFocusProcesses
 			m.filtering = true
@@ -657,7 +650,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.screen = screenMonitor
 			m.monitorPage = monitorPageCustom
 			m.dashboardScroll = 0
-			m.status = "Custom layout enabled for this session. Press 1–4 for designed pages."
+			m.status = "Custom layout enabled for this session. Press 1–3 for designed pages."
 		case "up", "k":
 			m.ensurePanelLayout()
 			m.layoutCursor = max(0, m.layoutCursor-1)

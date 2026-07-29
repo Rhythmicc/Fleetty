@@ -1,65 +1,52 @@
-# Fleetty monitor pages — design QA
+# Fleetty three-page monitor — design QA
 
 final result: passed
 
 ## Evidence
 
-- Selected design source: `/Users/lianhaocheng/.codex/generated_images/019f9762-176a-77d2-81f1-3bbe404ecbde/call_idAzA3SE9wVpMKfCH77NjGPX.png`
-- Implementation capture: `/tmp/fleetty-rich-overview.png`
-- Combined comparison: `/tmp/fleetty-rich-comparison.png`
-- Alignment report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-51c194ad-91a4-405b-8993-d1ebd1c245c6.png`
-- Alignment fix capture: `/tmp/fleetty-alignment-fixed.png`
-- Alignment comparison: `/tmp/fleetty-alignment-comparison.png`
-- Process-height report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-41c702f2-5c78-4b90-a567-39651499529d.png`
-- Process-height implementation capture: `/tmp/fleetty-process-height.png`
-- Process-height focused comparison: `/tmp/fleetty-process-height-comparison.png`
-- Spacing report source: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-7ca65fcc-7985-4614-a857-02604983d368.png`
-- Spacing implementation capture: `/tmp/fleetty-spacing-clean.png`
-- Spacing focused comparison: `/tmp/fleetty-spacing-comparison.png`
-- Reference dimensions: 1586 × 992 px
-- Implementation viewport: 160 × 40 terminal cells, rasterized at 1807 × 956 px with one non-rendered guard column
-- Process-height viewport: 160 × 58 terminal cells; report crop 744 × 686 px, implementation 1807 × 1370 px, focused comparison normalized to two 744 × 686 regions
-- Spacing viewport: 160 × 55 terminal cells; report crop 2048 × 574 px, implementation 1807 × 1301 px, focused upper-panel comparison 1807 × 813 px
-- State: dark theme, Linux GPU compute node, two GPUs, Slurm enabled, live network and process data
-
-The implementation was captured from `monitorView` with deterministic realistic metrics. The ANSI output contains exactly 40 rendered terminal rows. The reference and implementation were placed in one side-by-side comparison image before judging visual differences.
+- Source visual truth: `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-66ec1a07-dd71-44d1-91d3-40db1d87677c.png`
+- Rendered implementation: `/tmp/fleetty-network-page.png`
+- Full-view comparison: `/tmp/fleetty-network-comparison.png`
+- Focused Network comparison: `/tmp/fleetty-network-focused-comparison.png`
+- Source pixels: 3248 × 2220
+- Implementation pixels: 1760 × 920
+- Implementation terminal viewport: 160 × 40 cells, rasterized at 11 × 23 pixels per cell
+- Normalization: the source terminal content was cropped from its desktop canvas and resized to the implementation width; the focused comparison places the old and new Network content side by side at 1760 pixels per region.
+- State: dark theme, Network page selected, 12 attributed processes, 31 interfaces, live and cumulative traffic available.
 
 ## Full-view checks
 
-- The global shell shows host identity, OS, uptime, Slurm state, capabilities, refresh/theme status and four stable page tabs.
-- Overview follows the selected two-column hierarchy: Host Health beside Compute Activity, Network Activity beside Node Queue, then Top Processes.
-- Battery is represented in the global status bar when available instead of consuming a separate card.
-- GPU data appears only in Compute Activity; no duplicate GPU summary is shown.
-- NVIDIA Compute Activity includes live load, memory, clock, power, temperature, shortened UUID, active workload owner and driver version.
-- CPU history is integrated into Host Health; no separate System Timeline repeats the same metric.
-- Network shows current receive/transmit rate, cumulative totals, distinct 60-second RX/TX histories, peaks and attributed applications or interfaces.
-- Node Queue summarizes running, next and queued jobs, then shows a bounded job preview and collection age.
-- The process region is capped at ten rows and uses only the remaining terminal height; the dedicated Processes page remains the full-list surface.
-- Selected rows use a distinct dark selection background while process-state colors remain legible.
+- The numbered navigation contains only Overview, Compute and Network. The removed Processes page no longer consumes a tab, key binding or mouse target.
+- The Network page fills all 40 terminal rows, including the footer, without the large unstructured lower region visible in the source report.
+- Network information is organized into three adjacent vertical panels: live activity, attributed applications and interface counters. Panel borders touch without blank separator rows.
+- Current receive/transmit rates, cumulative received/sent totals, 60-second histories, peaks, traffic mix, primary interface, attribution count and aggregate error/drop count are visible in the summary.
+- The application table provides PID, name, current down/up rates and cumulative total.
+- The interface table provides current down/up rates, cumulative RX/TX totals and error/drop counts.
+- Compute uses its remaining panel height for process rows instead of stopping at a fixed twelve-row limit. A 160 × 55 regression fixture renders more than twelve interactive rows and ends exactly on the terminal footer.
+
+## Required fidelity surfaces
+
+- Fonts and typography: the implementation retains Fleetty's existing monospace hierarchy, bold panel titles, dim metadata and cyan/purple traffic semantics. Headers and numeric columns remain visually distinct and unwrapped.
+- Spacing and layout rhythm: all three Network panels and all Compute sections are directly adjacent; both pages calculate their content from the current terminal height and fill the viewport.
+- Colors and visual tokens: RX remains cyan, TX purple, live state mint and metadata muted gray. Contrast is consistent with the existing dark theme.
+- Image quality and asset fidelity: Fleetty is a native terminal surface with no raster product assets. The capture is rasterized directly from ANSI output at a fixed cell grid without scaling the implementation.
+- Copy and content: labels distinguish current rates from cumulative totals and use explicit `RX TOTAL`, `TX TOTAL`, `ERRORS/DROPS`, `ATTRIBUTED` and `60 SECOND WINDOW` terminology.
 
 ## Responsive and interaction checks
 
-- Overview, Compute, Network and Processes fit at 160×40, 100×30 and 60×24 cells without horizontal overflow.
-- Overview also fills a 160×58 terminal exactly: taller layouts expand summary and detail panels first, bind process information rows to the remaining panel height, and place the footer on the final row.
-- Missing GPU and Slurm capabilities remove their regions and allow Host Health, Network Activity and Processes to reflow into the available width.
-- Keyboard navigation works with `1`–`4`, `Tab`, `Shift+Tab`, arrows, Enter and `/`.
-- Mouse page tabs and process rows use view-derived hitboxes.
-- Advanced customization remains available through `l`; returning to a numbered page restores the designed shell.
+- Overview, Compute and Network render at exactly 160 × 40, 100 × 30 and 60 × 24 cells without horizontal overflow.
+- `1`–`3`, Tab, Shift+Tab and mouse page tabs navigate only the three designed pages; key `4` no longer changes pages.
+- Process selection, details and filtering remain available on Overview and Compute. Invoking `/` from Network moves to Compute before opening the filter.
+- Compute process hitboxes use the dynamically allocated row count.
 
-## Findings and iteration history
+## Findings and comparison history
 
-- Initial implementation — P2: the Overview ended around row 29 in a 40-row terminal, leaving an unstructured lower area. Fixed by making the process preview consume the exact remaining viewport height and correcting section-gap row accounting.
-- Initial implementation — P2: a one-GPU Compute panel had too much unused room. Fixed by showing renderer/tiler/core details for Apple GPUs and clock/power/temperature for NVIDIA GPUs.
-- Initial implementation — P2: normal memory usage was labeled too aggressively. Fixed by reserving WATCH/HIGH/CRITICAL for 70/80/90 percent thresholds.
-- Post-release report — P2: Apple GPU metric columns were offset because ANSI-styled labels were padded by byte length instead of visible terminal width. Fixed with a shared visible-width metric row formatter; bars now begin at column 9 and values at column 28.
-- Richness audit — P1: the first implementation reproduced panel positions but collapsed the reference's information hierarchy. The header omitted OS, uptime and capability context; Host Health omitted CPU identity and labeled load windows; Network lacked distinct history and attribution structure; Compute omitted NVIDIA workload identity; and the process list consumed most of the page. Fixed by enriching each overview module, adding capability-backed metadata, and bounding the process preview.
-- Richness audit — P2: a deterministic Slurm capture displayed an incorrect multi-hour refresh age because the view compared fixture time with wall-clock time. Fixed by measuring queue age against the snapshot collection time.
-- Tall-window report — P1: capping the process preview at ten rows left unused terminal rows below the footer. Fixed with height-aware panel growth and separate process panel/visible-row counts, so the shell fills the viewport without turning Overview back into a process-first page.
-- Process-density report — P2: the process panel could contain blank rows after reaching a fixed ten-item preview. Fixed by deriving visible and interactive process rows directly from the allocated panel height; keyboard and mouse bounds now grow with the component.
-- Process-density post-fix evidence: the 160×58 capture renders 23 process rows between the table header and bottom border with no unused internal rows. The focused comparison confirms the reported blank region is replaced by real process entries while preserving the same panel and footer structure.
-- Spacing report — P2: tall layouts padded Host Health and Compute Activity beyond their content and inserted an empty terminal row between every Overview section. Removed summary-height growth and section separators; Apple Compute now contributes architecture and IOKit sampling metadata so its ten content rows naturally match Host Health instead of relying on blank padding.
-- Spacing post-fix evidence: the 160×55 focused comparison shows both upper cards ending immediately after meaningful content, with Network and Processes borders directly adjacent to the preceding card row. No `\n\n` separator remains in the Overview output.
+- Source report — P1: the dedicated Processes page duplicated a workload already present elsewhere and made the page model unnecessarily broad. Fixed by reducing navigation to three designed pages and making Compute the full process surface.
+- Source report — P1: Network ended near the middle of the terminal and left a large empty lower viewport. Fixed by budgeting all remaining rows across summary, application and interface panels.
+- Source report — P2: application rows omitted down/up/total values in the wide layout, while interface rows omitted cumulative traffic. Fixed with full-width, aligned tables for both data sets.
+- Source report — P2: Compute capped workloads at twelve rows regardless of terminal height. Fixed by deriving process rows from the exact remaining viewport and binding keyboard/mouse bounds to that count.
+- Post-fix evidence: the 160 × 40 Network capture reaches the footer exactly, shows ten attributed applications and eleven interface rows, and has no unused page region. The focused comparison makes the added traffic columns and removal of the old sparse split layout visible.
 - Final comparison — P0: none.
 - Final comparison — P1: none.
 - Final comparison — P2: none.
-- P3 intentional deviation: CUDA, NCCL, NVLink and MIG versions are not inferred from the driver version; they are omitted until a platform collector reports them reliably.
+- P3 intentional behavior: very tall terminals devote additional rows to the interface table after all attributed applications are visible; this preserves real data density instead of padding another summary chart.

@@ -1171,11 +1171,11 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 	}
 	rendered := model.monitorView()
 	for _, expected := range []string{
-		"1 OVERVIEW", "2 COMPUTE", "3 NETWORK", "4 PROCESSES",
+		"1 OVERVIEW", "2 COMPUTE", "3 NETWORK",
 		"BAT 80% AC", "Caps: ", "GPU,Metal,UMA", "macOS 15.5",
 		"HOST HEALTH", "COMPUTE ACTIVITY", "NETWORK ACTIVITY",
 		"NODE QUEUE / SLURM", "TOP PROCESSES",
-		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [4 PROCESSES]",
+		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [2 COMPUTE]",
 		"12 vCPU", "(1m 5m 15m)", "60 SECOND HISTORY", "PEAK",
 	} {
 		if !strings.Contains(rendered, expected) {
@@ -1276,10 +1276,14 @@ func TestDesignedPagesSwitchByKeyboardAndMouse(t *testing.T) {
 		t.Fatalf("shift-tab selected page %v", model.monitorPage)
 	}
 	_ = model.monitorView()
-	processTab := model.pageTabs[3]
-	model.handleClick(processTab.X, model.pageTabY)
-	if model.monitorPage != monitorPageProcesses {
+	networkTab := model.pageTabs[2]
+	model.handleClick(networkTab.X, model.pageTabY)
+	if model.monitorPage != monitorPageNetwork {
 		t.Fatalf("mouse selected page %v", model.monitorPage)
+	}
+	model.handleKey(testKey("4"))
+	if model.monitorPage != monitorPageNetwork {
+		t.Fatalf("removed page key changed page to %v", model.monitorPage)
 	}
 	model.handleKey(testKey("l"))
 	if model.screen != screenLayout {
@@ -1383,7 +1387,10 @@ func TestDesignedPagesFitResponsiveTerminalSizes(t *testing.T) {
 			NetworkProcesses: []processNetworkInfo{
 				{PID: 42, Name: "sync", RX: 1 << 20, TX: 512 << 10, RXTotal: 4 << 30},
 			},
-			NetworkInterfaces: []networkInterfaceInfo{{Name: "en0", RX: 2 << 20, TX: 1 << 20}},
+			NetworkInterfaces: []networkInterfaceInfo{{
+				Name: "en0", RX: 2 << 20, TX: 1 << 20,
+				RXTotal: 20 << 30, TXTotal: 10 << 30,
+			}},
 			Processes: []processInfo{
 				{PID: 42, User: "alice", State: "R", CPU: 80, RSS: 2 << 30, Command: "worker"},
 			},
@@ -1392,7 +1399,7 @@ func TestDesignedPagesFitResponsiveTerminalSizes(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{160, 40}, {100, 30}, {60, 24}} {
 		model.width, model.height = size.width, size.height
 		for _, page := range []monitorPage{
-			monitorPageOverview, monitorPageCompute, monitorPageNetwork, monitorPageProcesses,
+			monitorPageOverview, monitorPageCompute, monitorPageNetwork,
 		} {
 			model.switchMonitorPage(page)
 			rendered := model.monitorView()
@@ -1400,8 +1407,9 @@ func TestDesignedPagesFitResponsiveTerminalSizes(t *testing.T) {
 				t.Fatalf("%dx%d page %s missing active label:\n%s",
 					size.width, size.height, page.label(), rendered)
 			}
-			if got := lipgloss.Height(rendered); got > size.height {
-				t.Fatalf("%dx%d page %s height = %d", size.width, size.height, page.label(), got)
+			if got := lipgloss.Height(rendered); got != size.height {
+				t.Fatalf("%dx%d page %s height = %d, want %d",
+					size.width, size.height, page.label(), got, size.height)
 			}
 			for lineNumber, line := range strings.Split(rendered, "\n") {
 				if got := lipgloss.Width(line); got > size.width {
@@ -1410,6 +1418,49 @@ func TestDesignedPagesFitResponsiveTerminalSizes(t *testing.T) {
 				}
 			}
 		}
+	}
+
+	model.width, model.height = 160, 40
+	model.switchMonitorPage(monitorPageNetwork)
+	rendered := model.monitorView()
+	for _, expected := range []string{
+		"LIVE · 60 SECOND WINDOW", "RECEIVED", "SENT", "TRAFFIC MIX",
+		"TOP APPLICATIONS", "INTERFACE COUNTERS", "RX TOTAL", "TX TOTAL",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("network page missing %q:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestComputePageUsesRemainingHeightForProcesses(t *testing.T) {
+	processes := make([]processInfo, 40)
+	for index := range processes {
+		processes[index] = processInfo{
+			PID: 1000 + index, User: "worker", State: "R",
+			CPU: float64(100 - index), Command: fmt.Sprintf("compute-job-%02d", index),
+		}
+	}
+	model := &monitorModel{
+		screen: screenMonitor, profile: machineProfileGeneral,
+		width: 160, height: 55, monitorPage: monitorPageCompute,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryUsed: 4 << 30, MemoryTotal: 8 << 30,
+			DiskUsed: 20 << 30, DiskTotal: 100 << 30,
+			Processes: processes,
+		},
+	}
+	rendered := model.monitorView()
+	if model.monitorRows <= 12 {
+		t.Fatalf("compute process rows = %d, want more than the former fixed limit", model.monitorRows)
+	}
+	lastVisible := fmt.Sprintf("compute-job-%02d", model.monitorRows-1)
+	if !strings.Contains(rendered, lastVisible) {
+		t.Fatalf("compute page did not fill its remaining height through %s:\n%s", lastVisible, rendered)
+	}
+	if got := lipgloss.Height(rendered); got != model.height {
+		t.Fatalf("compute page height = %d, want %d", got, model.height)
 	}
 }
 

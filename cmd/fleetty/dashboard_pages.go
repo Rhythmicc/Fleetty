@@ -46,8 +46,6 @@ func (page monitorPage) label() string {
 		return "COMPUTE"
 	case monitorPageNetwork:
 		return "NETWORK"
-	case monitorPageProcesses:
-		return "PROCESSES"
 	case monitorPageCustom:
 		return "CUSTOM"
 	default:
@@ -165,7 +163,7 @@ func (m *monitorModel) renderMonitorPageHeader(width int) string {
 	firstLine := ansi.Truncate(left+strings.Repeat(" ", gap)+right, width, "")
 
 	pages := []monitorPage{
-		monitorPageOverview, monitorPageCompute, monitorPageNetwork, monitorPageProcesses,
+		monitorPageOverview, monitorPageCompute, monitorPageNetwork,
 	}
 	var tabParts []string
 	x := 0
@@ -228,13 +226,12 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 			inputStyle.Render(value+"█")+"  "+dimStyle.Render("[enter] apply  [esc] cancel"), width, "")
 	}
 	hints := []string{
-		keyHint("1–4", "pages"),
+		keyHint("1–3", "pages"),
 		keyHint("tab", "next"),
 		keyHint("m", "management"),
 	}
 	if m.monitorPage == monitorPageOverview ||
-		m.monitorPage == monitorPageCompute ||
-		m.monitorPage == monitorPageProcesses {
+		m.monitorPage == monitorPageCompute {
 		hints = append(hints,
 			keyHint("↑↓", "select"),
 			keyHint("enter", "details"),
@@ -264,8 +261,6 @@ func (m *monitorModel) renderMonitorPage(width int) (string, []widgetPlacement) 
 		return m.renderComputePage(width)
 	case monitorPageNetwork:
 		return m.renderNetworkPage(width)
-	case monitorPageProcesses:
-		return m.renderProcessesPage(width)
 	default:
 		return m.renderOverviewPage(width)
 	}
@@ -874,7 +869,7 @@ func padPagePanelSpec(spec pagePanelSpec, lineCount int) pagePanelSpec {
 func (m *monitorModel) renderOverviewProcesses(width, panelRows, visibleRows int) string {
 	return m.renderProcessPreviewRows(
 		width, panelRows, visibleRows, "TOP PROCESSES",
-		fmt.Sprintf("TOP %d · FULL LIST [4 PROCESSES]", min(visibleRows, len(m.filteredProcesses()))),
+		fmt.Sprintf("TOP %d · FULL LIST [2 COMPUTE]", min(visibleRows, len(m.filteredProcesses()))),
 	)
 }
 
@@ -925,9 +920,6 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 		if section == "" {
 			return
 		}
-		if len(sections) > 0 {
-			y++
-		}
 		sections = append(sections, section)
 		y += lipgloss.Height(section)
 	}
@@ -960,73 +952,187 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 	if m.slurmQueue != nil {
 		appendSection(m.slurmNodePanel(width, min(6, max(3, m.height/5))))
 	}
-	processRows := min(12, max(4, m.height-2-1-y-2-3))
+	const (
+		headerHeight    = 2
+		footerHeight    = 1
+		processOverhead = 3
+	)
+	processRows := max(4, m.height-headerHeight-footerHeight-y-processOverhead)
 	processY := y
-	if len(sections) > 0 {
-		processY++
-	}
 	workloads := m.renderProcessPreview(
 		width, processRows, "COMPUTE WORKLOADS",
-		fmt.Sprintf("TOP %d BY CPU · DETAILS [4 PROCESSES]", min(processRows, len(m.filteredProcesses()))),
+		fmt.Sprintf("TOP %d BY CPU · ENTER DETAILS · / FILTER", min(processRows, len(m.filteredProcesses()))),
 	)
 	appendSection(workloads)
-	return strings.Join(sections, "\n\n"), []widgetPlacement{{
+	return strings.Join(sections, "\n"), []widgetPlacement{{
 		ID: dashboardPanelProcesses, X: 0, Y: processY, Width: width,
 		Height: lipgloss.Height(workloads), ProcessRows: processRows, ProcessRowStart: 2,
 	}}
 }
 
 func (m *monitorModel) renderNetworkPage(width int) (string, []widgetPlacement) {
-	card, _ := m.metricWidgetCard(dashboardPanelNetwork)
-	detailRows := min(12, max(6, m.height/3))
-	sections := []string{m.renderLargeNetworkWidgetWithLimit(card, width, detailRows)}
-	if len(m.snapshot.NetworkInterfaces) > 0 && len(m.snapshot.NetworkProcesses) > 0 {
-		lines := []string{networkInterfaceHeader(width - 4)}
-		interfaceLimit := min(len(m.snapshot.NetworkInterfaces), max(3, m.height/4))
-		for _, networkInterface := range m.snapshot.NetworkInterfaces[:interfaceLimit] {
-			lines = append(lines, renderNetworkInterfaceRow(networkInterface, width-4))
-		}
-		sections = append(sections, btopPanel(
-			width, "INTERFACES", fmt.Sprintf("%d ACTIVE", len(m.snapshot.NetworkInterfaces)),
-			strings.Join(lines, "\n"), networkTitleStyle, colorNetworkBorder,
-		))
+	const (
+		headerHeight  = 2
+		footerHeight  = 1
+		panelOverhead = 2
+	)
+	bodyHeight := max(15, m.height-headerHeight-footerHeight)
+	summary := renderPagePanel(width, m.networkTrafficSummaryPanelSpec(width))
+	remaining := max(10, bodyHeight-lipgloss.Height(summary))
+
+	applicationHeight := min(
+		len(m.snapshot.NetworkProcesses)+1+panelOverhead,
+		max(7, remaining/2),
+	)
+	applicationHeight = max(5, applicationHeight)
+	interfaceHeight := remaining - applicationHeight
+	if interfaceHeight < 5 {
+		interfaceHeight = 5
+		applicationHeight = max(5, remaining-interfaceHeight)
 	}
-	return strings.Join(sections, "\n\n"), nil
+
+	applications := renderPagePanelAtLeast(
+		width,
+		max(3, applicationHeight-panelOverhead),
+		m.networkApplicationsPanelSpec(width, max(1, applicationHeight-panelOverhead-1)),
+	)
+	interfaces := renderPagePanelAtLeast(
+		width,
+		max(3, interfaceHeight-panelOverhead),
+		m.networkInterfacesPanelSpec(width, max(1, interfaceHeight-panelOverhead-1)),
+	)
+	return strings.Join([]string{summary, applications, interfaces}, "\n"), nil
 }
 
-func (m *monitorModel) renderProcessesPage(width int) (string, []widgetPlacement) {
-	headerHeight := 2
-	footerHeight := 1
-	panelOverhead := 4
-	rows := max(3, m.height-headerHeight-footerHeight-panelOverhead)
-	m.clampMonitorProcessCursor(rows)
-	panel := m.processPanel(dashboardLayout{
-		width: width, height: m.height, processRows: rows, compactGPU: width < 112,
-	})
-	return panel, []widgetPlacement{{
-		ID: dashboardPanelProcesses, X: 0, Y: 0, Width: width,
-		Height: lipgloss.Height(panel), ProcessRows: rows, ProcessRowStart: 3,
-	}}
+func (m *monitorModel) networkTrafficSummaryPanelSpec(width int) pagePanelSpec {
+	contentWidth := max(24, width-4)
+	totalTraffic := m.snapshot.NetworkRX + m.snapshot.NetworkTX
+	rxShare, txShare := 0.0, 0.0
+	if totalTraffic > 0 {
+		rxShare = float64(m.snapshot.NetworkRX) * 100 / float64(totalTraffic)
+		txShare = 100 - rxShare
+	}
+	errorsAndDrops := uint64(0)
+	for _, networkInterface := range m.snapshot.NetworkInterfaces {
+		errorsAndDrops += networkInterface.RXErrors + networkInterface.TXErrors +
+			networkInterface.RXDrops + networkInterface.TXDrops
+	}
+	processState := fmt.Sprintf("%d ATTRIBUTED", len(m.snapshot.NetworkProcesses))
+	if len(m.snapshot.NetworkProcesses) == 0 && m.snapshot.NetworkProcessError != "" {
+		processState = truncate(m.snapshot.NetworkProcessError, max(12, contentWidth/2))
+	}
+	lines := []string{
+		alignedPageLine(
+			networkRXStyle.Render("RX  ↓ "+bytes(m.snapshot.NetworkRX)+"/s"),
+			networkTXStyle.Render("TX  ↑ "+bytes(m.snapshot.NetworkTX)+"/s"),
+			contentWidth,
+		),
+		alignedPageLine(
+			dimStyle.Render("RECEIVED  ")+valueStyle.Render(bytes(m.snapshot.NetworkRXTotal)),
+			dimStyle.Render("SENT  ")+valueStyle.Render(bytes(m.snapshot.NetworkTXTotal)),
+			contentWidth,
+		),
+		pageRule(contentWidth),
+		networkHistoryLine("RX", m.networkRXHistory, contentWidth, networkRXStyle),
+		networkHistoryLine("TX", m.networkTXHistory, contentWidth, networkTXStyle),
+		pageRule(contentWidth),
+		alignedPageLine(
+			dimStyle.Render("PRIMARY  ")+valueStyle.Render(m.primaryNetworkSource()),
+			dimStyle.Render(fmt.Sprintf("%d INTERFACES", len(m.snapshot.NetworkInterfaces))),
+			contentWidth,
+		),
+		alignedPageLine(
+			dimStyle.Render("TRAFFIC MIX  ")+networkRXStyle.Render(fmt.Sprintf("%.0f%% RX", rxShare))+
+				dimStyle.Render(" / ")+networkTXStyle.Render(fmt.Sprintf("%.0f%% TX", txShare)),
+			dimStyle.Render(processState+" · ERR/DROP ")+valueStyle.Render(fmt.Sprint(errorsAndDrops)),
+			contentWidth,
+		),
+	}
+	return pagePanelSpec{
+		title: "NETWORK ACTIVITY", meta: "LIVE · 60 SECOND WINDOW",
+		lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
+	}
+}
+
+func (m *monitorModel) networkApplicationsPanelSpec(width, limit int) pagePanelSpec {
+	contentWidth := max(24, width-4)
+	lines := []string{networkProcessHeader(contentWidth)}
+	limit = min(max(1, limit), len(m.snapshot.NetworkProcesses))
+	for _, process := range m.snapshot.NetworkProcesses[:limit] {
+		lines = append(lines, renderNetworkProcessRow(process, contentWidth))
+	}
+	if len(m.snapshot.NetworkProcesses) == 0 {
+		message := "Collecting per-process traffic attribution…"
+		if m.snapshot.NetworkProcessError != "" {
+			message = m.snapshot.NetworkProcessError
+		}
+		lines = append(lines, dimStyle.Render(truncate(message, contentWidth)))
+	}
+	return pagePanelSpec{
+		title: "TOP APPLICATIONS", meta: fmt.Sprintf("%d ATTRIBUTED", len(m.snapshot.NetworkProcesses)),
+		lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
+	}
+}
+
+func (m *monitorModel) networkInterfacesPanelSpec(width, limit int) pagePanelSpec {
+	contentWidth := max(24, width-4)
+	lines := []string{networkInterfaceDetailedHeader(contentWidth)}
+	limit = min(max(1, limit), len(m.snapshot.NetworkInterfaces))
+	for _, networkInterface := range m.snapshot.NetworkInterfaces[:limit] {
+		lines = append(lines, renderNetworkInterfaceDetailedRow(networkInterface, contentWidth))
+	}
+	if len(m.snapshot.NetworkInterfaces) == 0 {
+		lines = append(lines, dimStyle.Render("No network interface counters are available."))
+	}
+	return pagePanelSpec{
+		title: "INTERFACE COUNTERS", meta: fmt.Sprintf("%d DETECTED", len(m.snapshot.NetworkInterfaces)),
+		lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
+	}
+}
+
+func networkInterfaceDetailedHeader(width int) string {
+	if width < 88 {
+		return networkInterfaceHeader(width)
+	}
+	nameWidth := max(8, width-66)
+	header := fmt.Sprintf("%-*s %11s %11s %12s %12s %14s",
+		nameWidth, "INTERFACE", "DOWN NOW", "UP NOW", "RX TOTAL", "TX TOTAL", "ERRORS/DROPS")
+	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
+}
+
+func renderNetworkInterfaceDetailedRow(networkInterface networkInterfaceInfo, width int) string {
+	if width < 88 {
+		return renderNetworkInterfaceRow(networkInterface, width)
+	}
+	nameWidth := max(8, width-66)
+	errorsAndDrops := networkInterface.RXErrors + networkInterface.TXErrors +
+		networkInterface.RXDrops + networkInterface.TXDrops
+	return strings.Join([]string{
+		valueStyle.Render(fixedCell(networkInterface.Name, nameWidth, false)),
+		networkRXStyle.Render(fixedCell(bytes(networkInterface.RX)+"/s", 11, true)),
+		networkTXStyle.Render(fixedCell(bytes(networkInterface.TX)+"/s", 11, true)),
+		dimStyle.Render(fixedCell(bytes(networkInterface.RXTotal), 12, true)),
+		dimStyle.Render(fixedCell(bytes(networkInterface.TXTotal), 12, true)),
+		dimStyle.Render(fixedCell(fmt.Sprint(errorsAndDrops), 14, true)),
+	}, " ")
 }
 
 func (m *monitorModel) switchMonitorPage(page monitorPage) {
-	if page < monitorPageOverview || page > monitorPageProcesses {
+	if page < monitorPageOverview || page > monitorPageNetwork {
 		return
 	}
 	m.monitorPage = page
 	m.dashboardScroll = 0
 	m.monitorFocus = monitorFocusProcesses
 	m.status = page.label() + " page."
-	if page != monitorPageProcesses {
-		m.filtering = false
-	}
+	m.filtering = false
 }
 
 func (m *monitorModel) cycleMonitorPage(delta int) {
 	page := int(m.monitorPage)
-	if page < int(monitorPageOverview) || page > int(monitorPageProcesses) {
+	if page < int(monitorPageOverview) || page > int(monitorPageNetwork) {
 		page = int(monitorPageOverview)
 	}
-	page = (page + delta + 4) % 4
+	page = (page + delta + 3) % 3
 	m.switchMonitorPage(monitorPage(page))
 }
