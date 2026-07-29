@@ -1129,6 +1129,201 @@ func TestWidgetDashboardBreakpointsAndScrolling(t *testing.T) {
 	}
 }
 
+func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
+	model := &monitorModel{
+		screen: screenMonitor, width: 160, height: 40,
+		profile: machineProfileGeneral, nodeName: "test-node",
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			CPUPercent: 18, LoadAverage: "load 0.4 · 0.5 · 0.6",
+			MemoryUsed: 18 << 30, MemoryTotal: 64 << 30,
+			DiskUsed: 65 << 30, DiskTotal: 913 << 30,
+			NetworkRX: 2 << 20, NetworkTX: 1 << 20,
+			NetworkRXTotal: 842 << 30, NetworkTXTotal: 397 << 30,
+			Battery: &batteryInfo{
+				Percent: 80, Status: "not charging",
+				PowerSource: "AC Power", TimeRemaining: "3h12m",
+			},
+			GPUs: []gpuInfo{{
+				Index: 0, Name: "Apple M5 Max", Platform: "apple",
+				Utilization: 38, RendererUtilization: 38, TilerUtilization: 28,
+				MemoryUsed: 4 << 30, MemoryTotal: 9 << 30, CoreCount: 40,
+			}},
+			NetworkProcesses: []processNetworkInfo{
+				{PID: 42, Name: "sync-worker", RX: 1 << 20, TX: 512 << 10, RXTotal: 8 << 30},
+			},
+			Processes: []processInfo{
+				{PID: 42, User: "alice", State: "R", CPU: 84, RSS: 4 << 30, Command: "trainer"},
+				{PID: 84, User: "bob", State: "S", CPU: 2, RSS: 1 << 30, Command: "helper"},
+			},
+		},
+		slurmQueue: &nodeSlurmQueue{
+			Cluster: "General GPU Cluster", Node: "gpu01", CollectedAt: time.Now(),
+			Jobs: []slurmDisplayJob{{
+				Job: slurmJob{
+					ID: "1482", User: "alice", State: "RUNNING", Priority: 2000,
+					QOS: "normal", Elapsed: "12:31", Partition: "gpu", Name: "train",
+				},
+			}},
+		},
+	}
+	rendered := model.monitorView()
+	for _, expected := range []string{
+		"1 OVERVIEW", "2 COMPUTE", "3 NETWORK", "4 PROCESSES",
+		"BAT 80% AC", "1 GPU", "SLURM",
+		"HOST HEALTH", "COMPUTE ACTIVITY", "NETWORK ACTIVITY",
+		"NODE QUEUE / SLURM", "TOP PROCESSES",
+		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [4 PROCESSES]",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("designed overview missing %q:\n%s", expected, rendered)
+		}
+	}
+	for _, duplicate := range []string{"SYSTEM TIMELINE", "GPU / COMPUTE SUMMARY"} {
+		if strings.Contains(rendered, duplicate) {
+			t.Fatalf("designed overview repeated %q:\n%s", duplicate, rendered)
+		}
+	}
+	if got := strings.Count(rendered, "Apple M5 Max"); got != 1 {
+		t.Fatalf("GPU appeared %d times, want once:\n%s", got, rendered)
+	}
+	if strings.Contains(rendered, "╭─ BATTERY") {
+		t.Fatalf("battery should live in the header, not a card:\n%s", rendered)
+	}
+	if got := lipgloss.Height(rendered); got != model.height {
+		t.Fatalf("overview height = %d, want %d\n%s", got, model.height, rendered)
+	}
+	for lineNumber, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > model.width {
+			t.Fatalf("overview line %d width = %d: %q", lineNumber, got, line)
+		}
+	}
+}
+
+func TestDesignedPagesSwitchByKeyboardAndMouse(t *testing.T) {
+	model := &monitorModel{
+		screen: screenMonitor, width: 120, height: 32,
+		admin: &adminController{},
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1,
+			Processes: []processInfo{{PID: 42, State: "R", Command: "worker"}},
+		},
+	}
+	_ = model.monitorView()
+	model.handleKey(testKey("2"))
+	if model.monitorPage != monitorPageCompute {
+		t.Fatalf("key 2 selected page %v", model.monitorPage)
+	}
+	model.handleKey(testKey("tab"))
+	if model.monitorPage != monitorPageNetwork {
+		t.Fatalf("tab selected page %v", model.monitorPage)
+	}
+	model.handleKey(testKey("shift+tab"))
+	if model.monitorPage != monitorPageCompute {
+		t.Fatalf("shift-tab selected page %v", model.monitorPage)
+	}
+	_ = model.monitorView()
+	processTab := model.pageTabs[3]
+	model.handleClick(processTab.X, model.pageTabY)
+	if model.monitorPage != monitorPageProcesses {
+		t.Fatalf("mouse selected page %v", model.monitorPage)
+	}
+	model.handleKey(testKey("l"))
+	if model.screen != screenLayout {
+		t.Fatalf("layout key selected screen %v", model.screen)
+	}
+	model.handleKey(testKey("esc"))
+	if model.screen != screenMonitor || model.monitorPage != monitorPageCustom {
+		t.Fatalf("layout exit = screen %v page %v", model.screen, model.monitorPage)
+	}
+	model.handleKey(testKey("1"))
+	if model.monitorPage != monitorPageOverview {
+		t.Fatalf("designed page did not replace custom page: %v", model.monitorPage)
+	}
+}
+
+func TestDesignedOverviewReflowsWithoutGPUOrSlurm(t *testing.T) {
+	model := &monitorModel{
+		screen: screenMonitor, profile: machineProfileGeneral,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryUsed: 1 << 30, MemoryTotal: 8 << 30,
+			DiskUsed: 10 << 30, DiskTotal: 100 << 30,
+			Processes: []processInfo{{PID: 1, User: "root", State: "S", Command: "init"}},
+		},
+	}
+	for _, size := range []struct{ width, height int }{{160, 40}, {100, 30}, {60, 24}} {
+		model.width, model.height = size.width, size.height
+		rendered := model.monitorView()
+		for _, expected := range []string{"HOST HEALTH", "NETWORK ACTIVITY", "TOP PROCESSES"} {
+			if !strings.Contains(rendered, expected) {
+				t.Fatalf("%dx%d overview missing %q:\n%s", size.width, size.height, expected, rendered)
+			}
+		}
+		for _, absent := range []string{"COMPUTE ACTIVITY", "NODE QUEUE / SLURM", "BATTERY"} {
+			if strings.Contains(rendered, absent) {
+				t.Fatalf("%dx%d overview unexpectedly contains %q:\n%s", size.width, size.height, absent, rendered)
+			}
+		}
+		if got := lipgloss.Height(rendered); got > size.height {
+			t.Fatalf("%dx%d overview height = %d", size.width, size.height, got)
+		}
+		for lineNumber, line := range strings.Split(rendered, "\n") {
+			if got := lipgloss.Width(line); got > size.width {
+				t.Fatalf("%dx%d line %d width = %d: %q", size.width, size.height, lineNumber, got, line)
+			}
+		}
+	}
+}
+
+func TestDesignedPagesFitResponsiveTerminalSizes(t *testing.T) {
+	model := &monitorModel{
+		screen: screenMonitor, profile: machineProfileGeneral,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			CPUPercent: 42, LoadAverage: "load 1.0 · 0.8 · 0.6",
+			MemoryUsed: 4 << 30, MemoryTotal: 8 << 30,
+			DiskUsed: 20 << 30, DiskTotal: 100 << 30,
+			NetworkRX: 2 << 20, NetworkTX: 1 << 20,
+			NetworkRXTotal: 20 << 30, NetworkTXTotal: 10 << 30,
+			GPUs: []gpuInfo{{
+				Index: 0, Name: "Apple GPU", Platform: "apple",
+				Utilization: 42, RendererUtilization: 42, TilerUtilization: 36,
+				MemoryUsed: 2 << 30, MemoryTotal: 8 << 30, CoreCount: 10,
+			}},
+			NetworkProcesses: []processNetworkInfo{
+				{PID: 42, Name: "sync", RX: 1 << 20, TX: 512 << 10, RXTotal: 4 << 30},
+			},
+			NetworkInterfaces: []networkInterfaceInfo{{Name: "en0", RX: 2 << 20, TX: 1 << 20}},
+			Processes: []processInfo{
+				{PID: 42, User: "alice", State: "R", CPU: 80, RSS: 2 << 30, Command: "worker"},
+			},
+		},
+	}
+	for _, size := range []struct{ width, height int }{{160, 40}, {100, 30}, {60, 24}} {
+		model.width, model.height = size.width, size.height
+		for _, page := range []monitorPage{
+			monitorPageOverview, monitorPageCompute, monitorPageNetwork, monitorPageProcesses,
+		} {
+			model.switchMonitorPage(page)
+			rendered := model.monitorView()
+			if !strings.Contains(rendered, page.label()) {
+				t.Fatalf("%dx%d page %s missing active label:\n%s",
+					size.width, size.height, page.label(), rendered)
+			}
+			if got := lipgloss.Height(rendered); got > size.height {
+				t.Fatalf("%dx%d page %s height = %d", size.width, size.height, page.label(), got)
+			}
+			for lineNumber, line := range strings.Split(rendered, "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Fatalf("%dx%d page %s line %d width = %d: %q",
+						size.width, size.height, page.label(), lineNumber, got, line)
+				}
+			}
+		}
+	}
+}
+
 func TestLargeNetworkWidgetAddsProcessTrafficDetails(t *testing.T) {
 	model := &monitorModel{
 		width: 100, height: 32,
@@ -1614,6 +1809,7 @@ func TestReadOnlyDashboardResizesPanelsAndOpensProcessDetails(t *testing.T) {
 	}
 	m := &monitorModel{
 		screen: screenMonitor, width: 120, height: 48, colorMode: colorModeDark,
+		monitorPage: monitorPageCustom,
 		snapshot: monitorSnapshot{
 			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1, Processes: processes,
 		},

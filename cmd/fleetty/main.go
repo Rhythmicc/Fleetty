@@ -154,6 +154,7 @@ type monitorModel struct {
 	networkTXHistory  []float64
 	colorMode         colorMode
 	slurmQueue        *nodeSlurmQueue
+	monitorPage       monitorPage
 	monitorFocus      monitorPanelFocus
 	monitorRows       int
 	dashboardScroll   int
@@ -165,6 +166,23 @@ type monitorModel struct {
 	layoutCursor      int
 	layoutButtonY     int
 	layoutFirstRowY   int
+	pageTabY          int
+	pageTabs          []monitorPageTab
+}
+
+type monitorPage int
+
+const (
+	monitorPageOverview monitorPage = iota
+	monitorPageCompute
+	monitorPageNetwork
+	monitorPageProcesses
+	monitorPageCustom
+)
+
+type monitorPageTab struct {
+	Page     monitorPage
+	X, Width int
 }
 
 type monitorPanelFocus int
@@ -408,6 +426,14 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	switch m.screen {
 	case screenMonitor:
 		switch key {
+		case "1":
+			m.switchMonitorPage(monitorPageOverview)
+		case "2":
+			m.switchMonitorPage(monitorPageCompute)
+		case "3":
+			m.switchMonitorPage(monitorPageNetwork)
+		case "4":
+			m.switchMonitorPage(monitorPageProcesses)
 		case "m":
 			if !m.admin.enabled() {
 				m.status = "Management mode is disabled: configure ADMIN_PASSWORD_HASH."
@@ -426,27 +452,56 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.screen = screenLayout
 			m.status = "Layout changes apply immediately to this session."
 		case "tab":
-			queueVisible := m.slurmQueue != nil && !m.dashboardPanelCollapsed(dashboardPanelNodeQueue)
-			processesVisible := !m.dashboardPanelCollapsed(dashboardPanelProcesses)
-			switch {
-			case !queueVisible:
-				m.monitorFocus = monitorFocusProcesses
-			case !processesVisible:
-				m.monitorFocus = monitorFocusQueue
-			case m.monitorFocus == monitorFocusQueue:
-				m.monitorFocus = monitorFocusProcesses
-			default:
-				m.monitorFocus = monitorFocusQueue
+			if m.monitorPage == monitorPageCustom {
+				queueVisible := m.slurmQueue != nil &&
+					!m.dashboardPanelCollapsed(dashboardPanelNodeQueue)
+				processesVisible := !m.dashboardPanelCollapsed(dashboardPanelProcesses)
+				switch {
+				case !queueVisible:
+					m.monitorFocus = monitorFocusProcesses
+				case !processesVisible:
+					m.monitorFocus = monitorFocusQueue
+				case m.monitorFocus == monitorFocusQueue:
+					m.monitorFocus = monitorFocusProcesses
+				default:
+					m.monitorFocus = monitorFocusQueue
+				}
+				m.status = "Focused " + m.monitorFocus.label() + "."
+			} else {
+				m.cycleMonitorPage(1)
 			}
-			m.status = "Focused " + m.monitorFocus.label() + "."
+		case "shift+tab", "backtab":
+			m.cycleMonitorPage(-1)
+		case "left", "h":
+			m.cycleMonitorPage(-1)
+		case "right":
+			m.cycleMonitorPage(1)
 		case "+", "=":
-			m.adjustFocusedWidgetSize(1)
+			if m.monitorPage == monitorPageCustom {
+				m.adjustFocusedWidgetSize(1)
+			}
 		case "-", "_":
-			m.adjustFocusedWidgetSize(-1)
+			if m.monitorPage == monitorPageCustom {
+				m.adjustFocusedWidgetSize(-1)
+			}
 		case "up", "k":
-			m.moveMonitorSelection(-1)
+			if m.monitorPage == monitorPageCustom ||
+				m.monitorPage == monitorPageOverview ||
+				m.monitorPage == monitorPageCompute ||
+				m.monitorPage == monitorPageProcesses {
+				m.moveMonitorSelection(-1)
+			} else {
+				m.adjustDashboardScroll(-1)
+			}
 		case "down", "j":
-			m.moveMonitorSelection(1)
+			if m.monitorPage == monitorPageCustom ||
+				m.monitorPage == monitorPageOverview ||
+				m.monitorPage == monitorPageCompute ||
+				m.monitorPage == monitorPageProcesses {
+				m.moveMonitorSelection(1)
+			} else {
+				m.adjustDashboardScroll(1)
+			}
 		case "pgup":
 			m.adjustDashboardScroll(-max(3, m.dashboardViewport/2))
 		case "pgdown":
@@ -458,13 +513,24 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.dashboardScroll = max(0, m.dashboardContent-m.dashboardViewport)
 			m.status = "Dashboard scrolled to the last widget."
 		case "enter":
-			if m.effectiveMonitorFocus() == monitorFocusProcesses &&
-				!m.dashboardPanelCollapsed(dashboardPanelProcesses) {
+			if m.monitorPage == monitorPageOverview ||
+				m.monitorPage == monitorPageCompute ||
+				m.monitorPage == monitorPageProcesses ||
+				m.monitorPage == monitorPageCustom &&
+					m.effectiveMonitorFocus() == monitorFocusProcesses &&
+					!m.dashboardPanelCollapsed(dashboardPanelProcesses) {
 				return m.openReadOnlyProcess(m.monitorCursor)
 			}
 		case "/":
-			if m.dashboardPanelCollapsed(dashboardPanelProcesses) {
+			if m.monitorPage == monitorPageCustom &&
+				m.dashboardPanelCollapsed(dashboardPanelProcesses) {
 				m.setDashboardPanelCollapsed(dashboardPanelProcesses, false)
+			}
+			if m.monitorPage != monitorPageOverview &&
+				m.monitorPage != monitorPageCompute &&
+				m.monitorPage != monitorPageProcesses &&
+				m.monitorPage != monitorPageCustom {
+				m.switchMonitorPage(monitorPageProcesses)
 			}
 			m.monitorFocus = monitorFocusProcesses
 			m.filtering = true
@@ -589,7 +655,9 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		switch key {
 		case "esc", "q", "l":
 			m.screen = screenMonitor
-			m.status = "Returned to the monitor with the current session layout."
+			m.monitorPage = monitorPageCustom
+			m.dashboardScroll = 0
+			m.status = "Custom layout enabled for this session. Press 1–4 for designed pages."
 		case "up", "k":
 			m.ensurePanelLayout()
 			m.layoutCursor = max(0, m.layoutCursor-1)
@@ -651,18 +719,32 @@ func (m *monitorModel) appendFilter(text string) {
 
 func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 	if m.screen == screenMonitor {
-		if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelNodeQueue); ok &&
-			x >= placement.X && x < placement.X+placement.Width &&
-			y >= screenY && y < screenY+placement.Height {
-			m.monitorFocus = monitorFocusQueue
-			m.status = "Focused node queue. Use +/- to resize and ↑/↓ to scroll."
-			return nil
+		if m.monitorPage != monitorPageCustom && y == m.pageTabY {
+			for _, tab := range m.pageTabs {
+				if x >= tab.X && x < tab.X+tab.Width {
+					m.switchMonitorPage(tab.Page)
+					return nil
+				}
+			}
+		}
+		if m.monitorPage == monitorPageCustom {
+			if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelNodeQueue); ok &&
+				x >= placement.X && x < placement.X+placement.Width &&
+				y >= screenY && y < screenY+placement.Height {
+				m.monitorFocus = monitorFocusQueue
+				m.status = "Focused node queue. Use +/- to resize and ↑/↓ to scroll."
+				return nil
+			}
 		}
 		if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelProcesses); ok &&
 			x >= placement.X && x < placement.X+placement.Width &&
 			y >= screenY && y < screenY+placement.Height {
 			m.monitorFocus = monitorFocusProcesses
-			processRowY := screenY + 3
+			processRowStart := placement.ProcessRowStart
+			if processRowStart <= 0 {
+				processRowStart = 3
+			}
+			processRowY := screenY + processRowStart
 			if y >= processRowY && y < processRowY+placement.ProcessRows {
 				return m.openReadOnlyProcess(m.monitorOffset + y - processRowY)
 			}
@@ -784,6 +866,9 @@ func (focus monitorPanelFocus) label() string {
 }
 
 func (m *monitorModel) effectiveMonitorFocus() monitorPanelFocus {
+	if m.monitorPage != monitorPageCustom {
+		return monitorFocusProcesses
+	}
 	queueAvailable := m.slurmQueue != nil && !m.dashboardPanelCollapsed(dashboardPanelNodeQueue)
 	processesAvailable := !m.dashboardPanelCollapsed(dashboardPanelProcesses)
 	if !queueAvailable {
@@ -988,7 +1073,10 @@ func (m *monitorModel) monitorView() string {
 	if m.profile == machineProfileNAS || m.snapshot.Profile == machineProfileNAS {
 		return m.nasView()
 	}
-	return m.widgetDashboardView()
+	if m.monitorPage == monitorPageCustom {
+		return m.widgetDashboardView()
+	}
+	return m.monitorPagesView()
 }
 
 func (m *monitorModel) systemMetricCards() []metricCard {

@@ -12,11 +12,12 @@ import (
 )
 
 type widgetPlacement struct {
-	ID          dashboardPanelID
-	X, Y        int
-	Width       int
-	Height      int
-	ProcessRows int
+	ID              dashboardPanelID
+	X, Y            int
+	Width           int
+	Height          int
+	ProcessRows     int
+	ProcessRowStart int
 }
 
 type renderedDashboardWidget struct {
@@ -158,6 +159,7 @@ func (m *monitorModel) renderWidgetGrid(width int) (string, []widgetPlacement) {
 			placement: widgetPlacement{
 				ID: preference.ID, X: x, Width: widgetWidth,
 				Height: lipgloss.Height(content), ProcessRows: processRows,
+				ProcessRowStart: 3,
 			},
 		})
 		used += span
@@ -472,8 +474,12 @@ func (m *monitorModel) renderLargeBatteryWidget(card metricCard, width int) stri
 }
 
 func (m *monitorModel) renderLargeNetworkWidget(card metricCard, width int) string {
+	return m.renderLargeNetworkWidgetWithLimit(card, width, 6)
+}
+
+func (m *monitorModel) renderLargeNetworkWidgetWithLimit(card metricCard, width, detailLimit int) string {
 	contentWidth := max(4, width-4)
-	meta, details := m.largeNetworkDetails(contentWidth)
+	meta, details := m.largeNetworkDetails(contentWidth, detailLimit)
 	var lines []string
 	if contentWidth >= 100 {
 		leftWidth := min(50, max(38, contentWidth/3))
@@ -510,7 +516,7 @@ func (m *monitorModel) renderLargeNetworkWidget(card metricCard, width int) stri
 	)
 }
 
-func (m *monitorModel) largeNetworkDetails(width int) (string, []string) {
+func (m *monitorModel) largeNetworkDetails(width, detailLimit int) (string, []string) {
 	meta := "LARGE"
 	var lines []string
 	switch {
@@ -520,7 +526,7 @@ func (m *monitorModel) largeNetworkDetails(width int) (string, []string) {
 			networkTitleStyle.Render("TOP APPLICATIONS / PROCESSES"),
 			networkProcessHeader(width),
 		}
-		limit := min(6, len(m.snapshot.NetworkProcesses))
+		limit := min(max(1, detailLimit), len(m.snapshot.NetworkProcesses))
 		for _, process := range m.snapshot.NetworkProcesses[:limit] {
 			lines = append(lines, renderNetworkProcessRow(process, width))
 		}
@@ -530,7 +536,7 @@ func (m *monitorModel) largeNetworkDetails(width int) (string, []string) {
 			networkTitleStyle.Render("NETWORK INTERFACES"),
 			networkInterfaceHeader(width),
 		}
-		limit := min(5, len(m.snapshot.NetworkInterfaces))
+		limit := min(max(1, detailLimit), len(m.snapshot.NetworkInterfaces))
 		for _, networkInterface := range m.snapshot.NetworkInterfaces[:limit] {
 			lines = append(lines, renderNetworkInterfaceRow(networkInterface, width))
 		}
@@ -665,9 +671,14 @@ func (m *monitorModel) adjustDashboardScroll(delta int) {
 }
 
 func (m *monitorModel) visibleWidgetPlacement(id dashboardPanelID) (widgetPlacement, int, bool) {
-	headerHeight := lipgloss.Height(dashboardHeader(
-		usableWidth(m.width), m.snapshot.CollectedAt, m.colorMode, m.nodeName,
-	))
+	headerHeight := 0
+	if m.monitorPage == monitorPageCustom {
+		headerHeight = lipgloss.Height(dashboardHeader(
+			usableWidth(m.width), m.snapshot.CollectedAt, m.colorMode, m.nodeName,
+		))
+	} else {
+		headerHeight = lipgloss.Height(m.renderMonitorPageHeader(usableWidth(m.width)))
+	}
 	for _, placement := range m.widgetPlacements {
 		if placement.ID != id {
 			continue
