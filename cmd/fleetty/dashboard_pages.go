@@ -285,7 +285,7 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 		summaryWidth = (width - 1) / 2
 	}
 	host := m.hostHealthPanelSpec(summaryWidth, rich)
-	compute := m.computeActivityPanelSpec()
+	compute := m.computeActivityPanelSpec(summaryWidth)
 	tallGrowth := 0
 	if columns && m.height > 40 {
 		tallGrowth = m.height - 40
@@ -475,12 +475,20 @@ func healthStatus(usage float64) (string, lipgloss.Style) {
 	}
 }
 
-func (m *monitorModel) computeActivityPanelSpec() pagePanelSpec {
+func (m *monitorModel) computeActivityPanelSpec(width int) pagePanelSpec {
 	var lines []string
 	if m.snapshot.GPUError != "" && len(m.snapshot.GPUs) == 0 {
 		lines = append(lines, warningStyle.Render("GPU metrics unavailable: "+m.snapshot.GPUError))
 	}
 	gpus := m.snapshot.GPUs
+	if len(gpus) > 1 {
+		lines = multiGPUOverviewLines(gpus, max(24, width-4))
+		meta := fmt.Sprintf("%d DEVICES", len(gpus))
+		return pagePanelSpec{
+			title: "COMPUTE ACTIVITY", meta: meta,
+			lines: lines, titleStyle: gpuTitleStyle, borderColor: colorGPUBorder,
+		}
+	}
 	limit := min(3, len(gpus))
 	for _, gpu := range gpus[:limit] {
 		status, statusStyle := gpuLoadStatus(gpu.Utilization)
@@ -561,6 +569,188 @@ func (m *monitorModel) computeActivityPanelSpec() pagePanelSpec {
 		title: "COMPUTE ACTIVITY", meta: meta,
 		lines: lines, titleStyle: gpuTitleStyle, borderColor: colorGPUBorder,
 	}
+}
+
+func multiGPUOverviewLines(gpus []gpuInfo, width int) []string {
+	width = max(24, width)
+	limit := min(4, len(gpus))
+	lines := []string{multiGPUOverviewHeader(width)}
+	var (
+		active        int
+		workloads     int
+		totalMemory   uint64
+		usedMemory    uint64
+		totalPower    float64
+		totalLimit    float64
+		totalUtil     float64
+		busiestIndex  int
+		busiestUtil   float64
+		driverVersion string
+	)
+	for index, gpu := range gpus {
+		if gpu.Utilization >= 5 {
+			active++
+		}
+		workloads += len(gpu.Workloads)
+		totalMemory += gpu.MemoryTotal
+		usedMemory += gpu.MemoryUsed
+		totalPower += gpu.Power
+		totalLimit += gpu.PowerLimit
+		totalUtil += gpu.Utilization
+		if index == 0 || gpu.Utilization > busiestUtil {
+			busiestIndex, busiestUtil = gpu.Index, gpu.Utilization
+		}
+		if driverVersion == "" {
+			driverVersion = strings.TrimSpace(gpu.DriverVersion)
+		}
+		if index < limit {
+			lines = append(lines, multiGPUOverviewRow(gpu, width))
+		}
+	}
+
+	lines = append(lines, pageRule(width))
+	average := totalUtil / float64(max(1, len(gpus)))
+	lines = append(lines, ansi.Truncate(
+		fmt.Sprintf("%s  %s  %s",
+			gpuTitleStyle.Render(fmt.Sprintf("ACTIVE %d/%d", active, len(gpus))),
+			dimStyle.Render(fmt.Sprintf("AVG %.0f%%", average)),
+			gpuLoadStyle(busiestUtil).Render(fmt.Sprintf("PEAK GPU %d  %.0f%%", busiestIndex, busiestUtil))),
+		width, "…",
+	))
+	power := fmt.Sprintf("%.0f W", totalPower)
+	if totalLimit > 0 {
+		power = fmt.Sprintf("%.0f/%.0f W", totalPower, totalLimit)
+	}
+	lines = append(lines, ansi.Truncate(
+		fmt.Sprintf("%s  %s  %s",
+			memoryTitleStyle.Render("VRAM "+compactByteCount(usedMemory)+"/"+compactByteCount(totalMemory)),
+			dimStyle.Render("POWER "+power),
+			dimStyle.Render(fmt.Sprintf("JOBS %d", workloads))),
+		width, "…",
+	))
+	driver := "NVIDIA management telemetry"
+	if driverVersion != "" {
+		driver = "DRIVER " + driverVersion + "  ·  " + driver
+	}
+	lines = append(lines, ansi.Truncate(dimStyle.Render(driver), width, "…"))
+	more := ""
+	if len(gpus) > limit {
+		more = fmt.Sprintf("  ·  +%d more devices", len(gpus)-limit)
+	}
+	lines = append(lines, ansi.Truncate(
+		accentStyle.Render("[2 COMPUTE]")+" "+dimStyle.Render("full per-device telemetry"+more),
+		width, "…",
+	))
+	return lines
+}
+
+func multiGPUOverviewHeader(width int) string {
+	var header string
+	switch {
+	case width >= 68:
+		header = fixedCell("GPU", 3, false) + " " +
+			fixedCell("MODEL", 17, false) + " " +
+			fixedCell("LOAD", 12, false) + " " +
+			fixedCell("VRAM", 15, false) + " " +
+			fixedCell("PWR", 6, true) + " " +
+			fixedCell("TEMP", 5, true) + " JOB"
+	case width >= 50:
+		header = fixedCell("GPU", 3, false) + " " +
+			fixedCell("MODEL", 14, false) + " " +
+			fixedCell("LOAD", 11, false) + " " +
+			fixedCell("VRAM", 13, false) + " JOB"
+	default:
+		header = fixedCell("GPU / MODEL", max(10, width-17), false) + " LOAD / VRAM"
+	}
+	return dimStyle.Copy().Bold(true).Render(ansi.Truncate(header, width, ""))
+}
+
+func multiGPUOverviewRow(gpu gpuInfo, width int) string {
+	statusStyle := gpuLoadStyle(gpu.Utilization)
+	load := bar(gpu.Utilization, 5) + " " + fmt.Sprintf("%3.0f%%", gpu.Utilization)
+	memoryUsage := percent(gpu.MemoryUsed, gpu.MemoryTotal)
+	memoryStyle := gpuLoadStyle(memoryUsage)
+	memory := compactByteCount(gpu.MemoryUsed) + "/" + compactByteCount(gpu.MemoryTotal)
+	job := gpuOverviewWorkload(gpu)
+	id := accentStyle.Render(fmt.Sprintf("%d", gpu.Index))
+	model := shortGPUName(gpu.Name)
+	var row string
+	switch {
+	case width >= 68:
+		row = fixedCell(id, 3, false) + " " +
+			fixedCell(model, 17, false) + " " +
+			fixedCell(load, 12, false) + " " +
+			memoryStyle.Render(fixedCell(memory, 15, false)) + " " +
+			statusStyle.Render(fixedCell(fmt.Sprintf("%.0fW", gpu.Power), 6, true)) + " " +
+			statusStyle.Render(fixedCell(fmt.Sprintf("%d°C", gpu.Temperature), 5, true)) + " " +
+			gpuTitleStyle.Render(job)
+	case width >= 50:
+		row = fixedCell(id, 3, false) + " " +
+			fixedCell(model, 14, false) + " " +
+			fixedCell(load, 11, false) + " " +
+			memoryStyle.Render(fixedCell(memory, 13, false)) + " " +
+			gpuTitleStyle.Render(job)
+	default:
+		left := fixedCell(id, 3, false) + " " + model
+		right := statusStyle.Render(fmt.Sprintf("%.0f%%", gpu.Utilization)) + " " +
+			memoryStyle.Render(memory)
+		row = alignedPageLine(left, right, width)
+	}
+	return ansi.Truncate(row, width, "…")
+}
+
+func gpuLoadStyle(utilization float64) lipgloss.Style {
+	_, style := gpuLoadStatus(utilization)
+	return style
+}
+
+func shortGPUName(name string) string {
+	name = strings.TrimSpace(name)
+	for _, prefix := range []string{"NVIDIA GeForce ", "NVIDIA "} {
+		if strings.HasPrefix(name, prefix) {
+			return strings.TrimPrefix(name, prefix)
+		}
+	}
+	return name
+}
+
+func gpuOverviewWorkload(gpu gpuInfo) string {
+	if len(gpu.Workloads) == 0 {
+		return "—"
+	}
+	workload := gpu.Workloads[0]
+	name := strings.TrimSpace(workload.Name)
+	if separator := strings.LastIndex(name, "/"); separator >= 0 {
+		name = name[separator+1:]
+	}
+	if name == "" {
+		name = fmt.Sprintf("PID %d", workload.PID)
+	}
+	if workload.User != "" {
+		name += " · " + workload.User
+	}
+	if len(gpu.Workloads) > 1 {
+		name += fmt.Sprintf(" +%d", len(gpu.Workloads)-1)
+	}
+	return name
+}
+
+func compactByteCount(value uint64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%dB", value)
+	}
+	units := []string{"B", "K", "M", "G", "T", "P"}
+	number := float64(value)
+	index := 0
+	for number >= unit && index < len(units)-1 {
+		number /= unit
+		index++
+	}
+	if number >= 10 {
+		return fmt.Sprintf("%.0f%s", number, units[index])
+	}
+	return fmt.Sprintf("%.1f%s", number, units[index])
 }
 
 func gpuWorkloadSummary(gpu gpuInfo) string {

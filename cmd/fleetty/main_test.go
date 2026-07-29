@@ -1228,7 +1228,7 @@ func TestAppleComputeActivityMetricColumnsAlign(t *testing.T) {
 		Utilization: 33, RendererUtilization: 33, TilerUtilization: 26,
 		MemoryUsed: 3200 << 20, MemoryTotal: 9 << 30, CoreCount: 40,
 	}}}}
-	lines := model.computeActivityPanelSpec().lines
+	lines := model.computeActivityPanelSpec(80).lines
 	if len(lines) != 10 {
 		t.Fatalf("Apple compute activity lines = %d, want 10 to match Host Health without padding", len(lines))
 	}
@@ -1250,6 +1250,54 @@ func TestAppleComputeActivityMetricColumnsAlign(t *testing.T) {
 			t.Fatalf("%s starts at column %d, want 28: %q",
 				suffix, got, ansi.Strip(lines[index+1]))
 		}
+	}
+}
+
+func TestMultiGPUOverviewUsesOneBoundedRowPerDevice(t *testing.T) {
+	gpus := make([]gpuInfo, 8)
+	for index := range gpus {
+		gpus[index] = gpuInfo{
+			Index: index, Name: fmt.Sprintf("NVIDIA GeForce RTX 50%02d", 90-index),
+			DriverVersion: "610.43.02",
+			Utilization:   float64(index * 12),
+			MemoryUsed:    uint64(index+1) << 30,
+			MemoryTotal:   24 << 30,
+			Power:         float64(40 + index*20),
+			PowerLimit:    450,
+			Temperature:   45 + index,
+			UUID:          fmt.Sprintf("GPU-%d-secret-detail", index),
+		}
+	}
+	gpus[0].Workloads = []gpuWorkloadInfo{{PID: 42, User: "alice", Name: "/jobs/train.py"}}
+	lines := (&monitorModel{snapshot: monitorSnapshot{GPUs: gpus}}).
+		computeActivityPanelSpec(80).lines
+	if len(lines) != 10 {
+		t.Fatalf("8-GPU overview lines = %d, want a bounded 10-line summary", len(lines))
+	}
+	rendered := strings.Join(lines, "\n")
+	plain := ansi.Strip(rendered)
+	for _, expected := range []string{"MODEL", "LOAD", "VRAM", "PWR", "TEMP", "RTX 5090", "RTX 5087", "train.py", "+4 more devices"} {
+		if !strings.Contains(plain, expected) {
+			t.Fatalf("multi-GPU overview missing %q:\n%s", expected, plain)
+		}
+	}
+	for _, absent := range []string{"RTX 5086", "UUID", "secret-detail", "NVIDIA GeForce"} {
+		if strings.Contains(plain, absent) {
+			t.Fatalf("multi-GPU overview unexpectedly contains %q:\n%s", absent, plain)
+		}
+	}
+	for index, line := range lines {
+		if width := lipgloss.Width(line); width > 76 {
+			t.Fatalf("multi-GPU line %d width = %d, want <= 76: %q", index, width, ansi.Strip(line))
+		}
+	}
+	fourLines := (&monitorModel{snapshot: monitorSnapshot{GPUs: gpus[:4]}}).
+		computeActivityPanelSpec(80).lines
+	if len(fourLines) != 10 {
+		t.Fatalf("4-GPU overview lines = %d, want 10", len(fourLines))
+	}
+	if strings.Contains(ansi.Strip(strings.Join(fourLines, "\n")), "more devices") {
+		t.Fatal("4-GPU overview should display every device without an overflow hint")
 	}
 }
 
