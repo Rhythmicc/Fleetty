@@ -888,11 +888,7 @@ func (m *monitorModel) renderProcessPreviewRows(width, panelRows, visibleRows in
 	for index := m.monitorOffset; index < end; index++ {
 		row := format.row(processes[index])
 		if index == m.monitorCursor {
-			row = processStateStyle(processes[index].State).
-				Copy().
-				Background(lipgloss.Color("#24283B")).
-				Bold(true).
-				Render(row)
+			row = selectedProcessStyle(m.colorMode).Render(row)
 		} else {
 			row = processStateStyle(processes[index].State).Render(row)
 		}

@@ -1241,11 +1241,7 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	for i := m.monitorOffset; i < end; i++ {
 		row := format.row(processes[i])
 		if m.effectiveMonitorFocus() == monitorFocusProcesses && i == m.monitorCursor {
-			row = processStateStyle(processes[i].State).
-				Copy().
-				Background(lipgloss.Color("#24283B")).
-				Bold(true).
-				Render(row)
+			row = selectedProcessStyle(m.colorMode).Render(row)
 		} else {
 			row = processStateStyle(processes[i].State).Render(row)
 		}
@@ -1305,11 +1301,7 @@ func (m *monitorModel) adminView() string {
 	for i := m.processOffset; i < end; i++ {
 		row := format.row(processes[i])
 		if i == m.cursor && !m.filtering {
-			row = processStateStyle(processes[i].State).
-				Copy().
-				Background(lipgloss.Color("#24283B")).
-				Bold(true).
-				Render(row)
+			row = selectedProcessStyle(m.colorMode).Render(row)
 		} else {
 			row = processStateStyle(processes[i].State).Render(row)
 		}
@@ -1671,6 +1663,24 @@ func processStateStyle(state string) lipgloss.Style {
 	default:
 		return processDefaultStyle
 	}
+}
+
+// selectedProcessStyle uses colors that are explicit members of the xterm
+// palette. That keeps SSH terminals which only advertise 256 colors from
+// approximating the selection background as saturated blue. Selection also
+// deliberately overrides the process-state foreground; state colors remain
+// visible on every unselected row and in the legend.
+func selectedProcessStyle(mode colorMode) lipgloss.Style {
+	foreground := lipgloss.Color("153") // soft blue
+	background := lipgloss.Color("236") // neutral charcoal
+	if mode == colorModeLight {
+		foreground = lipgloss.Color("17")  // dark navy
+		background = lipgloss.Color("189") // pale blue
+	}
+	return lipgloss.NewStyle().
+		Foreground(foreground).
+		Background(background).
+		Bold(true)
 }
 
 func actionCard(width int, key, title, detail string, dangerous bool) string {

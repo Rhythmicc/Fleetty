@@ -2505,6 +2505,17 @@ func TestProcessStateColorsAndRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestSelectedProcessStyleIsStableAcrossTerminalPalettes(t *testing.T) {
+	dark := selectedProcessStyle(colorModeDark).Render("row")
+	if !strings.Contains(dark, "38;5;153") || !strings.Contains(dark, "48;5;236") {
+		t.Fatalf("dark selection should use explicit xterm colors: %q", dark)
+	}
+	light := selectedProcessStyle(colorModeLight).Render("row")
+	if !strings.Contains(light, "38;5;17") || !strings.Contains(light, "48;5;189") {
+		t.Fatalf("light selection should use explicit xterm colors: %q", light)
+	}
+}
+
 func testKey(s string) tea.KeyMsg { return tea.KeyPressMsg{Code: keyCode(s), Text: keyText(s)} }
 
 func keyCode(s string) rune {
