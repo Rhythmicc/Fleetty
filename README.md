@@ -106,7 +106,7 @@ install -m 0755 "/tmp/${fleetty_asset}" "$HOME/.local/bin/fleetty"
 "$HOME/.local/bin/fleetty" top
 ```
 
-`fleetty top --theme light` 使用浅色主题。MacBook 会自动显示电量、充放电状态、剩余时间和当前电源来源；没有电池的桌面 Mac 自动隐藏该状态卡。该模式不启动后台服务、不开放网络端口，也不需要 root；`q` 退出，`t` 切换主题，`/` 过滤进程，方向键、回车和鼠标可以选择并查看进程详情。
+`fleetty top --theme light` 使用浅色主题。Apple Silicon Mac 会通过 IOKit 显示 GPU 总负载、渲染器与 Tiler 利用率、核心数和已使用/已分配的统一内存，无需 root。MacBook 还会自动显示电量、充放电状态、剩余时间和当前电源来源；没有电池的桌面 Mac 自动隐藏该状态卡。该模式不启动后台服务、不开放网络端口，也不需要 root；`q` 退出，`t` 切换主题，`/` 过滤进程，方向键、回车和鼠标可以选择并查看进程详情。
 
 按 `l` 可以打开布局编辑器，对系统概览、GPU、节点队列和进程模块进行排序或折叠。平台不支持的模块会自动隐藏，例如普通 Mac 不显示 GPU 和 Slurm 队列。布局调整不需要管理权限；在本地 `fleetty top` 中按 `s` 会保存到当前用户的配置目录，后续启动自动恢复。也可以通过 `--layout PATH` 或 `FLEETTY_LAYOUT_FILE` 指定布局文件。
 

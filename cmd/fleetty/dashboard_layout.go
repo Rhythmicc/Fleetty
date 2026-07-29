@@ -41,9 +41,10 @@ var dashboardPanelRegistry = []dashboardPanelDescriptor{
 	},
 	{
 		ID: dashboardPanelGPU, Label: "GPU",
-		Description: "GPU load, memory, clocks, power, and temperature",
+		Description: "GPU load, memory, engines, and hardware telemetry",
 		Available: func(m *monitorModel) bool {
-			return m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU
+			return m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU ||
+				len(m.snapshot.GPUs) > 0
 		},
 	},
 	{
@@ -296,16 +297,24 @@ func (m *monitorModel) handleLayoutButtonClick(x int) {
 }
 
 func renderCollapsedDashboardPanel(width int, label, summary string) string {
+	return renderCompactDashboardPanel(width, label, summary, "COLLAPSED")
+}
+
+func renderAutoCompactDashboardPanel(width int, label, summary string) string {
+	return renderCompactDashboardPanel(width, label, summary, "AUTO COMPACT")
+}
+
+func renderCompactDashboardPanel(width int, label, summary, state string) string {
 	width = max(20, width)
 	innerWidth := width - 2
 	borderStyle := lipgloss.NewStyle().Foreground(colorPanelBorder)
-	meta := " COLLAPSED"
+	meta := " " + state
 	if summary != "" {
 		meta += " · " + summary
 	}
 	meta += " "
 	if lipgloss.Width(meta) > width/2 {
-		meta = " COLLAPSED "
+		meta = " " + state + " "
 	}
 	titleWidth := max(4, width-lipgloss.Width(meta)-6)
 	title := " " + truncate(strings.ToUpper(label), titleWidth) + " "

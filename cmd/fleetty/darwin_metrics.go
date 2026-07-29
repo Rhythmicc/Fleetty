@@ -215,6 +215,81 @@ func readDarwinBattery() (*batteryInfo, error) {
 	return parseDarwinBattery(output)
 }
 
+func readDarwinAppleGPU() ([]gpuInfo, error) {
+	output, err := commandOutput(2*time.Second, "ioreg", "-r", "-c", "AGXAccelerator", "-l")
+	if err != nil {
+		return nil, err
+	}
+	name := "Apple GPU"
+	if brand, brandErr := commandOutput(2*time.Second, "sysctl", "-n", "machdep.cpu.brand_string"); brandErr == nil {
+		if value := sanitizeTerminalText(string(brand)); value != "" {
+			name = value
+		}
+	}
+	gpu, err := parseDarwinAppleGPU(output, name)
+	if err != nil {
+		return nil, err
+	}
+	return []gpuInfo{gpu}, nil
+}
+
+func parseDarwinAppleGPU(output []byte, name string) (gpuInfo, error) {
+	performanceLine := ""
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.Contains(line, `"PerformanceStatistics"`) {
+			performanceLine = line
+			break
+		}
+	}
+	if performanceLine == "" {
+		return gpuInfo{}, errors.New("AGX performance statistics are unavailable")
+	}
+
+	device, ok := parseIORegistryUint(performanceLine, "Device Utilization %")
+	if !ok {
+		return gpuInfo{}, errors.New("AGX device utilization is unavailable")
+	}
+	renderer, _ := parseIORegistryUint(performanceLine, "Renderer Utilization %")
+	tiler, _ := parseIORegistryUint(performanceLine, "Tiler Utilization %")
+	memoryUsed, _ := parseIORegistryUint(performanceLine, "In use system memory")
+	memoryAllocated, _ := parseIORegistryUint(performanceLine, "Alloc system memory")
+	cores, _ := parseIORegistryUint(string(output), "gpu-core-count")
+	if strings.TrimSpace(name) == "" {
+		name = "Apple GPU"
+	}
+	return gpuInfo{
+		Index: 0, Name: sanitizeTerminalText(name), Platform: "apple",
+		Utilization:         minFloat64(100, float64(device)),
+		RendererUtilization: minFloat64(100, float64(renderer)),
+		TilerUtilization:    minFloat64(100, float64(tiler)),
+		MemoryUsed:          memoryUsed, MemoryTotal: memoryAllocated,
+		CoreCount: int(cores),
+	}, nil
+}
+
+func parseIORegistryUint(output, key string) (uint64, bool) {
+	marker := `"` + key + `"`
+	start := strings.Index(output, marker)
+	if start < 0 {
+		return 0, false
+	}
+	remainder := output[start+len(marker):]
+	equals := strings.IndexByte(remainder, '=')
+	if equals < 0 {
+		return 0, false
+	}
+	remainder = strings.TrimLeft(remainder[equals+1:], " \t")
+	end := 0
+	for end < len(remainder) && remainder[end] >= '0' && remainder[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(remainder[:end], 10, 64)
+	return value, err == nil
+}
+
 func parseDarwinBattery(output []byte) (*batteryInfo, error) {
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) == 0 {

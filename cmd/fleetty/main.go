@@ -979,7 +979,8 @@ func (m *monitorModel) monitorView() string {
 		return m.nasView()
 	}
 	m.ensurePanelLayout()
-	showGPU := m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU
+	showGPU := m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU ||
+		len(m.snapshot.GPUs) > 0
 	gpuCount := len(m.snapshot.GPUs)
 	if !showGPU {
 		gpuCount = -1
@@ -1020,6 +1021,7 @@ func (m *monitorModel) monitorView() string {
 
 	panels := m.orderedDashboardPanels()
 	rendered := make(map[dashboardPanelID]string, len(panels))
+	autoCompacted := make(map[dashboardPanelID]bool)
 	fixedHeight := lipgloss.Height(header) + lipgloss.Height(footer)
 	processExpanded := false
 	for _, panel := range panels {
@@ -1038,9 +1040,37 @@ func (m *monitorModel) monitorView() string {
 		if len(m.filteredProcesses()) == 0 {
 			processBaseHeight++
 		}
-		layout.processRows = max(0, layout.height-fixedHeight-processBaseHeight)
-		m.clampMonitorProcessCursor(layout.processRows)
-		rendered[dashboardPanelProcesses] = m.processPanel(layout)
+		switch {
+		case fixedHeight+processBaseHeight <= layout.height:
+			layout.processRows = max(0, layout.height-fixedHeight-processBaseHeight)
+			m.clampMonitorProcessCursor(layout.processRows)
+			rendered[dashboardPanelProcesses] = m.processPanel(layout)
+		case fixedHeight < layout.height:
+			rendered[dashboardPanelProcesses] = renderAutoCompactDashboardPanel(
+				layout.width, "Processes", m.dashboardPanelSummary(dashboardPanelProcesses))
+			autoCompacted[dashboardPanelProcesses] = true
+		default:
+			for _, candidate := range []dashboardPanelID{
+				dashboardPanelOverview, dashboardPanelGPU, dashboardPanelNodeQueue,
+			} {
+				if fixedHeight < layout.height {
+					break
+				}
+				if rendered[candidate] == "" || m.dashboardPanelCollapsed(candidate) {
+					continue
+				}
+				descriptor, _ := dashboardPanelByID(candidate)
+				compact := renderAutoCompactDashboardPanel(layout.width, descriptor.Label, m.dashboardPanelSummary(candidate))
+				fixedHeight += lipgloss.Height(compact) - lipgloss.Height(rendered[candidate])
+				rendered[candidate] = compact
+				autoCompacted[candidate] = true
+			}
+			if fixedHeight < layout.height {
+				rendered[dashboardPanelProcesses] = renderAutoCompactDashboardPanel(
+					layout.width, "Processes", m.dashboardPanelSummary(dashboardPanelProcesses))
+				autoCompacted[dashboardPanelProcesses] = true
+			}
+		}
 	}
 
 	m.queuePanelY, m.processPanelY, m.processRowY = -1, -1, -1
@@ -1052,7 +1082,7 @@ func (m *monitorModel) monitorView() string {
 		if content == "" {
 			continue
 		}
-		if !panel.Collapsed {
+		if !panel.Collapsed && !autoCompacted[panel.ID] {
 			switch panel.ID {
 			case dashboardPanelNodeQueue:
 				m.queuePanelY = currentY
@@ -1172,7 +1202,7 @@ func dashboardHeaderNamed(label string, width int, collectedAt time.Time, mode c
 func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 	w := layout.width
 	if m.snapshot.GPUError != "" {
-		return btopPanel(w, "GPU", "UNAVAILABLE", dimStyle.Render("nvidia-smi unavailable: "+m.snapshot.GPUError), gpuTitleStyle, colorGPUBorder)
+		return btopPanel(w, "GPU", "UNAVAILABLE", dimStyle.Render("GPU metrics unavailable: "+m.snapshot.GPUError), gpuTitleStyle, colorGPUBorder)
 	}
 	lines := make([]string, 0, max(1, len(m.snapshot.GPUs)*3))
 	memoryUsedWidth, memoryTotalWidth := gpuMemoryWidths(m.snapshot.GPUs)
@@ -1206,7 +1236,7 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 		)
 	}
 	if len(m.snapshot.GPUs) == 0 {
-		lines = append(lines, dimStyle.Render("No NVIDIA GPU was reported."))
+		lines = append(lines, dimStyle.Render("No GPU was reported."))
 	}
 	meta := fmt.Sprintf("%d DEVICE", len(m.snapshot.GPUs))
 	if len(m.snapshot.GPUs) != 1 {
@@ -1216,6 +1246,14 @@ func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
 }
 
 func gpuTelemetry(gpu gpuInfo, showPowerLimit bool) string {
+	if gpu.Platform == "apple" {
+		cores := "CORES ?"
+		if gpu.CoreCount > 0 {
+			cores = fmt.Sprintf("CORES %d", gpu.CoreCount)
+		}
+		return fmt.Sprintf("%s · RENDER %3.0f%% · TILER %3.0f%%",
+			cores, gpu.RendererUtilization, gpu.TilerUtilization)
+	}
 	if showPowerLimit && gpu.PowerLimit > 0 {
 		return fmt.Sprintf("CLK %4d MHz · PWR %3.0f/%3.0f W · %3d°C", gpu.ClockMHz, gpu.Power, gpu.PowerLimit, gpu.Temperature)
 	}
@@ -1231,6 +1269,10 @@ func gpuMemoryWidths(gpus []gpuInfo) (usedWidth, totalWidth int) {
 }
 
 func gpuMemoryText(gpu gpuInfo, usedWidth, totalWidth int) string {
+	if gpu.Platform == "apple" {
+		return fmt.Sprintf("UMA %*s USED · %*s ALLOC",
+			usedWidth, bytes(gpu.MemoryUsed), totalWidth, bytes(gpu.MemoryTotal))
+	}
 	return fmt.Sprintf("MEM %*s/%*s", usedWidth, bytes(gpu.MemoryUsed), totalWidth, bytes(gpu.MemoryTotal))
 }
 
@@ -1514,7 +1556,7 @@ func newDashboardLayoutForMetrics(width, height, gpuCount int, gpuUnavailable bo
 	switch {
 	case metricCount >= 5 && width >= 140:
 		cols = 5
-	case metricCount >= 5 && width >= 84:
+	case metricCount >= 5 && width >= 72:
 		cols = 3
 	case width >= 132:
 		cols = 4
@@ -1851,8 +1893,12 @@ type managementActionInfo struct {
 type gpuInfo struct {
 	Index                   int
 	Name                    string
+	Platform                string
 	Utilization             float64
+	RendererUtilization     float64
+	TilerUtilization        float64
 	MemoryUsed, MemoryTotal uint64
+	CoreCount               int
 	Temperature             int
 	ClockMHz                int
 	Power, PowerLimit       float64
@@ -1958,8 +2004,8 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 	s.LoadAverage = readLoadAverage()
 	if runtime.GOOS == "darwin" {
 		s.Battery, _ = readDarwinBattery()
-	}
-	if c.config.Profile == machineProfileGPU {
+		s.GPUs, _ = readDarwinAppleGPU()
+	} else if c.config.Profile == machineProfileGPU {
 		s.GPUs, s.GPUError = readGPUs()
 	}
 	c.collectMachineDetails(&s)

@@ -939,6 +939,20 @@ lo0 16384 <Link#1> 1 0 100 1 0 100 0
 		t.Fatalf("desktop battery parser = %#v, %v; want no battery", battery, err)
 	}
 
+	appleGPU, err := parseDarwinAppleGPU([]byte(`
+  |   "PerformanceStatistics" = {"In use system memory (driver)"=0,"Alloc system memory"=8936095744,"Tiler Utilization %"=37,"Renderer Utilization %"=42,"Device Utilization %"=42,"In use system memory"=3495854080}
+  |   "gpu-core-count" = 40
+`), "Apple M5 Max")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appleGPU.Platform != "apple" || appleGPU.Name != "Apple M5 Max" ||
+		appleGPU.Utilization != 42 || appleGPU.RendererUtilization != 42 ||
+		appleGPU.TilerUtilization != 37 || appleGPU.CoreCount != 40 ||
+		appleGPU.MemoryUsed != 3495854080 || appleGPU.MemoryTotal != 8936095744 {
+		t.Fatalf("Apple GPU parser = %#v", appleGPU)
+	}
+
 	for value, want := range map[string]uint64{
 		"01:02":      62,
 		"03:04:05":   11045,
@@ -960,6 +974,20 @@ func TestDarwinCurrentProcessDetail(t *testing.T) {
 	}
 	if detail.PID != os.Getpid() || detail.StartTimeTicks == 0 || detail.CommandLine == "" {
 		t.Fatalf("current process detail = %#v", detail)
+	}
+}
+
+func TestDarwinCurrentAppleGPU(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("Apple Silicon integration check")
+	}
+	gpus, err := readDarwinAppleGPU()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gpus) != 1 || gpus[0].Platform != "apple" || gpus[0].Name == "" ||
+		gpus[0].CoreCount == 0 {
+		t.Fatalf("current Apple GPU = %#v", gpus)
 	}
 }
 
@@ -1003,6 +1031,38 @@ func TestMacBatteryCardIsResponsive(t *testing.T) {
 			if got := lipgloss.Width(line); got > size.width {
 				t.Fatalf("%dx%d line %d width = %d: %q", size.width, size.height, lineNumber, got, line)
 			}
+		}
+	}
+}
+
+func TestAppleGPUAndBatteryFitSmallTerminal(t *testing.T) {
+	model := &monitorModel{
+		profile: machineProfileGeneral, width: 60, height: 24,
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryUsed: 8 << 30, MemoryTotal: 16 << 30,
+			DiskUsed: 200 << 30, DiskTotal: 500 << 30,
+			Battery: &batteryInfo{Percent: 80, Status: "not charging", PowerSource: "AC Power"},
+			GPUs: []gpuInfo{{
+				Index: 0, Name: "Apple M5 Max", Platform: "apple",
+				Utilization: 42, RendererUtilization: 42, TilerUtilization: 37,
+				MemoryUsed: 3 << 30, MemoryTotal: 8 << 30, CoreCount: 40,
+			}},
+			Processes: []processInfo{{PID: 42, User: "alice", State: "R", Command: "metal-worker"}},
+		},
+	}
+	rendered := model.monitorView()
+	for _, expected := range []string{"GPU", "Apple M5 Max", "RENDER", "TILER", "BATTERY", "PROCESSES", "AUTO COMPACT"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("small Apple dashboard missing %q:\n%s", expected, rendered)
+		}
+	}
+	if got := lipgloss.Height(rendered); got > model.height {
+		t.Fatalf("small Apple dashboard height = %d, want <= %d\n%s", got, model.height, rendered)
+	}
+	for lineNumber, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > model.width {
+			t.Fatalf("small Apple dashboard line %d width = %d\n%q", lineNumber, got, line)
 		}
 	}
 }
@@ -1713,6 +1773,13 @@ func TestGPUClockAndPowerParsing(t *testing.T) {
 	}
 	if got := gpuTelemetry(gpu, true); got != "CLK 1410 MHz · PWR  71/250 W ·  55°C" {
 		t.Fatalf("GPU telemetry text = %q", got)
+	}
+	apple := gpuInfo{
+		Platform: "apple", CoreCount: 40,
+		RendererUtilization: 42, TilerUtilization: 37,
+	}
+	if got := gpuTelemetry(apple, true); got != "CORES 40 · RENDER  42% · TILER  37%" {
+		t.Fatalf("Apple GPU telemetry text = %q", got)
 	}
 }
 
