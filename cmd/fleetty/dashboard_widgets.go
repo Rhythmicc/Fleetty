@@ -115,14 +115,32 @@ func (m *monitorModel) renderWidgetGrid(width int) (string, []widgetPlacement) {
 		used = 0
 	}
 
+	pending := make([]dashboardPanelPreference, 0, len(preferences))
 	for _, preference := range preferences {
-		if preference.Collapsed {
-			continue
+		if !preference.Collapsed {
+			pending = append(pending, preference)
 		}
-		span := widgetColumnSpan(preference, columns)
+	}
+	for len(pending) > 0 {
+		candidate := 0
+		span := widgetColumnSpan(pending[candidate], columns)
 		if used > 0 && used+span > columns {
-			flush()
+			candidate = -1
+			remaining := columns - used
+			for index := 1; index < len(pending); index++ {
+				if widgetColumnSpan(pending[index], columns) <= remaining {
+					candidate = index
+					break
+				}
+			}
+			if candidate < 0 {
+				flush()
+				continue
+			}
+			span = widgetColumnSpan(pending[candidate], columns)
 		}
+		preference := pending[candidate]
+		pending = append(pending[:candidate], pending[candidate+1:]...)
 		widgetWidth := (span - 1) * gap
 		for _, partWidth := range columnWidths[used : used+span] {
 			widgetWidth += partWidth
@@ -168,7 +186,8 @@ func widgetGridColumns(width int) int {
 }
 
 func widgetColumnSpan(preference dashboardPanelPreference, columns int) int {
-	structural := preference.ID == dashboardPanelGPU ||
+	structural := preference.ID == dashboardPanelNetwork ||
+		preference.ID == dashboardPanelGPU ||
 		preference.ID == dashboardPanelNodeQueue ||
 		preference.ID == dashboardPanelProcesses
 	switch preference.Size {
@@ -454,55 +473,100 @@ func (m *monitorModel) renderLargeBatteryWidget(card metricCard, width int) stri
 
 func (m *monitorModel) renderLargeNetworkWidget(card metricCard, width int) string {
 	contentWidth := max(4, width-4)
-	lines := []string{
-		networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
-			networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s"),
-		dimStyle.Render(fmt.Sprintf(
-			"TOTAL  ↓ %s  ↑ %s",
-			bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal),
-		)),
-		renderMetricVisual(card, contentWidth),
-		"",
+	meta, details := m.largeNetworkDetails(contentWidth)
+	var lines []string
+	if contentWidth >= 100 {
+		leftWidth := min(50, max(38, contentWidth/3))
+		rightWidth := max(40, contentWidth-leftWidth-3)
+		summary := []string{
+			networkTitleStyle.Render("TRAFFIC SUMMARY"),
+			networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
+				networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s"),
+			dimStyle.Render(fmt.Sprintf(
+				"TOTAL  ↓ %s  ↑ %s",
+				bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal),
+			)),
+			"",
+			networkTitleStyle.Render("RECENT 60 SECONDS"),
+			renderMetricVisual(card, leftWidth),
+		}
+		lines = strings.Split(renderWidgetColumns(summary, details, leftWidth, rightWidth), "\n")
+	} else {
+		lines = []string{
+			networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
+				networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s"),
+			dimStyle.Render(fmt.Sprintf(
+				"TOTAL  ↓ %s  ↑ %s",
+				bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal),
+			)),
+			renderMetricVisual(card, contentWidth),
+			"",
+		}
+		lines = append(lines, details...)
 	}
+	return btopPanel(
+		width, "NETWORK", meta, strings.Join(lines, "\n"),
+		networkTitleStyle, colorNetworkBorder,
+	)
+}
+
+func (m *monitorModel) largeNetworkDetails(width int) (string, []string) {
 	meta := "LARGE"
+	var lines []string
 	switch {
 	case len(m.snapshot.NetworkProcesses) > 0:
 		meta += fmt.Sprintf(" · %d PROCESSES", len(m.snapshot.NetworkProcesses))
-		lines = append(lines,
+		lines = []string{
 			networkTitleStyle.Render("TOP APPLICATIONS / PROCESSES"),
-			networkProcessHeader(contentWidth),
-		)
+			networkProcessHeader(width),
+		}
 		limit := min(6, len(m.snapshot.NetworkProcesses))
 		for _, process := range m.snapshot.NetworkProcesses[:limit] {
-			lines = append(lines, renderNetworkProcessRow(process, contentWidth))
+			lines = append(lines, renderNetworkProcessRow(process, width))
 		}
 	case len(m.snapshot.NetworkInterfaces) > 0:
 		meta += fmt.Sprintf(" · %d INTERFACES", len(m.snapshot.NetworkInterfaces))
-		lines = append(lines,
+		lines = []string{
 			networkTitleStyle.Render("NETWORK INTERFACES"),
-			networkInterfaceHeader(contentWidth),
-		)
+			networkInterfaceHeader(width),
+		}
 		limit := min(5, len(m.snapshot.NetworkInterfaces))
 		for _, networkInterface := range m.snapshot.NetworkInterfaces[:limit] {
-			lines = append(lines, renderNetworkInterfaceRow(networkInterface, contentWidth))
+			lines = append(lines, renderNetworkInterfaceRow(networkInterface, width))
 		}
 		if m.snapshot.NetworkProcessError != "" {
-			lines = append(lines, dimStyle.Render(truncate(m.snapshot.NetworkProcessError, contentWidth)))
+			lines = append(lines, dimStyle.Render(truncate(m.snapshot.NetworkProcessError, width)))
 		}
 	default:
 		message := "Collecting per-process traffic…"
 		if m.snapshot.NetworkProcessError != "" {
 			message = m.snapshot.NetworkProcessError
 		}
-		lines = append(lines,
+		lines = []string{
 			networkTitleStyle.Render("TOP APPLICATIONS / PROCESSES"),
-			dimStyle.Render(truncate(message, contentWidth)),
-		)
+			dimStyle.Render(truncate(message, width)),
+		}
 	}
-	return btopPanel(
-		width, "NETWORK", meta, strings.Join(lines, "\n"),
-		networkTitleStyle, colorNetworkBorder,
-	)
+	return meta, lines
+}
+
+func renderWidgetColumns(left, right []string, leftWidth, rightWidth int) string {
+	height := max(len(left), len(right))
+	rows := make([]string, 0, height)
+	leftStyle := lipgloss.NewStyle().Width(leftWidth).MaxWidth(leftWidth)
+	rightStyle := lipgloss.NewStyle().Width(rightWidth).MaxWidth(rightWidth)
+	divider := dimStyle.Render(" │ ")
+	for index := 0; index < height; index++ {
+		leftLine, rightLine := "", ""
+		if index < len(left) {
+			leftLine = ansi.Truncate(left[index], leftWidth, "")
+		}
+		if index < len(right) {
+			rightLine = ansi.Truncate(right[index], rightWidth, "")
+		}
+		rows = append(rows, leftStyle.Render(leftLine)+divider+rightStyle.Render(rightLine))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func networkProcessHeader(width int) string {

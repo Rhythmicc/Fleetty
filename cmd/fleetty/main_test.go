@@ -1163,6 +1163,59 @@ func TestLargeNetworkWidgetAddsProcessTrafficDetails(t *testing.T) {
 	}
 }
 
+func TestLargeNetworkUsesFullWidthDenseLayout(t *testing.T) {
+	model := &monitorModel{
+		width: 160, height: 40, profile: machineProfileGeneral,
+		panelLayout: panelLayoutConfig{Panels: []dashboardPanelPreference{
+			{ID: dashboardPanelCPU, Size: widgetSizeSmall},
+			{ID: dashboardPanelMemory, Size: widgetSizeSmall},
+			{ID: dashboardPanelDisk, Size: widgetSizeSmall},
+			{ID: dashboardPanelNetwork, Size: widgetSizeLarge},
+			{ID: dashboardPanelBattery, Size: widgetSizeSmall},
+			{ID: dashboardPanelGPU, Collapsed: true, Size: widgetSizeLarge},
+			{ID: dashboardPanelNodeQueue, Collapsed: true, Size: widgetSizeLarge},
+			{ID: dashboardPanelProcesses, Collapsed: true, Size: widgetSizeLarge},
+		}},
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileGeneral,
+			MemoryUsed: 8 << 30, MemoryTotal: 16 << 30,
+			DiskUsed: 200 << 30, DiskTotal: 500 << 30,
+			NetworkRX: 2 << 20, NetworkTX: 1 << 20,
+			Battery: &batteryInfo{Percent: 80, Status: "charging", PowerSource: "AC Power"},
+			NetworkProcesses: []processNetworkInfo{
+				{PID: 42, Name: "sync-worker", RX: 1536 << 10, TX: 256 << 10},
+			},
+		},
+	}
+	rendered, placements := model.renderWidgetGrid(160)
+	if len(placements) != 5 {
+		t.Fatalf("placements = %#v", placements)
+	}
+	for index, id := range []dashboardPanelID{
+		dashboardPanelCPU, dashboardPanelMemory, dashboardPanelDisk, dashboardPanelBattery,
+	} {
+		if placements[index].ID != id || placements[index].Y != 0 {
+			t.Fatalf("top row was not densely packed: %#v", placements)
+		}
+	}
+	network := placements[4]
+	if network.ID != dashboardPanelNetwork || network.X != 0 || network.Width != 160 || network.Y == 0 {
+		t.Fatalf("large network placement = %#v", network)
+	}
+	for _, expected := range []string{
+		"TRAFFIC SUMMARY", "RECENT 60 SECONDS", "TOP APPLICATIONS / PROCESSES", "sync-worker",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("wide network layout missing %q:\n%s", expected, rendered)
+		}
+	}
+	for lineNumber, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > 160 {
+			t.Fatalf("dense layout line %d width = %d: %q", lineNumber, got, line)
+		}
+	}
+}
+
 func TestLargeSystemWidgetsAddMetricSpecificDetails(t *testing.T) {
 	model := &monitorModel{
 		width: 100, height: 32,
