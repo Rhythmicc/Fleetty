@@ -1160,7 +1160,11 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	for i := m.monitorOffset; i < end; i++ {
 		row := format.row(processes[i])
 		if m.effectiveMonitorFocus() == monitorFocusProcesses && i == m.monitorCursor {
-			row = selectedRowStyle.Render(row)
+			row = processStateStyle(processes[i].State).
+				Copy().
+				Background(lipgloss.Color("#24283B")).
+				Bold(true).
+				Render(row)
 		} else {
 			row = processStateStyle(processes[i].State).Render(row)
 		}
@@ -1220,7 +1224,11 @@ func (m *monitorModel) adminView() string {
 	for i := m.processOffset; i < end; i++ {
 		row := format.row(processes[i])
 		if i == m.cursor && !m.filtering {
-			row = selectedRowStyle.Render(row)
+			row = processStateStyle(processes[i].State).
+				Copy().
+				Background(lipgloss.Color("#24283B")).
+				Bold(true).
+				Render(row)
 		} else {
 			row = processStateStyle(processes[i].State).Render(row)
 		}
@@ -1709,6 +1717,8 @@ type monitorSnapshot struct {
 	NetworkRX, NetworkTX    uint64
 	NetworkRXTotal          uint64
 	NetworkTXTotal          uint64
+	NetworkProcesses        []processNetworkInfo
+	NetworkProcessError     string
 	Battery                 *batteryInfo
 	NetworkInterfaces       []networkInterfaceInfo
 	Filesystems             []filesystemInfo
@@ -1758,6 +1768,13 @@ type processInfo struct {
 	RSS, Elapsed         uint64
 }
 
+type processNetworkInfo struct {
+	PID              int
+	Name             string
+	RX, TX           uint64
+	RXTotal, TXTotal uint64
+}
+
 type processDetail struct {
 	PID, PPID, UID, Threads int
 	User, State, Name       string
@@ -1778,9 +1795,11 @@ type metricsCollector struct {
 	previousCPU        cpuCounters
 	previousNet        netCounters
 	previousInterfaces map[string]networkDeviceCounters
+	previousProcessNet map[int]processNetworkCounters
 	haveCPU            bool
 	haveNet            bool
 	lastNetAt          time.Time
+	lastProcessNetAt   time.Time
 	lastServiceAt      time.Time
 	cachedServices     []serviceHealth
 	cachedContainers   []containerInfo
@@ -1799,7 +1818,11 @@ func counterDelta(current, previous uint64) uint64 {
 }
 
 func newMetricsCollector(config machineConfig) *metricsCollector {
-	return &metricsCollector{config: config, previousInterfaces: make(map[string]networkDeviceCounters)}
+	return &metricsCollector{
+		config:             config,
+		previousInterfaces: make(map[string]networkDeviceCounters),
+		previousProcessNet: make(map[int]processNetworkCounters),
+	}
 }
 
 func (c *metricsCollector) collect() (monitorSnapshot, error) {
@@ -1847,6 +1870,9 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 	}
 	if err := c.collectNetwork(&s); err != nil {
 		errs = append(errs, "network: "+err.Error())
+	}
+	if includeProcesses {
+		c.collectProcessNetwork(&s)
 	}
 	s.LoadAverage = readLoadAverage()
 	if runtime.GOOS == "darwin" {
@@ -2168,7 +2194,6 @@ var (
 	hintLabelStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C9CEDA"))
 	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#9FC3FF")).Bold(true)
 	inputStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
-	selectedRowStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true)
 	networkRXStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
 	networkTXStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A7E7")).Bold(true)
 	processRunningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)

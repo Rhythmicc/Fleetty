@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"os"
@@ -104,6 +105,71 @@ func readDarwinNetworkDevices() (map[string]networkDeviceCounters, error) {
 		return nil, err
 	}
 	return parseDarwinNetstat(output)
+}
+
+func readDarwinProcessNetwork() (map[int]processNetworkCounters, error) {
+	output, err := commandOutput(
+		2*time.Second,
+		"nettop", "-P", "-L", "1", "-n", "-x", "-J", "bytes_in,bytes_out",
+	)
+	if err != nil {
+		return nil, err
+	}
+	return parseDarwinProcessNetwork(output)
+}
+
+func parseDarwinProcessNetwork(output []byte) (map[int]processNetworkCounters, error) {
+	reader := csv.NewReader(strings.NewReader(string(output)))
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("parse nettop CSV: %w", err)
+	}
+	if len(records) < 1 {
+		return nil, errors.New("nettop returned no process counters")
+	}
+	indexes := make(map[string]int, len(records[0]))
+	for index, name := range records[0] {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			indexes[name] = index
+		}
+	}
+	bytesInIndex, hasBytesIn := indexes["bytes_in"]
+	bytesOutIndex, hasBytesOut := indexes["bytes_out"]
+	if !hasBytesIn || !hasBytesOut {
+		return nil, errors.New("nettop process byte columns are missing")
+	}
+	maxIndex := max(bytesInIndex, bytesOutIndex)
+	result := make(map[int]processNetworkCounters)
+	for _, record := range records[1:] {
+		if len(record) <= maxIndex || len(record) == 0 {
+			continue
+		}
+		identity := strings.TrimSpace(record[0])
+		dot := strings.LastIndexByte(identity, '.')
+		if dot <= 0 || dot == len(identity)-1 {
+			continue
+		}
+		pid, parseErr := strconv.Atoi(identity[dot+1:])
+		if parseErr != nil || pid <= 0 {
+			continue
+		}
+		rx, rxErr := strconv.ParseUint(strings.TrimSpace(record[bytesInIndex]), 10, 64)
+		tx, txErr := strconv.ParseUint(strings.TrimSpace(record[bytesOutIndex]), 10, 64)
+		if rxErr != nil || txErr != nil {
+			continue
+		}
+		name := sanitizeTerminalText(identity[:dot])
+		if name == "" {
+			name = fmt.Sprintf("PID %d", pid)
+		}
+		existing := result[pid]
+		if existing.name == "" || rx+tx > existing.rx+existing.tx {
+			result[pid] = processNetworkCounters{name: name, rx: rx, tx: tx}
+		}
+	}
+	return result, nil
 }
 
 func parseDarwinNetstat(output []byte) (map[string]networkDeviceCounters, error) {

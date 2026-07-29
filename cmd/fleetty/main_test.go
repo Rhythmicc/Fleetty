@@ -914,6 +914,27 @@ lo0 16384 <Link#1> 1 0 100 1 0 100 0
 		t.Fatalf("netstat parser = %#v", devices)
 	}
 
+	processes, err := parseDarwinProcessNetwork([]byte(
+		",bytes_in,bytes_out,\n" +
+			"Safari.4321,1048576,524288,\n" +
+			"com.apple.WebKit.Networking.9876,4096,8192,\n" +
+			"invalid,10,20,\n",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 2 {
+		t.Fatalf("process network counters = %#v", processes)
+	}
+	if safari := processes[4321]; safari.name != "Safari" ||
+		safari.rx != 1048576 || safari.tx != 524288 {
+		t.Fatalf("Safari counters = %#v", safari)
+	}
+	if webkit := processes[9876]; webkit.name != "com.apple.WebKit.Networking" ||
+		webkit.rx != 4096 || webkit.tx != 8192 {
+		t.Fatalf("WebKit counters = %#v", webkit)
+	}
+
 	battery, err := parseDarwinBattery([]byte(`Now drawing from 'AC Power'
  -InternalBattery-0 (id=37421155)	80%; AC attached; not charging present: true
 `))
@@ -1105,6 +1126,40 @@ func TestWidgetDashboardBreakpointsAndScrolling(t *testing.T) {
 	model.handleKey(testKey("home"))
 	if model.dashboardScroll != 0 {
 		t.Fatalf("home scroll = %d, want 0", model.dashboardScroll)
+	}
+}
+
+func TestLargeNetworkWidgetAddsProcessTrafficDetails(t *testing.T) {
+	model := &monitorModel{
+		width: 100, height: 32,
+		snapshot: monitorSnapshot{
+			CollectedAt:    time.Now(),
+			NetworkRX:      2 << 20,
+			NetworkTX:      1 << 20,
+			NetworkRXTotal: 20 << 30,
+			NetworkTXTotal: 10 << 30,
+			NetworkProcesses: []processNetworkInfo{
+				{PID: 4321, Name: "Safari", RX: 1536 << 10, TX: 256 << 10, RXTotal: 8 << 30, TXTotal: 2 << 30},
+				{PID: 9876, Name: "sync-worker", RX: 512 << 10, TX: 768 << 10, RXTotal: 1 << 30, TXTotal: 3 << 30},
+			},
+		},
+		networkRXHistory: []float64{1 << 20, 2 << 20},
+		networkTXHistory: []float64{512 << 10, 1 << 20},
+	}
+	card, _ := model.metricWidgetCard(dashboardPanelNetwork)
+	rendered := model.renderLargeNetworkWidget(card, 80)
+	for _, expected := range []string{
+		"TOP APPLICATIONS / PROCESSES", "APPLICATION", "DOWN", "UP", "TOTAL",
+		"Safari", "sync-worker", "1.5 MiB/s", "768.0 KiB/s",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("large network widget missing %q:\n%s", expected, rendered)
+		}
+	}
+	for lineNumber, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > 80 {
+			t.Fatalf("large network line %d width = %d: %q", lineNumber, got, line)
+		}
 	}
 }
 

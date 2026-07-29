@@ -381,17 +381,21 @@ func (m *monitorModel) layoutView() string {
 			state = processWaitingStyle.Render("◆ HIDDEN")
 		}
 		labelWidth := min(22, max(12, contentWidth/4))
-		prefix := fmt.Sprintf("%d  %-*s", index+1, labelWidth, strings.ToUpper(descriptor.Label))
-		size := gpuTitleStyle.Render(strings.ToUpper(string(panel.Size)))
-		line := accentStyle.Render(prefix) + "  " + size + "  " + state
+		cursor := "  "
+		labelStyle := processTitleStyle
+		if index == m.layoutCursor {
+			cursor = diskTitleStyle.Render("▸ ")
+			labelStyle = valueStyle
+		}
+		prefix := cursor +
+			dimStyle.Render(fmt.Sprintf("%d", index+1)) + "  " +
+			labelStyle.Render(fmt.Sprintf("%-*s", labelWidth, strings.ToUpper(descriptor.Label)))
+		line := prefix + "  " + renderWidgetSizeLabel(panel.Size) + "  " + state
 		remaining := contentWidth - lipgloss.Width(line) - 3
 		if remaining > 12 {
 			line += dimStyle.Render("  ·  " + truncate(descriptor.Description, remaining))
 		}
 		line = truncateANSI(line, contentWidth)
-		if index == m.layoutCursor {
-			line = selectedRowStyle.Width(contentWidth).Render(line)
-		}
 		rows = append(rows, line)
 	}
 	panel := btopPanel(width, "DASHBOARD PANELS", "SESSION LOCAL", strings.Join(rows, "\n"), processTitleStyle, colorProcessBorder)
@@ -400,6 +404,18 @@ func (m *monitorModel) layoutView() string {
 	m.layoutButtonY = lipgloss.Height(header)
 	m.layoutFirstRowY = m.layoutButtonY + lipgloss.Height(actionLine) + 1
 	return strings.Join([]string{header, actionLine, panel, footer}, "\n")
+}
+
+func renderWidgetSizeLabel(size widgetSize) string {
+	label := strings.ToUpper(string(size))
+	switch size {
+	case widgetSizeMedium:
+		return networkTitleStyle.Render(label)
+	case widgetSizeLarge:
+		return diskTitleStyle.Render(label)
+	default:
+		return processIdleStyle.Copy().Bold(true).Render(label)
+	}
 }
 
 func renderLayoutFooter(width int, status string, canSave bool) string {

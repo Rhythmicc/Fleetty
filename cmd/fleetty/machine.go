@@ -160,6 +160,60 @@ type networkDeviceCounters struct {
 	rxDrops, txDrops   uint64
 }
 
+type processNetworkCounters struct {
+	name   string
+	rx, tx uint64
+}
+
+func (c *metricsCollector) collectProcessNetwork(snapshot *monitorSnapshot) {
+	if runtime.GOOS != "darwin" {
+		snapshot.NetworkProcessError = "Per-process traffic attribution is not available from the host OS."
+		return
+	}
+	current, err := readDarwinProcessNetwork()
+	if err != nil {
+		snapshot.NetworkProcessError = err.Error()
+		return
+	}
+	now := time.Now()
+	seconds := now.Sub(c.lastProcessNetAt).Seconds()
+	processes := make([]processNetworkInfo, 0, len(current))
+	for pid, counters := range current {
+		info := processNetworkInfo{
+			PID: pid, Name: counters.name,
+			RXTotal: counters.rx, TXTotal: counters.tx,
+		}
+		if previous, ok := c.previousProcessNet[pid]; ok &&
+			previous.name == counters.name && !c.lastProcessNetAt.IsZero() && seconds > 0 {
+			info.RX = uint64(float64(counterDelta(counters.rx, previous.rx)) / seconds)
+			info.TX = uint64(float64(counterDelta(counters.tx, previous.tx)) / seconds)
+		}
+		if info.RX+info.TX > 0 || info.RXTotal+info.TXTotal > 0 {
+			processes = append(processes, info)
+		}
+	}
+	sort.SliceStable(processes, func(i, j int) bool {
+		firstRate := processes[i].RX + processes[i].TX
+		secondRate := processes[j].RX + processes[j].TX
+		if firstRate != secondRate {
+			return firstRate > secondRate
+		}
+		firstTotal := processes[i].RXTotal + processes[i].TXTotal
+		secondTotal := processes[j].RXTotal + processes[j].TXTotal
+		if firstTotal != secondTotal {
+			return firstTotal > secondTotal
+		}
+		return processes[i].PID < processes[j].PID
+	})
+	const snapshotLimit = 12
+	if len(processes) > snapshotLimit {
+		processes = processes[:snapshotLimit]
+	}
+	snapshot.NetworkProcesses = processes
+	c.previousProcessNet = current
+	c.lastProcessNetAt = now
+}
+
 func (c *metricsCollector) collectNetwork(snapshot *monitorSnapshot) error {
 	devices, err := readNetworkDevices()
 	if err != nil {
@@ -199,9 +253,14 @@ func (c *metricsCollector) collectNetwork(snapshot *monitorSnapshot) error {
 		snapshot.NetworkTX = uint64(float64(counterDelta(aggregate.tx, c.previousNet.tx)) / seconds)
 	}
 
-	if len(selected) > 0 {
-		snapshot.NetworkInterfaces = make([]networkInterfaceInfo, 0, len(selected))
-		for _, name := range selected {
+	detailNames := selected
+	if len(detailNames) == 0 {
+		detailNames = aggregateNames
+		sort.Strings(detailNames)
+	}
+	if len(detailNames) > 0 {
+		snapshot.NetworkInterfaces = make([]networkInterfaceInfo, 0, len(detailNames))
+		for _, name := range detailNames {
 			counters, exists := devices[name]
 			if !exists {
 				continue
@@ -216,6 +275,18 @@ func (c *metricsCollector) collectNetwork(snapshot *monitorSnapshot) error {
 				info.TX = uint64(float64(counterDelta(counters.tx, previous.tx)) / seconds)
 			}
 			snapshot.NetworkInterfaces = append(snapshot.NetworkInterfaces, info)
+		}
+		if len(selected) == 0 {
+			sort.SliceStable(snapshot.NetworkInterfaces, func(i, j int) bool {
+				first := snapshot.NetworkInterfaces[i]
+				second := snapshot.NetworkInterfaces[j]
+				firstTraffic := first.RX + first.TX
+				secondTraffic := second.RX + second.TX
+				if firstTraffic != secondTraffic {
+					return firstTraffic > secondTraffic
+				}
+				return first.Name < second.Name
+			})
 		}
 	}
 

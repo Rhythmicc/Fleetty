@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -183,8 +184,13 @@ func widgetColumnSpan(preference dashboardPanelPreference, columns int) int {
 
 func (m *monitorModel) renderDashboardWidget(preference dashboardPanelPreference, width int) (string, int) {
 	switch preference.ID {
-	case dashboardPanelCPU, dashboardPanelMemory, dashboardPanelDisk,
-		dashboardPanelNetwork, dashboardPanelBattery:
+	case dashboardPanelNetwork:
+		card, _ := m.metricWidgetCard(preference.ID)
+		if preference.Size == widgetSizeLarge {
+			return m.renderLargeNetworkWidget(card, width), 0
+		}
+		return renderMetricWidget(card, width, preference.Size), 0
+	case dashboardPanelCPU, dashboardPanelMemory, dashboardPanelDisk, dashboardPanelBattery:
 		card, ok := m.metricWidgetCard(preference.ID)
 		if !ok {
 			return "", 0
@@ -289,6 +295,112 @@ func renderMetricCurrentLevel(card metricCard, width int) string {
 	default:
 		return bar(card.usage, width)
 	}
+}
+
+func (m *monitorModel) renderLargeNetworkWidget(card metricCard, width int) string {
+	contentWidth := max(4, width-4)
+	lines := []string{
+		networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
+			networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s"),
+		dimStyle.Render(fmt.Sprintf(
+			"TOTAL  ↓ %s  ↑ %s",
+			bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal),
+		)),
+		renderMetricVisual(card, contentWidth),
+		"",
+	}
+	meta := "LARGE"
+	switch {
+	case len(m.snapshot.NetworkProcesses) > 0:
+		meta += fmt.Sprintf(" · %d PROCESSES", len(m.snapshot.NetworkProcesses))
+		lines = append(lines,
+			networkTitleStyle.Render("TOP APPLICATIONS / PROCESSES"),
+			networkProcessHeader(contentWidth),
+		)
+		limit := min(6, len(m.snapshot.NetworkProcesses))
+		for _, process := range m.snapshot.NetworkProcesses[:limit] {
+			lines = append(lines, renderNetworkProcessRow(process, contentWidth))
+		}
+	case len(m.snapshot.NetworkInterfaces) > 0:
+		meta += fmt.Sprintf(" · %d INTERFACES", len(m.snapshot.NetworkInterfaces))
+		lines = append(lines,
+			networkTitleStyle.Render("NETWORK INTERFACES"),
+			networkInterfaceHeader(contentWidth),
+		)
+		limit := min(5, len(m.snapshot.NetworkInterfaces))
+		for _, networkInterface := range m.snapshot.NetworkInterfaces[:limit] {
+			lines = append(lines, renderNetworkInterfaceRow(networkInterface, contentWidth))
+		}
+		if m.snapshot.NetworkProcessError != "" {
+			lines = append(lines, dimStyle.Render(truncate(m.snapshot.NetworkProcessError, contentWidth)))
+		}
+	default:
+		message := "Collecting per-process traffic…"
+		if m.snapshot.NetworkProcessError != "" {
+			message = m.snapshot.NetworkProcessError
+		}
+		lines = append(lines,
+			networkTitleStyle.Render("TOP APPLICATIONS / PROCESSES"),
+			dimStyle.Render(truncate(message, contentWidth)),
+		)
+	}
+	return btopPanel(
+		width, "NETWORK", meta, strings.Join(lines, "\n"),
+		networkTitleStyle, colorNetworkBorder,
+	)
+}
+
+func networkProcessHeader(width int) string {
+	var header string
+	if width >= 64 {
+		nameWidth := max(10, width-48)
+		header = fmt.Sprintf("%-7s %-*s %12s %12s %13s",
+			"PID", nameWidth, "APPLICATION", "DOWN", "UP", "TOTAL")
+	} else {
+		nameWidth := max(8, width-30)
+		header = fmt.Sprintf("%-7s %-*s %10s %10s",
+			"PID", nameWidth, "APPLICATION", "DOWN", "UP")
+	}
+	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
+}
+
+func renderNetworkProcessRow(process processNetworkInfo, width int) string {
+	if width >= 64 {
+		nameWidth := max(10, width-48)
+		return strings.Join([]string{
+			dimStyle.Render(fixedCell(strconv.Itoa(process.PID), 7, false)),
+			valueStyle.Render(fixedCell(process.Name, nameWidth, false)),
+			networkRXStyle.Render(fixedCell(bytes(process.RX)+"/s", 12, true)),
+			networkTXStyle.Render(fixedCell(bytes(process.TX)+"/s", 12, true)),
+			dimStyle.Render(fixedCell(bytes(process.RXTotal+process.TXTotal), 13, true)),
+		}, " ")
+	}
+	nameWidth := max(8, width-30)
+	return strings.Join([]string{
+		dimStyle.Render(fixedCell(strconv.Itoa(process.PID), 7, false)),
+		valueStyle.Render(fixedCell(process.Name, nameWidth, false)),
+		networkRXStyle.Render(fixedCell(bytes(process.RX)+"/s", 10, true)),
+		networkTXStyle.Render(fixedCell(bytes(process.TX)+"/s", 10, true)),
+	}, " ")
+}
+
+func networkInterfaceHeader(width int) string {
+	nameWidth := max(8, width-42)
+	header := fmt.Sprintf("%-*s %11s %11s %16s",
+		nameWidth, "INTERFACE", "DOWN", "UP", "ERRORS/DROPS")
+	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
+}
+
+func renderNetworkInterfaceRow(networkInterface networkInterfaceInfo, width int) string {
+	nameWidth := max(8, width-42)
+	errorsAndDrops := networkInterface.RXErrors + networkInterface.TXErrors +
+		networkInterface.RXDrops + networkInterface.TXDrops
+	return strings.Join([]string{
+		valueStyle.Render(fixedCell(networkInterface.Name, nameWidth, false)),
+		networkRXStyle.Render(fixedCell(bytes(networkInterface.RX)+"/s", 11, true)),
+		networkTXStyle.Render(fixedCell(bytes(networkInterface.TX)+"/s", 11, true)),
+		dimStyle.Render(fixedCell(strconv.FormatUint(errorsAndDrops, 10), 16, true)),
+	}, " ")
 }
 
 func (m *monitorModel) renderGPUWidget(width int, size widgetSize) string {
