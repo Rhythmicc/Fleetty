@@ -1620,12 +1620,21 @@ const (
 	processCompact
 )
 
+const (
+	processPIDWidth     = 9
+	processUserWidth    = 13
+	processCPUWidth     = 6
+	processMemoryWidth  = 6
+	processRSSWidth     = 10
+	processElapsedWidth = 9
+)
+
 func newProcessFormat(width int) processFormat {
 	if width >= 112 {
-		return processFormat{mode: processFull, commandWidth: max(16, width-66)}
+		return processFormat{mode: processFull, commandWidth: max(16, width-69)}
 	}
 	if width >= 78 {
-		return processFormat{mode: processMedium, commandWidth: max(14, width-56)}
+		return processFormat{mode: processMedium, commandWidth: max(14, width-58)}
 	}
 	return processFormat{mode: processCompact, commandWidth: max(10, width-32)}
 }
@@ -1633,22 +1642,47 @@ func newProcessFormat(width int) processFormat {
 func (f processFormat) header() string {
 	switch f.mode {
 	case processFull:
-		return fmt.Sprintf("%-9s %-13s %6s  %6s  %-8s  %-8s  %s", "PID", "USER", "CPU", "MEM", "RSS", "ELAPSED", "COMMAND")
+		return fixedCell("PID", processPIDWidth, false) + " " +
+			fixedCell("USER", processUserWidth, false) + " " +
+			fixedCell("CPU", processCPUWidth, true) + "  " +
+			fixedCell("MEM", processMemoryWidth, true) + "  " +
+			fixedCell("RSS", processRSSWidth, false) + "  " +
+			fixedCell("ELAPSED", processElapsedWidth, false) + "  COMMAND"
 	case processMedium:
-		return fmt.Sprintf("%-9s %-13s %6s  %6s  %-8s  %s", "PID", "USER", "CPU", "MEM", "RSS", "COMMAND")
+		return fixedCell("PID", processPIDWidth, false) + " " +
+			fixedCell("USER", processUserWidth, false) + " " +
+			fixedCell("CPU", processCPUWidth, true) + "  " +
+			fixedCell("MEM", processMemoryWidth, true) + "  " +
+			fixedCell("RSS", processRSSWidth, false) + "  COMMAND"
 	default:
-		return fmt.Sprintf("%-9s %6s  %6s  %s", "PID", "CPU", "MEM", "COMMAND")
+		return fixedCell("PID", processPIDWidth, false) + " " +
+			fixedCell("CPU", processCPUWidth, true) + "  " +
+			fixedCell("MEM", processMemoryWidth, true) + "  COMMAND"
 	}
 }
 
 func (f processFormat) row(p processInfo) string {
 	switch f.mode {
 	case processFull:
-		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), elapsed(p.Elapsed), truncate(p.Command, f.commandWidth))
+		return fixedCell(strconv.Itoa(p.PID), processPIDWidth, false) + " " +
+			fixedCell(p.User, processUserWidth, false) + " " +
+			fixedCell(fmt.Sprintf("%.1f%%", p.CPU), processCPUWidth, true) + "  " +
+			fixedCell(fmt.Sprintf("%.1f%%", p.Memory), processMemoryWidth, true) + "  " +
+			fixedCell(bytes(p.RSS), processRSSWidth, false) + "  " +
+			fixedCell(elapsed(p.Elapsed), processElapsedWidth, false) + "  " +
+			fixedCell(p.Command, f.commandWidth, false)
 	case processMedium:
-		return fmt.Sprintf("%-9d %-13s %5.1f%%  %5.1f%%  %-8s  %s", p.PID, truncate(p.User, 12), p.CPU, p.Memory, bytes(p.RSS), truncate(p.Command, f.commandWidth))
+		return fixedCell(strconv.Itoa(p.PID), processPIDWidth, false) + " " +
+			fixedCell(p.User, processUserWidth, false) + " " +
+			fixedCell(fmt.Sprintf("%.1f%%", p.CPU), processCPUWidth, true) + "  " +
+			fixedCell(fmt.Sprintf("%.1f%%", p.Memory), processMemoryWidth, true) + "  " +
+			fixedCell(bytes(p.RSS), processRSSWidth, false) + "  " +
+			fixedCell(p.Command, f.commandWidth, false)
 	default:
-		return fmt.Sprintf("%-9d %5.1f%%  %5.1f%%  %s", p.PID, p.CPU, p.Memory, truncate(p.Command, f.commandWidth))
+		return fixedCell(strconv.Itoa(p.PID), processPIDWidth, false) + " " +
+			fixedCell(fmt.Sprintf("%.1f%%", p.CPU), processCPUWidth, true) + "  " +
+			fixedCell(fmt.Sprintf("%.1f%%", p.Memory), processMemoryWidth, true) + "  " +
+			fixedCell(p.Command, f.commandWidth, false)
 	}
 }
 

@@ -2521,14 +2521,14 @@ func TestProcessColumnsAreAligned(t *testing.T) {
 	header := format.header()
 	row := format.row(processInfo{
 		PID: 42, User: "alice", State: "R+", CPU: 12.3, Memory: 4.5,
-		RSS: 10 * 1024 * 1024, Elapsed: 65, Command: "trainer",
+		RSS: 280 * 1024 * 1024, Elapsed: 65, Command: "trainer",
 	})
 	if strings.Contains(header, "STAT") || strings.Contains(row, "R+") {
 		t.Fatalf("process state should not occupy a table column\nheader: %q\nrow:    %q", header, row)
 	}
 	for _, field := range []string{"RSS", "ELAPSED", "COMMAND"} {
 		if strings.Index(header, field) != strings.Index(row, map[string]string{
-			"RSS": "10.0 MiB", "ELAPSED": "1m05s", "COMMAND": "trainer",
+			"RSS": "280.0 MiB", "ELAPSED": "1m05s", "COMMAND": "trainer",
 		}[field]) {
 			t.Fatalf("%s is not aligned\nheader: %q\nrow:    %q", field, header, row)
 		}
@@ -2538,6 +2538,37 @@ func TestProcessColumnsAreAligned(t *testing.T) {
 	}
 	if strings.Index(header, "MEM")+len("MEM") != strings.Index(row, "4.5%")+len("4.5%") {
 		t.Fatalf("MEM is not right-aligned\nheader: %q\nrow:    %q", header, row)
+	}
+}
+
+func TestProcessColumnsStayAlignedForWideValues(t *testing.T) {
+	format := newProcessFormat(140)
+	header := format.header()
+	displayColumn := func(line, value string) int {
+		index := strings.Index(line, value)
+		if index < 0 {
+			return -1
+		}
+		return lipgloss.Width(line[:index])
+	}
+	commandColumn := displayColumn(header, "COMMAND")
+	elapsedColumn := displayColumn(header, "ELAPSED")
+	processes := []processInfo{
+		{PID: 1, User: "root", RSS: 0, Elapsed: 5, Command: "zero"},
+		{PID: 2, User: "worker", RSS: 280 * 1024 * 1024, Elapsed: 15*60 + 9, Command: "hundreds"},
+		{PID: 3, User: "long-user-name-that-is-truncated", RSS: 1023 * 1024 * 1024, Elapsed: 123*24*60*60 + 23*60*60, Command: "boundary"},
+	}
+	for _, process := range processes {
+		row := format.row(process)
+		if got := displayColumn(row, elapsed(process.Elapsed)); got != elapsedColumn {
+			t.Fatalf("elapsed column moved to %d, want %d\nheader: %q\nrow:    %q", got, elapsedColumn, header, row)
+		}
+		if got := displayColumn(row, process.Command); got != commandColumn {
+			t.Fatalf("command column moved to %d, want %d\nheader: %q\nrow:    %q", got, commandColumn, header, row)
+		}
+		if lipgloss.Width(row) != lipgloss.Width(format.row(processInfo{Command: "reference"})) {
+			t.Fatalf("row width changes with values\nheader: %q\nrow:    %q", header, row)
+		}
 	}
 }
 
