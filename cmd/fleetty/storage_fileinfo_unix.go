@@ -32,6 +32,17 @@ func storageFileIdentity(info os.FileInfo) string {
 		inode, info.Size(), info.ModTime().UnixNano(), uint32(info.Mode().Type()))
 }
 
+func storageFileOwner(info os.FileInfo) (uint32, uint32, bool) {
+	if info == nil {
+		return 0, 0, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, false
+	}
+	return stat.Uid, stat.Gid, true
+}
+
 func max64(a, b int64) int64 {
 	if a > b {
 		return a

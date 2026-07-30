@@ -298,6 +298,21 @@ type storageActionResultMsg struct {
 	archivePath string
 	err         error
 }
+type storageDuplicateResultMsg struct {
+	generation uint64
+	result     storageDuplicateResult
+	err        error
+}
+type storageDuplicateProgressMsg struct {
+	generation uint64
+	result     storageDuplicateResult
+	updates    <-chan storageDuplicateUpdate
+}
+type storageDedupeScriptResultMsg struct {
+	path   string
+	groups int
+	err    error
+}
 
 func (m *monitorModel) collect() tea.Cmd {
 	return func() tea.Msg {
@@ -390,6 +405,24 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case storageActionResultMsg:
 		return m, m.applyStorageActionResult(msg)
+	case storageDuplicateResultMsg:
+		m.applyStorageDuplicateResult(msg)
+	case storageDuplicateProgressMsg:
+		if m.applyStorageDuplicateProgress(msg) {
+			return m, waitForStorageDuplicateUpdate(msg.generation, msg.updates)
+		}
+	case storageDedupeScriptResultMsg:
+		if msg.err != nil {
+			m.status = "Could not generate dedupe script: " + msg.err.Error()
+		} else {
+			if state := m.storageDuplicateState(); state != nil {
+				state.ScriptPath = msg.path
+			}
+			m.status = fmt.Sprintf(
+				"Generated a %d-group dedupe script at %s · review it before running.",
+				msg.groups, msg.path,
+			)
+		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
@@ -421,6 +454,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	key := msg.String()
 	if key == "ctrl+c" {
 		m.cancelStorageScan()
+		m.cancelStorageDuplicateScan()
 		m.cancelStorageActionProcess()
 		return tea.Quit
 	}
@@ -448,6 +482,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	if key == "q" && m.screen == screenMonitor {
 		m.cancelStorageScan()
+		m.cancelStorageDuplicateScan()
 		return tea.Quit
 	}
 	themeKey := key == "T" || key == "t" &&
@@ -476,6 +511,12 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.screen, m.password, m.status = screenPassword, "", "Enter the management password."
 		case "r":
 			if m.monitorPage == monitorPageStorage {
+				if m.storage != nil && m.storage.DuplicateMode {
+					return tea.Sequence(
+						forceFullScreenRedraw(),
+						m.beginStorageDuplicateScan(m.storage.Duplicates.Path),
+					)
+				}
 				return tea.Sequence(
 					forceFullScreenRedraw(),
 					m.refreshStorageScan(m.storage.Path),
@@ -484,13 +525,40 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.status = "Refreshing now…"
 			return m.startCollect()
 		case "d":
-			if m.monitorPage == monitorPageStorage {
+			if m.monitorPage == monitorPageStorage &&
+				m.storage != nil && !m.storage.DuplicateMode {
 				m.prepareStorageAction(storageActionDelete)
 			}
 		case "z":
-			if m.monitorPage == monitorPageStorage {
+			if m.monitorPage == monitorPageStorage &&
+				m.storage != nil && !m.storage.DuplicateMode {
 				m.prepareStorageAction(storageActionArchiveDelete)
 			}
+		case "u":
+			if m.monitorPage == monitorPageStorage {
+				if m.storage.DuplicateMode {
+					return m.leaveStorageDuplicates()
+				}
+				return m.beginStorageDuplicateScan(m.storage.Path)
+			}
+		case "g":
+			if m.monitorPage == monitorPageStorage &&
+				m.storage != nil && m.storage.DuplicateMode {
+				return m.generateStorageDedupeScript(false)
+			}
+		case "G":
+			if m.monitorPage == monitorPageStorage &&
+				m.storage != nil && m.storage.DuplicateMode {
+				return m.generateStorageDedupeScript(true)
+			}
+		case "c":
+			if m.monitorPage == monitorPageStorage &&
+				m.storage != nil && m.storage.DuplicateMode {
+				m.cycleStorageDuplicateKeeper()
+				return nil
+			}
+			m.filter, m.monitorCursor, m.monitorOffset = "", 0, 0
+			m.status = "Process filter cleared."
 		case "l":
 			if m.profile == machineProfileNAS || m.snapshot.Profile == machineProfileNAS {
 				m.status = "Custom NAS layouts are not available yet."
@@ -522,11 +590,17 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return m.cycleMonitorPage(-1)
 		case "left", "h":
 			if m.monitorPage == monitorPageStorage {
+				if m.storage.DuplicateMode {
+					return m.leaveStorageDuplicates()
+				}
 				return m.storageNavigateParent()
 			}
 			return m.cycleMonitorPage(-1)
 		case "right":
 			if m.monitorPage == monitorPageStorage {
+				if m.storage.DuplicateMode {
+					return nil
+				}
 				return m.storageOpenSelected()
 			}
 			return m.cycleMonitorPage(1)
@@ -540,7 +614,11 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 		case "up", "k":
 			if m.monitorPage == monitorPageStorage {
-				m.moveStorageSelection(-1)
+				if m.storage.DuplicateMode {
+					m.moveStorageDuplicateSelection(-1)
+				} else {
+					m.moveStorageSelection(-1)
+				}
 			} else if m.monitorPage == monitorPageCustom ||
 				m.monitorPage == monitorPageOverview ||
 				m.monitorPage == monitorPageCompute {
@@ -550,7 +628,11 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 		case "down", "j":
 			if m.monitorPage == monitorPageStorage {
-				m.moveStorageSelection(1)
+				if m.storage.DuplicateMode {
+					m.moveStorageDuplicateSelection(1)
+				} else {
+					m.moveStorageSelection(1)
+				}
 			} else if m.monitorPage == monitorPageCustom ||
 				m.monitorPage == monitorPageOverview ||
 				m.monitorPage == monitorPageCompute {
@@ -560,18 +642,32 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 		case "pgup":
 			if m.monitorPage == monitorPageStorage {
-				m.moveStoragePage(-1)
+				if m.storage.DuplicateMode {
+					m.moveStorageDuplicateSelection(-max(1, m.height/4))
+				} else {
+					m.moveStoragePage(-1)
+				}
 			} else {
 				m.adjustDashboardScroll(-max(3, m.dashboardViewport/2))
 			}
 		case "pgdown":
 			if m.monitorPage == monitorPageStorage {
-				m.moveStoragePage(1)
+				if m.storage.DuplicateMode {
+					m.moveStorageDuplicateSelection(max(1, m.height/4))
+				} else {
+					m.moveStoragePage(1)
+				}
 			} else {
 				m.adjustDashboardScroll(max(3, m.dashboardViewport/2))
 			}
 		case "home":
 			if m.monitorPage == monitorPageStorage {
+				if m.storage.DuplicateMode {
+					if state := m.storageDuplicateState(); state != nil {
+						state.Cursor = 0
+					}
+					return nil
+				}
 				return m.storageNavigateRoot()
 			}
 			m.dashboardScroll = 0
@@ -581,6 +677,9 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.status = "Dashboard scrolled to the last widget."
 		case "enter":
 			if m.monitorPage == monitorPageStorage {
+				if m.storage.DuplicateMode {
+					return nil
+				}
 				return m.storageOpenSelected()
 			}
 			if m.monitorPage == monitorPageOverview ||
@@ -603,11 +702,11 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.monitorFocus = monitorFocusProcesses
 			m.filtering = true
 			m.status = "Type a process name, user, or PID."
-		case "c":
-			m.filter, m.monitorCursor, m.monitorOffset = "", 0, 0
-			m.status = "Process filter cleared."
 		case "backspace", "delete", "esc":
 			if m.monitorPage == monitorPageStorage {
+				if m.storage.DuplicateMode {
+					return m.leaveStorageDuplicates()
+				}
 				return m.storageNavigateParent()
 			}
 		}
@@ -827,6 +926,9 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 			}
 		}
 		if m.monitorPage == monitorPageStorage {
+			if m.storage != nil && m.storage.DuplicateMode {
+				return m.handleStorageDuplicateClick(x, y)
+			}
 			return m.handleStorageClick(x, y)
 		}
 		if m.monitorPage == monitorPageCustom {

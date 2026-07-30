@@ -118,6 +118,8 @@ func runOperations(args []string, stdout, stderr io.Writer) (bool, error) {
 	switch args[0] {
 	case "top":
 		return true, runTopCommand(args[1:], os.Stdin, stdout, stderr)
+	case "dedupe-link":
+		return true, runStorageDedupeLinkCommand(args[1:], stdout, stderr)
 	case "privileged-helper":
 		return true, runPrivilegedHelperCommand(args[1:], stdout, stderr)
 	case "version":
@@ -149,6 +151,7 @@ func writeOperationsUsage(writer io.Writer) {
 
 Usage:
   fleetty top [--config PATH] [--theme dark|light] [--layout PATH]
+  fleetty dedupe-link --keep PATH --replace PATH --sha256 HEX
   fleetty serve
   fleetty privileged-helper [--socket PATH] [--group NAME] [--service fleetty.service]
   fleetty install --role node|hub|privileged-helper [--scope auto|user|system] [--config-dir PATH] [--json]

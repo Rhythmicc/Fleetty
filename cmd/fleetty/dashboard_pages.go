@@ -236,15 +236,26 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 		keyHint("m", "management"),
 	}
 	if m.monitorPage == monitorPageStorage {
-		hints = append(hints,
-			keyHint("↑↓", "select"),
-			keyHint("enter/click", "open"),
-			keyHint("pg↑↓", "pages"),
-			keyHint("d", "delete"),
-			keyHint("z", "7z + delete"),
-			keyHint("←/⌫", "up"),
-			keyHint("home", "root"),
-		)
+		if m.storage != nil && m.storage.DuplicateMode {
+			hints = append(hints,
+				keyHint("↑↓", "groups"),
+				keyHint("c", "choose keeper"),
+				keyHint("g", "script"),
+				keyHint("G", "script all"),
+				keyHint("u/esc", "storage map"),
+			)
+		} else {
+			hints = append(hints,
+				keyHint("↑↓", "select"),
+				keyHint("enter/click", "open"),
+				keyHint("pg↑↓", "pages"),
+				keyHint("u", "duplicates"),
+				keyHint("d", "delete"),
+				keyHint("z", "7z + delete"),
+				keyHint("←/⌫", "up"),
+				keyHint("home", "root"),
+			)
+		}
 	} else if m.monitorPage == monitorPageOverview ||
 		m.monitorPage == monitorPageCompute {
 		hints = append(hints,
@@ -1346,6 +1357,15 @@ func (m *monitorModel) switchMonitorPage(page monitorPage) tea.Cmd {
 		m.storage.Generation++
 		m.storage.Scanning = false
 		m.storage.Err = nil
+	}
+	if m.monitorPage == monitorPageStorage && page != monitorPageStorage &&
+		m.storage != nil && m.storage.DuplicateMode {
+		m.cancelStorageDuplicateScan()
+		if m.storage.Duplicates != nil {
+			m.storage.Duplicates.Generation++
+			m.storage.Duplicates.Scanning = false
+		}
+		m.storage.DuplicateMode = false
 	}
 	m.monitorPage = page
 	m.dashboardScroll = 0

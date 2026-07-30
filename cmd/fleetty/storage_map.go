@@ -20,23 +20,25 @@ import (
 )
 
 type storageMapState struct {
-	Root       string
-	Path       string
-	Scope      string
-	Result     storageScanResult
-	Err        error
-	Scanning   bool
-	Generation uint64
-	Cancel     context.CancelFunc
-	Cursor     int
-	Rects      []storageMapRect
-	Page       int
-	PageCount  int
-	PrevPage   *storageHitRect
-	NextPage   *storageHitRect
-	Cache      map[string]storageCachedResult
-	CacheOrder []string
-	CacheHit   bool
+	Root          string
+	Path          string
+	Scope         string
+	DuplicateMode bool
+	Duplicates    *storageDuplicateState
+	Result        storageScanResult
+	Err           error
+	Scanning      bool
+	Generation    uint64
+	Cancel        context.CancelFunc
+	Cursor        int
+	Rects         []storageMapRect
+	Page          int
+	PageCount     int
+	PrevPage      *storageHitRect
+	NextPage      *storageHitRect
+	Cache         map[string]storageCachedResult
+	CacheOrder    []string
+	CacheHit      bool
 }
 
 type storageCachedResult struct {
@@ -857,6 +859,9 @@ func (s *storageScanner) maybePublishStorageProgressLocked(force bool) {
 }
 
 func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) {
+	if m.storage != nil && m.storage.DuplicateMode {
+		return renderStorageDuplicates(m, width)
+	}
 	bodyHeight := max(3, m.height-lipgloss.Height(m.renderMonitorPageHeader(width))-
 		lipgloss.Height(m.renderMonitorPageFooter(width)))
 	contentHeight := max(1, bodyHeight-2)
