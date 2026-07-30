@@ -1472,7 +1472,16 @@ func (m *hubModel) slurmExplanationView(header string, width int) string {
 		"",
 		dimStyle.Render("CONTROLLER  ") + valueStyle.Render(controllerReason),
 		dimStyle.Render("EVIDENCE    ") + valueStyle.Render(explanation.Source),
-		dimStyle.Render("EXPLANATION ") + ansi.Truncate(explanation.Summary, max(10, width-20), ""),
+	}
+	summaryLines := wrapSlurmExplanation(explanation.Summary, max(12, width-16))
+	for index, line := range summaryLines {
+		prefix := "            "
+		if index == 0 {
+			prefix = "EXPLANATION "
+		}
+		lines = append(lines, dimStyle.Render(prefix)+line)
+	}
+	lines = append(lines,
 		"",
 		gpuTitleStyle.Render("REQUEST"),
 		fmt.Sprintf(
@@ -1484,16 +1493,20 @@ func (m *hubModel) slurmExplanationView(header string, width int) string {
 			"PARTITION %s  ·  CONSTRAINT %s  ·  PRIORITY %d",
 			valueOrUnknown(job.Partition), slurmOptional(job.Constraints), job.Priority,
 		),
-		"",
-		gpuTitleStyle.Render("CANDIDATE NODE FIT  ") +
-			dimStyle.Render("Slurm reason is authoritative; resource dimensions below are Fleetty inference."),
-		slurmNodeFitHeader(width - 4),
-	}
-	if len(explanation.Fits) == 0 {
-		lines = append(lines, dimStyle.Render("No matching candidate nodes are visible in this snapshot."))
-	} else {
-		for _, fit := range explanation.Fits[:min(len(explanation.Fits), max(1, m.height-18))] {
-			lines = append(lines, renderSlurmNodeFit(fit, width-4))
+	)
+	if explanation.ReasonCode == "Resources" {
+		lines = append(lines,
+			"",
+			gpuTitleStyle.Render("CANDIDATE NODE FIT  ")+
+				dimStyle.Render("Slurm reason is authoritative; resource dimensions below are Fleetty inference."),
+			slurmNodeFitHeader(width-4),
+		)
+		if len(explanation.Fits) == 0 {
+			lines = append(lines, dimStyle.Render("No matching candidate nodes are visible in this snapshot."))
+		} else {
+			for _, fit := range explanation.Fits[:min(len(explanation.Fits), max(1, m.height-18))] {
+				lines = append(lines, renderSlurmNodeFit(fit, width-4))
+			}
 		}
 	}
 	contentHeight := max(1, m.height-lipgloss.Height(header)-3)
@@ -1511,6 +1524,24 @@ func (m *hubModel) slurmExplanationView(header string, width int) string {
 		keyHint("t", "theme"),
 	}, "  "), width, "")
 	return strings.Join([]string{header, panel, footer}, "\n")
+}
+
+func wrapSlurmExplanation(value string, width int) []string {
+	width = max(1, width)
+	words := strings.Fields(value)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	lines := []string{words[0]}
+	for _, word := range words[1:] {
+		last := len(lines) - 1
+		if len([]rune(lines[last]))+1+len([]rune(word)) <= width {
+			lines[last] += " " + word
+		} else {
+			lines = append(lines, word)
+		}
+	}
+	return lines
 }
 
 func slurmNodeFitHeader(width int) string {
