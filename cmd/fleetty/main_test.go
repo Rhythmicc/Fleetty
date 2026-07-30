@@ -440,7 +440,7 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 					States: []string{"alloc"}, CPUsAlloc: 20, CPUsTotal: 20,
 				}},
 				Jobs: []slurmJob{
-					{ID: "57612", Partition: "gpu-part", Name: "bash", User: "yida", State: "RUNNING", Priority: 71001, QOS: "a100", Elapsed: "4:00", TimeLimit: "20:00", Nodes: 1, Reason: "a100"},
+					{ID: "57612", Partition: "gpu-part", Name: "bash", User: "yida", State: "RUNNING", Priority: 71001, QOS: "a100", Elapsed: "4:00", TimeLimit: "20:00", Nodes: 1, GRES: "gpu:a100:1", Reason: "a100"},
 					{ID: "57615", Partition: "gpu-part", Name: "laplace", User: "lwx", State: "PENDING", Priority: 69002, QOS: "high", Elapsed: "0:00", TimeLimit: "20:00", Nodes: 1, Reason: "(Resources)"},
 				},
 			}, Latency: 20 * time.Millisecond},
@@ -455,7 +455,7 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 					States: []string{"mix"}, CPUsAlloc: 6, CPUsTotal: 24,
 				}},
 				Jobs: []slurmJob{
-					{ID: "600_15", Partition: "mixed-gpu", Name: "ctx5090", User: "chl", State: "RUNNING", Priority: 57003, QOS: "normal", Elapsed: "1:41", TimeLimit: "20:00", Nodes: 1, Reason: "gpu5090"},
+					{ID: "600_15", Partition: "mixed-gpu", Name: "ctx5090", User: "chl", State: "RUNNING", Priority: 57003, QOS: "normal", Elapsed: "1:41", TimeLimit: "20:00", Nodes: 1, GRES: "gpu:rtx_5090:1", Reason: "gpu5090"},
 					{ID: "613_[0-7%1]", Partition: "mixed-gpu", Name: "sc-spmv-full", User: "lhc", State: "PENDING", Priority: 55004, QOS: "urgent", Elapsed: "0:00", TimeLimit: "20:00", Nodes: 1, Reason: "(Priority)"},
 				},
 			}, Latency: 12 * time.Millisecond},
@@ -468,13 +468,19 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		rendered := model.slurmQueueView()
 		if size.width == 160 {
 			for _, expected := range []string{
-				"SLURM QUEUES", "A100 Cluster", "General GPU", "NODES 1", "GPUS 2",
-				"GPU TYPES a100×2", "USERS 2", "QOS a100, high", "PARTITIONS 1",
-				"SOURCE SSH", "UPDATED", "WEIGHT", "urgent", "71001", "57612",
+				"SLURM QUEUES", "A100 Cluster", "General GPU", "NODES 1",
+				"GPU 1/2", "GPU  A100×2", "RTX 3090×1", "+2 TYPES",
+				"CPU 20/20", "LIVE", "WEIGHT", "urgent", "71001", "57612",
 				"NEXT", "613_[0-7%1]", "(Priority)",
 			} {
 				if !strings.Contains(rendered, expected) {
 					t.Fatalf("%dx%d Slurm view missing %q\n%s", size.width, size.height, expected, rendered)
+				}
+			}
+			for _, verbose := range []string{"GPU TYPES", "USERS 2", "SOURCE SSH", "UPDATED", "slurm-wlm"} {
+				if strings.Contains(rendered, verbose) {
+					t.Fatalf("%dx%d Slurm view retained verbose card text %q\n%s",
+						size.width, size.height, verbose, rendered)
 				}
 			}
 		}

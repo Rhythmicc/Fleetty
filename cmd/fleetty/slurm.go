@@ -874,16 +874,13 @@ func (m *hubModel) slurmClusterCardLineCount() int {
 		return 1
 	}
 	width := usableWidth(m.width)
-	maximum := 5
-	switch {
-	case width >= 132 && m.height >= 34:
-		maximum = 9
-	case width >= 92 && m.height >= 28:
-		maximum = 7
+	maximum := 3
+	if width >= 92 && m.height >= 28 {
+		maximum = 5
 	}
 	columns := max(1, m.slurmColumns())
 	rows := (len(m.config.SlurmClusters) + columns - 1) / columns
-	for _, lines := range []int{9, 7, 5, 3} {
+	for _, lines := range []int{5, 3} {
 		if lines > maximum {
 			continue
 		}
@@ -1016,85 +1013,42 @@ func (m *hubModel) renderSlurmClusterCard(index, width, contentLines int) string
 	}
 	meta := "CHECKING"
 	content := fitSlurmClusterCardLines([]string{
+		gpuTitleStyle.Render("● COLLECTING"),
 		dimStyle.Render(truncate(config.Description, width-4)),
-		dimStyle.Render(strings.ToUpper(config.Transport)),
-		"Waiting for the first queue snapshot…",
-		dimStyle.Render(strings.Repeat("·", max(1, width-4))),
-		dimStyle.Render("Click or use ← → to filter"),
+		dimStyle.Render("Waiting for queue data…"),
 	}, contentLines)
 	if state.Error != "" {
 		meta = "OFFLINE"
-		source := "LOCAL"
-		if config.Transport == "ssh" {
-			source = "SSH  " + normalizeSSHAddress(config.Address)
-		}
 		lastSeen := "Never seen online"
 		if !state.LastSeen.IsZero() {
 			lastSeen = "Last seen " + hubAge(time.Since(state.LastSeen)) + " ago"
 		}
 		content = fitSlurmClusterCardLines([]string{
-			dangerStyle.Render("● SLURM SOURCE OFFLINE"),
-			dimStyle.Render(source),
+			dangerStyle.Render("● SOURCE OFFLINE"),
 			dimStyle.Render(lastSeen),
 			warningStyle.Render(truncate(state.Error, width-4)),
-			dimStyle.Render("[r] retry now"),
 		}, contentLines)
 	} else if !state.Snapshot.CollectedAt.IsZero() {
-		meta = fmt.Sprintf("%dms", state.Latency.Milliseconds())
+		meta = "LIVE"
 		if state.Warning != "" {
 			meta = "STALE"
 		}
 		snapshot := state.Snapshot
-		running, pending, other := slurmStateCounts(snapshot.Jobs)
-		next := min(1, pending)
 		content = []string{
-			fmt.Sprintf("%s %d   %s %d   %s %d   %s %d",
-				processRunningStyle.Render("RUN"), running,
-				processWaitingStyle.Render("NEXT"), next,
-				gpuTitleStyle.Render("WAIT"), max(0, pending-next),
-				dimStyle.Render("OTHER"), other),
-			slurmClusterCapacityLine(snapshot),
+			slurmClusterQueueSummaryLine(snapshot),
+			slurmClusterResourceLine(snapshot),
+			slurmClusterGPUTypeSummaryLine(snapshot),
 		}
-		if contentLines >= 7 {
-			content = append(content,
-				slurmClusterGPUTypeLine(snapshot),
-				slurmClusterWorkloadLine(snapshot),
-			)
-		}
-		if contentLines >= 5 {
-			content = append(content,
-				dimStyle.Render(fmt.Sprintf("PARTITIONS %d  ·  %s", len(snapshot.Partitions), snapshot.Version)),
-			)
-		}
-		for _, partition := range snapshot.Partitions {
+		for _, partition := range snapshot.Partitions[:min(len(snapshot.Partitions), max(0, contentLines-len(content)))] {
 			name := partition.Name
 			if partition.Default {
 				name += "*"
 			}
 			stateLabel := strings.Join(partition.States, ",")
-			line := fmt.Sprintf("%-16s %2dN  CPU %d/%d  %s",
-				truncate(name, 16), partition.Nodes, partition.CPUsAlloc, partition.CPUsTotal, stateLabel)
+			line := fmt.Sprintf("%-14s %dN  CPU %d/%d  %s",
+				truncate(name, 14), partition.Nodes, partition.CPUsAlloc,
+				partition.CPUsTotal, stateLabel)
 			content = append(content, slurmPartitionStyle(partition).Render(truncate(line, width-4)))
-			reserved := 0
-			if contentLines >= 9 {
-				reserved = 1
-			}
-			if len(content) >= contentLines-reserved {
-				break
-			}
-		}
-		if contentLines >= 9 {
-			source := "LOCAL"
-			if config.Transport == "ssh" {
-				source = "SSH " + normalizeSSHAddress(config.Address)
-			}
-			ageDuration := time.Since(snapshot.CollectedAt)
-			if ageDuration < 0 {
-				ageDuration = 0
-			}
-			age := hubAge(ageDuration)
-			content = append(content, dimStyle.Render(fmt.Sprintf(
-				"SOURCE %s  ·  %dms  ·  UPDATED %s AGO", source, state.Latency.Milliseconds(), age)))
 		}
 		content = fitSlurmClusterCardLines(content, contentLines)
 	}
@@ -1112,31 +1066,63 @@ func fitSlurmClusterCardLines(lines []string, count int) []string {
 	return lines
 }
 
-func slurmClusterCapacityLine(snapshot slurmSnapshot) string {
-	gpus, _ := slurmClusterGPUInventory(snapshot)
-	return dimStyle.Render(fmt.Sprintf("NODES %d  ·  GPUS %d  ·  PARTITIONS %d  ·  JOBS %d",
-		len(snapshot.Nodes), gpus, len(snapshot.Partitions), len(snapshot.Jobs)))
+func slurmClusterQueueSummaryLine(snapshot slurmSnapshot) string {
+	running, pending, other := slurmStateCounts(snapshot.Jobs)
+	next := min(1, pending)
+	line := fmt.Sprintf("%s %d  ·  %s %d  ·  %s %d",
+		processRunningStyle.Render("RUN"), running,
+		processWaitingStyle.Render("NEXT"), next,
+		gpuTitleStyle.Render("WAIT"), max(0, pending-next))
+	if other > 0 {
+		line += "  ·  " + dimStyle.Render(fmt.Sprintf("OTHER %d", other))
+	}
+	return line
 }
 
-func slurmClusterGPUTypeLine(snapshot slurmSnapshot) string {
+func slurmClusterResourceLine(snapshot slurmSnapshot) string {
+	totalGPUs, _ := slurmClusterGPUInventory(snapshot)
+	busyGPUs := 0
+	for _, job := range snapshot.Jobs {
+		if !isSlurmRunning(job.State) {
+			continue
+		}
+		for _, count := range slurmGPUCounts(job.GRES) {
+			busyGPUs += count
+		}
+	}
+	allocatedCPUs, totalCPUs := 0, 0
+	for _, partition := range snapshot.Partitions {
+		allocatedCPUs += partition.CPUsAlloc
+		totalCPUs += partition.CPUsTotal
+	}
+	return dimStyle.Render(fmt.Sprintf("NODES %d  ·  GPU %d/%d  ·  CPU %d/%d",
+		len(snapshot.Nodes), min(busyGPUs, totalGPUs), totalGPUs,
+		allocatedCPUs, totalCPUs))
+}
+
+func slurmClusterGPUTypeSummaryLine(snapshot slurmSnapshot) string {
 	_, inventory := slurmClusterGPUInventory(snapshot)
 	if len(inventory) == 0 {
-		return dimStyle.Render("GPU TYPES —")
+		return gpuTitleStyle.Render("GPU  —")
 	}
 	names := make([]string, 0, len(inventory))
 	for name := range inventory {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	parts := make([]string, 0, len(names))
-	for _, name := range names {
-		label := strings.TrimSpace(strings.ReplaceAll(name, "_", " "))
+	const visibleTypes = 2
+	parts := make([]string, 0, min(len(names), visibleTypes)+1)
+	for _, name := range names[:min(len(names), visibleTypes)] {
+		label := strings.ToUpper(strings.TrimSpace(strings.ReplaceAll(name, "_", " ")))
 		if label == "" {
-			label = "generic"
+			label = "GENERIC"
 		}
 		parts = append(parts, fmt.Sprintf("%s×%d", label, inventory[name]))
 	}
-	return gpuTitleStyle.Render("GPU TYPES " + strings.Join(parts, "  "))
+	if hidden := len(names) - len(parts); hidden > 0 {
+		parts = append(parts, fmt.Sprintf("+%d TYPES", hidden))
+	}
+	return gpuTitleStyle.Render("GPU  " + strings.Join(parts, "  ·  "))
 }
 
 func slurmClusterGPUInventory(snapshot slurmSnapshot) (int, map[string]int) {
@@ -1151,29 +1137,6 @@ func slurmClusterGPUInventory(snapshot slurmSnapshot) (int, map[string]int) {
 		}
 	}
 	return total, inventory
-}
-
-func slurmClusterWorkloadLine(snapshot slurmSnapshot) string {
-	users := make(map[string]struct{})
-	qos := make(map[string]struct{})
-	for _, job := range snapshot.Jobs {
-		if value := strings.TrimSpace(job.User); value != "" {
-			users[value] = struct{}{}
-		}
-		if value := strings.TrimSpace(job.QOS); value != "" && value != "—" {
-			qos[value] = struct{}{}
-		}
-	}
-	qosNames := make([]string, 0, len(qos))
-	for name := range qos {
-		qosNames = append(qosNames, name)
-	}
-	sort.Strings(qosNames)
-	qosLabel := "—"
-	if len(qosNames) > 0 {
-		qosLabel = strings.Join(qosNames, ", ")
-	}
-	return dimStyle.Render(fmt.Sprintf("USERS %d  ·  QOS %s", len(users), qosLabel))
 }
 
 func slurmRefreshLabel(clusters []slurmClusterConfig) string {
