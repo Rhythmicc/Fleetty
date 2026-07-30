@@ -68,11 +68,27 @@ type storageMountPolicy struct {
 }
 
 type storageScanner struct {
-	root   string
-	policy storageMountPolicy
-	seen   map[string]struct{}
-	result storageScanResult
+	root                string
+	policy              storageMountPolicy
+	seen                map[string]struct{}
+	result              storageScanResult
+	started             time.Time
+	lastPublished       time.Time
+	progressOperations  uint64
+	progressSize        uint64
+	progressFiles       uint64
+	progressDirectories uint64
+	progressEntries     []*storageEntry
+	publish             func(storageScanResult)
 }
+
+type storageScanUpdate struct {
+	result storageScanResult
+	err    error
+	done   bool
+}
+
+const storageScanPublishInterval = 125 * time.Millisecond
 
 func newStorageMapState() *storageMapState {
 	root := "/"
@@ -122,8 +138,58 @@ func (m *monitorModel) beginStorageScan(path string) tea.Cmd {
 	m.storage.Rects = nil
 	m.status = "Scanning " + path + " on local filesystems…"
 	return func() tea.Msg {
-		result, err := scanStorageDirectory(ctx, path)
-		return storageScanResultMsg{generation: generation, result: result, err: err}
+		updates := make(chan storageScanUpdate, 1)
+		go func() {
+			result, err := scanStorageDirectoryProgress(ctx, path, func(result storageScanResult) {
+				publishStorageScanUpdate(updates, storageScanUpdate{result: result})
+			})
+			publishStorageScanUpdate(updates, storageScanUpdate{
+				result: result,
+				err:    err,
+				done:   true,
+			})
+			close(updates)
+		}()
+		return waitForStorageScanUpdate(generation, updates)()
+	}
+}
+
+func publishStorageScanUpdate(updates chan storageScanUpdate, update storageScanUpdate) {
+	select {
+	case updates <- update:
+		return
+	default:
+	}
+	// The renderer only needs the newest partial snapshot. Replacing a pending
+	// update keeps scanning independent from terminal rendering speed.
+	select {
+	case <-updates:
+	default:
+	}
+	updates <- update
+}
+
+func waitForStorageScanUpdate(generation uint64, updates <-chan storageScanUpdate) tea.Cmd {
+	return func() tea.Msg {
+		update, ok := <-updates
+		if !ok {
+			return storageScanResultMsg{
+				generation: generation,
+				err:        context.Canceled,
+			}
+		}
+		if update.done {
+			return storageScanResultMsg{
+				generation: generation,
+				result:     update.result,
+				err:        update.err,
+			}
+		}
+		return storageScanProgressMsg{
+			generation: generation,
+			result:     update.result,
+			updates:    updates,
+		}
 	}
 }
 
@@ -154,6 +220,17 @@ func (m *monitorModel) applyStorageScanResult(msg storageScanResultMsg) {
 	m.status = fmt.Sprintf("Scanned %s in %s · %s across %d items.",
 		msg.result.Path, compactStorageDuration(msg.result.Duration), bytes(msg.result.Size),
 		len(msg.result.Entries))
+}
+
+func (m *monitorModel) applyStorageScanProgress(msg storageScanProgressMsg) bool {
+	if m.storage == nil || msg.generation != m.storage.Generation || !m.storage.Scanning {
+		return false
+	}
+	m.storage.Result = msg.result
+	m.storage.Err = nil
+	m.status = fmt.Sprintf("Scanning %s · %s discovered across %d items…",
+		msg.result.Path, bytes(msg.result.Size), len(msg.result.Entries))
+	return true
 }
 
 func (m *monitorModel) storageNavigateRoot() tea.Cmd {
@@ -231,17 +308,34 @@ func storagePathWithinRoot(path, root string) bool {
 }
 
 func scanStorageDirectory(ctx context.Context, path string) (storageScanResult, error) {
+	return scanStorageDirectoryProgress(ctx, path, nil)
+}
+
+func scanStorageDirectoryProgress(
+	ctx context.Context,
+	path string,
+	publish func(storageScanResult),
+) (storageScanResult, error) {
 	policy, err := localStorageMountPolicy()
 	if err != nil {
 		return storageScanResult{}, fmt.Errorf("inspect local mount table: %w", err)
 	}
-	return scanStorageDirectoryWithPolicy(ctx, path, policy)
+	return scanStorageDirectoryWithPolicyProgress(ctx, path, policy, publish)
 }
 
 func scanStorageDirectoryWithPolicy(
 	ctx context.Context,
 	path string,
 	policy storageMountPolicy,
+) (storageScanResult, error) {
+	return scanStorageDirectoryWithPolicyProgress(ctx, path, policy, nil)
+}
+
+func scanStorageDirectoryWithPolicyProgress(
+	ctx context.Context,
+	path string,
+	policy storageMountPolicy,
+	publish func(storageScanResult),
 ) (storageScanResult, error) {
 	started := time.Now()
 	path = filepath.Clean(path)
@@ -259,8 +353,10 @@ func scanStorageDirectoryWithPolicy(
 		result: storageScanResult{
 			Path: path, PolicyWarning: policy.warning,
 		},
+		started: started,
+		publish: publish,
 	}
-	node, err := scanner.scanEntry(ctx, path, info, true)
+	node, err := scanner.scanEntry(ctx, path, info, true, nil)
 	if err != nil {
 		return storageScanResult{}, err
 	}
@@ -292,6 +388,7 @@ func (s *storageScanner) scanEntry(
 	path string,
 	info os.FileInfo,
 	captureChildren bool,
+	progressEntry *storageEntry,
 ) (storageScanNode, error) {
 	if err := ctx.Err(); err != nil {
 		return storageScanNode{}, err
@@ -311,17 +408,21 @@ func (s *storageScanner) scanEntry(
 		node := storageScanNode{Files: 1}
 		if key == "" {
 			node.Size = allocated
+			s.recordStorageProgress(progressEntry, node.Size, node.Files, 0)
 			return node, nil
 		}
 		if _, duplicate := s.seen[key]; duplicate {
+			s.recordStorageProgress(progressEntry, 0, node.Files, 0)
 			return node, nil
 		}
 		s.seen[key] = struct{}{}
 		node.Size = allocated
+		s.recordStorageProgress(progressEntry, node.Size, node.Files, 0)
 		return node, nil
 	}
 
 	node := storageScanNode{Size: allocated, Directories: 1}
+	s.recordStorageProgress(progressEntry, allocated, 0, 1)
 	directory, err := os.Open(path)
 	if err != nil {
 		s.result.Skipped++
@@ -347,6 +448,7 @@ func (s *storageScanner) scanEntry(
 	}
 	if captureChildren {
 		node.children = make([]storageEntry, 0, len(entries))
+		s.progressEntries = make([]*storageEntry, 0, len(entries))
 	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
@@ -356,9 +458,20 @@ func (s *storageScanner) scanEntry(
 		childInfo, infoErr := entry.Info()
 		if infoErr != nil {
 			s.result.Skipped++
+			s.maybePublishStorageProgress(false)
 			continue
 		}
-		child, scanErr := s.scanEntry(ctx, childPath, childInfo, false)
+		childProgress := progressEntry
+		if captureChildren {
+			childProgress = &storageEntry{
+				Name:  sanitizeTerminalText(entry.Name()),
+				Path:  childPath,
+				IsDir: childInfo.IsDir(),
+			}
+			s.progressEntries = append(s.progressEntries, childProgress)
+			s.maybePublishStorageProgress(true)
+		}
+		child, scanErr := s.scanEntry(ctx, childPath, childInfo, false, childProgress)
 		if scanErr != nil {
 			return storageScanNode{}, scanErr
 		}
@@ -366,14 +479,75 @@ func (s *storageScanner) scanEntry(
 		node.Files += child.Files
 		node.Directories += child.Directories
 		if captureChildren && (child.Size > 0 || child.Files > 0 || child.Directories > 0) {
+			childProgress.Size = child.Size
+			childProgress.Files = child.Files
+			childProgress.Directories = child.Directories
 			node.children = append(node.children, storageEntry{
 				Name: sanitizeTerminalText(entry.Name()), Path: childPath,
 				Size: child.Size, Files: child.Files, Directories: child.Directories,
 				IsDir: childInfo.IsDir(),
 			})
 		}
+		if captureChildren {
+			s.maybePublishStorageProgress(true)
+		}
 	}
 	return node, nil
+}
+
+func (s *storageScanner) recordStorageProgress(
+	entry *storageEntry,
+	size, files, directories uint64,
+) {
+	s.progressSize += size
+	s.progressFiles += files
+	s.progressDirectories += directories
+	if entry != nil {
+		entry.Size += size
+		entry.Files += files
+		entry.Directories += directories
+	}
+	s.progressOperations++
+	s.maybePublishStorageProgress(false)
+}
+
+func (s *storageScanner) maybePublishStorageProgress(force bool) {
+	if s.publish == nil {
+		return
+	}
+	now := time.Now()
+	if !force && s.progressOperations%256 != 0 {
+		return
+	}
+	if !s.lastPublished.IsZero() && now.Sub(s.lastPublished) < storageScanPublishInterval {
+		return
+	}
+	entries := make([]storageEntry, 0, len(s.progressEntries))
+	for _, entry := range s.progressEntries {
+		if entry == nil || entry.Size == 0 && entry.Files == 0 && entry.Directories == 0 {
+			continue
+		}
+		entries = append(entries, *entry)
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Size == entries[j].Size {
+			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		}
+		return entries[i].Size > entries[j].Size
+	})
+	result := storageScanResult{
+		Path:           s.root,
+		Size:           s.progressSize,
+		Files:          s.progressFiles,
+		Directories:    s.progressDirectories,
+		Skipped:        s.result.Skipped,
+		ExcludedMounts: s.result.ExcludedMounts,
+		Entries:        entries,
+		Duration:       now.Sub(s.started),
+		PolicyWarning:  s.result.PolicyWarning,
+	}
+	s.lastPublished = now
+	s.publish(result)
 }
 
 func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) {
@@ -394,7 +568,8 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 		return btopPanel(width, "STORAGE MAP", "ERROR", strings.Join(lines, "\n"),
 			diskTitleStyle, colorDiskBorder), nil
 	}
-	if m.storage.Scanning || m.storage.Result.FinishedAt.IsZero() {
+	if m.storage.Scanning && len(m.storage.Result.Entries) == 0 ||
+		!m.storage.Scanning && m.storage.Result.FinishedAt.IsZero() {
 		lines := m.renderStorageScanning(contentWidth, contentHeight)
 		return btopPanel(width, "STORAGE MAP", m.storage.Scope+" · LOCAL FILESYSTEMS",
 			strings.Join(lines, "\n"), diskTitleStyle, colorDiskBorder), nil
@@ -407,10 +582,22 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 	if len(rects) > 0 {
 		m.storage.Cursor = min(max(0, m.storage.Cursor), len(rects)-1)
 	}
-	mapLines := renderStorageTreemap(rects, contentWidth, mapHeight, m.storage.Cursor, m.colorMode)
+	cursor := m.storage.Cursor
+	if m.storage.Scanning {
+		cursor = -1
+	}
+	mapLines := renderStorageTreemap(rects, contentWidth, mapHeight, cursor, m.colorMode)
 
 	breadcrumb := storageBreadcrumb(m.storage.Root, result.Path, contentWidth)
-	summary := fmt.Sprintf("%s  ·  %d FILES  ·  %d DIRS  ·  %d SKIPPED  ·  %d REMOTE MOUNTS EXCLUDED",
+	summaryPrefix := ""
+	if m.storage.Scanning {
+		frames := []string{"◐", "◓", "◑", "◒"}
+		frame := frames[(time.Now().UnixMilli()/250)%int64(len(frames))]
+		breadcrumb = frame + " SCANNING  ·  " + breadcrumb
+		summaryPrefix = "DISCOVERED  "
+	}
+	summary := fmt.Sprintf("%s%s  ·  %d FILES  ·  %d DIRS  ·  %d SKIPPED  ·  %d REMOTE MOUNTS EXCLUDED",
+		summaryPrefix,
 		bytes(result.Size), result.Files, max(0, int(result.Directories)-1),
 		result.Skipped, result.ExcludedMounts)
 	lines := []string{
@@ -430,7 +617,11 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 		rects[index].Y += mapY
 	}
 	m.storage.Rects = rects
-	meta := fmt.Sprintf("%s · %s · %s", m.storage.Scope, bytes(result.Size),
+	phase := ""
+	if m.storage.Scanning {
+		phase = "SCANNING · "
+	}
+	meta := fmt.Sprintf("%s · %s%s · %s", m.storage.Scope, phase, bytes(result.Size),
 		compactStorageDuration(result.Duration))
 	return btopPanel(width, "STORAGE MAP", meta, strings.Join(lines, "\n"),
 		diskTitleStyle, colorDiskBorder), nil

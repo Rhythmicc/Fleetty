@@ -2655,6 +2655,121 @@ func TestStorageScanExcludesMountsSymlinksAndCountsAllocatedData(t *testing.T) {
 	}
 }
 
+func TestStorageScannerPublishesGrowingPartialResults(t *testing.T) {
+	entry := &storageEntry{Name: "models", Path: "/models", IsDir: true}
+	var updates []storageScanResult
+	scanner := storageScanner{
+		root:            "/",
+		started:         time.Now(),
+		progressEntries: []*storageEntry{entry},
+		result:          storageScanResult{Path: "/"},
+		publish: func(result storageScanResult) {
+			updates = append(updates, result)
+		},
+	}
+
+	scanner.recordStorageProgress(entry, 4<<20, 1, 0)
+	scanner.maybePublishStorageProgress(true)
+	scanner.lastPublished = time.Now().Add(-storageScanPublishInterval)
+	scanner.recordStorageProgress(entry, 8<<20, 2, 1)
+	scanner.maybePublishStorageProgress(true)
+
+	if len(updates) != 2 {
+		t.Fatalf("storage progress updates = %d, want 2", len(updates))
+	}
+	if updates[0].FinishedAt.IsZero() == false || updates[1].FinishedAt.IsZero() == false {
+		t.Fatalf("partial results must not look complete: %#v", updates)
+	}
+	if updates[0].Size >= updates[1].Size ||
+		updates[0].Entries[0].Size >= updates[1].Entries[0].Size {
+		t.Fatalf("storage blocks did not grow between snapshots: %#v", updates)
+	}
+	// Snapshots must own their entry data; a later scan mutation must not alter
+	// a result already handed to Bubble Tea.
+	entry.Size += 16 << 20
+	if updates[1].Entries[0].Size != 12<<20 {
+		t.Fatalf("published storage entry aliases scanner state: %#v", updates[1].Entries[0])
+	}
+}
+
+func TestStorageProgressAccumulatesNestedFilesIntoTopLevelBlock(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "models", "checkpoints")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "weights.bin"),
+		stdbytes.Repeat([]byte("x"), 64<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var scanner storageScanner
+	var updates []storageScanResult
+	scanner = storageScanner{
+		root: root, policy: storageMountPolicy{excluded: map[string]string{}},
+		seen: make(map[string]struct{}), started: time.Now(),
+		result: storageScanResult{Path: root},
+		publish: func(result storageScanResult) {
+			updates = append(updates, result)
+			// Keep this fixture deterministic without slowing the test down.
+			scanner.lastPublished = time.Time{}
+		},
+	}
+	if _, err := scanner.scanEntry(context.Background(), root, rootInfo, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) < 2 {
+		t.Fatalf("nested scan progress updates = %d, want at least 2", len(updates))
+	}
+	latest := updates[len(updates)-1]
+	if len(latest.Entries) != 1 || latest.Entries[0].Name != "models" {
+		t.Fatalf("unexpected top-level progress entries: %#v", latest.Entries)
+	}
+	if latest.Entries[0].Files != 1 || latest.Entries[0].Directories != 2 ||
+		latest.Entries[0].Size < 64<<10 {
+		t.Fatalf("nested usage was not accumulated into models: %#v", latest.Entries[0])
+	}
+}
+
+func TestStoragePageRendersPartialTreemapWhileScanning(t *testing.T) {
+	root := t.TempDir()
+	model := &monitorModel{
+		screen: screenMonitor, width: 100, height: 28, monitorPage: monitorPageStorage,
+		admin: &adminController{},
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1,
+		},
+		storage: &storageMapState{
+			Root: root, Path: root, Scope: "ROOT", Scanning: true,
+			Result: storageScanResult{
+				Path: root, Size: 20 << 20, Files: 12, Directories: 2,
+				Duration: 450 * time.Millisecond,
+				Entries: []storageEntry{{
+					Name: "var", Path: filepath.Join(root, "var"),
+					Size: 20 << 20, Files: 12, Directories: 1, IsDir: true,
+				}},
+			},
+		},
+	}
+
+	rendered := model.monitorView()
+	for _, expected := range []string{"SCANNING", "DISCOVERED", "var", "20.0 MiB"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("partial storage page missing %q:\n%s", expected, rendered)
+		}
+	}
+	if len(model.storage.Rects) != 1 {
+		t.Fatalf("partial storage rectangles = %#v", model.storage.Rects)
+	}
+	if got := lipgloss.Height(rendered); got != model.height {
+		t.Fatalf("partial storage page height = %d, want %d", got, model.height)
+	}
+}
+
 func TestStoragePageFillsTerminalAndSupportsRecursiveMouseNavigation(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "models")

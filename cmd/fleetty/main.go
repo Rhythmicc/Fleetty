@@ -283,6 +283,11 @@ type storageScanResultMsg struct {
 	result     storageScanResult
 	err        error
 }
+type storageScanProgressMsg struct {
+	generation uint64
+	result     storageScanResult
+	updates    <-chan storageScanUpdate
+}
 
 func (m *monitorModel) collect() tea.Cmd {
 	return func() tea.Msg {
@@ -369,6 +374,10 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case storageScanResultMsg:
 		m.applyStorageScanResult(msg)
+	case storageScanProgressMsg:
+		if m.applyStorageScanProgress(msg) {
+			return m, waitForStorageScanUpdate(msg.generation, msg.updates)
+		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
