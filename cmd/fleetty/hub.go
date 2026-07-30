@@ -341,21 +341,23 @@ type hubSnapshotsMsg struct {
 type hubTickMsg struct{}
 
 type hubModel struct {
-	service     *hubService
-	config      hubConfig
-	states      []hubNodeState
-	width       int
-	height      int
-	cursor      int
-	offset      int
-	collecting  bool
-	colorMode   colorMode
-	status      string
-	detail      *monitorModel
-	slurmView   bool
-	slurmFilter int
-	slurmOffset int
-	slurmStates []slurmClusterState
+	service      *hubService
+	config       hubConfig
+	states       []hubNodeState
+	width        int
+	height       int
+	cursor       int
+	offset       int
+	collecting   bool
+	colorMode    colorMode
+	status       string
+	detail       *monitorModel
+	slurmView    bool
+	slurmFilter  int
+	slurmOffset  int
+	slurmCursor  int
+	slurmExplain bool
+	slurmStates  []slurmClusterState
 }
 
 type hubNodeGroup struct {
@@ -439,6 +441,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.collecting = false
 		m.states = msg.States
 		m.slurmStates = msg.SlurmStates
+		m.clampSlurmCursor()
 		if m.detail != nil {
 			m.detail.slurmQueue = m.nodeSlurmQueue(m.cursor)
 		} else {
@@ -473,10 +476,18 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			if m.slurmView {
+				if m.slurmExplain {
+					m.slurmExplain = false
+					return m, nil
+				}
 				if index, ok := m.slurmClusterAt(msg.Mouse().X, msg.Mouse().Y); ok {
 					m.slurmFilter = index
 					m.slurmOffset = 0
+					m.slurmCursor = 0
 					m.status = "Showing jobs from " + m.config.SlurmClusters[index].Name + "."
+				} else if index, ok := m.slurmJobAt(msg.Mouse().X, msg.Mouse().Y); ok {
+					m.slurmCursor = index
+					m.slurmExplain = true
 				}
 				return m, nil
 			}
@@ -491,6 +502,11 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "q":
 			if m.slurmView {
+				if m.slurmExplain {
+					m.slurmExplain = false
+					m.status = "Returned to the Slurm queue."
+					return m, nil
+				}
 				m.slurmView = false
 				m.slurmOffset = 0
 				m.status = "Returned to the server overview."
@@ -509,6 +525,8 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.config.SlurmClusters) > 0 {
 				m.slurmView = !m.slurmView
 				m.slurmOffset = 0
+				m.slurmCursor = 0
+				m.slurmExplain = false
 				if m.slurmView {
 					m.status = "Slurm queue overview."
 				} else {
@@ -519,10 +537,17 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.config.SlurmClusters) > 0 {
 				m.slurmView = true
 				m.slurmOffset = 0
+				m.slurmCursor = 0
+				m.slurmExplain = false
 				m.status = "Slurm queue overview."
 			}
 		case "esc":
 			if m.slurmView {
+				if m.slurmExplain {
+					m.slurmExplain = false
+					m.status = "Returned to the Slurm queue."
+					break
+				}
 				m.slurmView = false
 				m.status = "Server overview."
 			}
@@ -530,42 +555,52 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.slurmView {
 				m.slurmFilter = -1
 				m.slurmOffset = 0
+				m.slurmCursor = 0
 				m.status = "Showing jobs from all Slurm clusters."
 			}
 		case "left", "h":
 			if m.slurmView {
+				if m.slurmExplain {
+					break
+				}
 				m.moveSlurmFilter(-1)
 				break
 			}
 			m.moveCursor(-1)
 		case "right", "l":
 			if m.slurmView {
+				if m.slurmExplain {
+					break
+				}
 				m.moveSlurmFilter(1)
 				break
 			}
 			m.moveCursor(1)
 		case "up", "k":
 			if m.slurmView {
-				m.slurmOffset = max(0, m.slurmOffset-1)
+				m.moveSlurmCursor(-1)
 				break
 			}
 			m.moveCursor(-m.columns())
 		case "down", "j":
 			if m.slurmView {
-				m.slurmOffset++
+				m.moveSlurmCursor(1)
 				break
 			}
 			m.moveCursor(m.columns())
 		case "pgup":
 			if m.slurmView {
-				m.slurmOffset = max(0, m.slurmOffset-max(1, m.height/2))
+				m.moveSlurmCursor(-max(1, m.height/2))
 			}
 		case "pgdown":
 			if m.slurmView {
-				m.slurmOffset += max(1, m.height/2)
+				m.moveSlurmCursor(max(1, m.height/2))
 			}
 		case "enter":
 			if m.slurmView {
+				if len(m.selectedSlurmJobs()) > 0 {
+					m.slurmExplain = !m.slurmExplain
+				}
 				break
 			}
 			return m, m.openSelected()

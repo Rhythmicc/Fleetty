@@ -84,12 +84,23 @@ type slurmJob struct {
 	RequestedNodes string
 	ExpectedNodes  string
 	ExcludedNodes  string
+	CPUs           int
+	MemoryBytes    uint64
+	MemoryRaw      string
+	Constraints    string
 }
 
 type slurmNode struct {
-	Name       string
-	Partitions []string
-	GRES       []string
+	Name             string
+	Partitions       []string
+	GRES             []string
+	State            string
+	CPUsAlloc        int
+	CPUsIdle         int
+	CPUsOther        int
+	CPUsTotal        int
+	MemoryTotalBytes uint64
+	MemoryFreeBytes  uint64
 }
 
 type slurmSnapshot struct {
@@ -319,13 +330,16 @@ func collectSlurmSnapshotWithRunner(
 	if err != nil {
 		return slurmSnapshot{}, err
 	}
-	nodeOutput, err := runner.Run(ctx, "sinfo", "-N", "-h", "-o", "%N\t%P\t%G")
+	nodeOutput, err := runner.Run(
+		ctx, "sinfo", "--noconvert", "-N", "-h", "-o",
+		"%N\t%P\t%G\t%t\t%C\t%m\t%e",
+	)
 	if err != nil {
 		return slurmSnapshot{}, err
 	}
 	jobOutput, err := runner.Run(
-		ctx, "squeue", "-h", "-o",
-		"%i\t%P\t%j\t%u\t%T\t%Q\t%q\t%M\t%l\t%D\t%N\t%b\t%n\t%Y\t%x\t%R",
+		ctx, "squeue", "--noconvert", "-h", "-o",
+		"%i\t%P\t%j\t%u\t%T\t%Q\t%q\t%M\t%l\t%D\t%N\t%b\t%n\t%Y\t%x\t%C\t%m\t%f\t%R",
 	)
 	if err != nil {
 		return slurmSnapshot{}, err
@@ -433,8 +447,8 @@ func parseSlurmNodes(output string, filter []string) ([]slurmNode, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("parse sinfo node line %d: expected 3 fields", lineNumber+1)
+		if len(fields) != 3 && len(fields) != 7 {
+			return nil, fmt.Errorf("parse sinfo node line %d: expected 3 or 7 fields", lineNumber+1)
 		}
 		name := strings.TrimSpace(fields[0])
 		partition := strings.TrimSuffix(strings.TrimSpace(fields[1]), "*")
@@ -453,6 +467,24 @@ func parseSlurmNodes(output string, filter []string) ([]slurmNode, error) {
 		if gres := strings.TrimSpace(fields[2]); gres != "" && gres != "(null)" {
 			node.GRES = appendUnique(node.GRES, gres)
 		}
+		if len(fields) == 7 {
+			cpus, err := parseSlurmCPUCounts(fields[4])
+			if err != nil {
+				return nil, fmt.Errorf("parse sinfo node CPUs for %s: %w", name, err)
+			}
+			totalMemory, err := parseSlurmMemory(fields[5], 1)
+			if err != nil {
+				return nil, fmt.Errorf("parse sinfo node memory for %s: %w", name, err)
+			}
+			freeMemory, err := parseSlurmMemory(fields[6], 1)
+			if err != nil {
+				return nil, fmt.Errorf("parse sinfo node free memory for %s: %w", name, err)
+			}
+			node.State = strings.TrimSpace(fields[3])
+			node.CPUsAlloc, node.CPUsIdle = cpus[0], cpus[1]
+			node.CPUsOther, node.CPUsTotal = cpus[2], cpus[3]
+			node.MemoryTotalBytes, node.MemoryFreeBytes = totalMemory, freeMemory
+		}
 	}
 	nodes := make([]slurmNode, 0, len(order))
 	for _, name := range order {
@@ -469,8 +501,8 @@ func parseSlurmJobs(output string, filter []string) ([]slurmJob, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 16 {
-			return nil, fmt.Errorf("parse squeue line %d: expected 16 fields", lineNumber+1)
+		if len(fields) != 16 && len(fields) != 19 {
+			return nil, fmt.Errorf("parse squeue line %d: expected 16 or 19 fields", lineNumber+1)
 		}
 		partition := strings.TrimSpace(fields[1])
 		if len(allowed) > 0 {
@@ -486,7 +518,7 @@ func parseSlurmJobs(output string, filter []string) ([]slurmJob, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse squeue nodes on line %d: %w", lineNumber+1, err)
 		}
-		jobs = append(jobs, slurmJob{
+		job := slurmJob{
 			ID: strings.TrimSpace(fields[0]), Partition: partition,
 			Name: strings.TrimSpace(fields[2]), User: strings.TrimSpace(fields[3]),
 			State: strings.TrimSpace(fields[4]), Priority: priority,
@@ -498,9 +530,65 @@ func parseSlurmJobs(output string, filter []string) ([]slurmJob, error) {
 			ExpectedNodes:  strings.TrimSpace(fields[13]),
 			ExcludedNodes:  strings.TrimSpace(fields[14]),
 			Reason:         strings.TrimSpace(fields[15]),
-		})
+		}
+		if len(fields) == 19 {
+			cpus, err := strconv.Atoi(strings.TrimSpace(fields[15]))
+			if err != nil {
+				return nil, fmt.Errorf("parse squeue CPUs on line %d: %w", lineNumber+1, err)
+			}
+			memoryRaw := strings.TrimSpace(fields[16])
+			memory, err := parseSlurmMemory(memoryRaw, cpus)
+			if err != nil {
+				return nil, fmt.Errorf("parse squeue memory on line %d: %w", lineNumber+1, err)
+			}
+			job.CPUs = cpus
+			job.MemoryRaw = memoryRaw
+			job.MemoryBytes = memory
+			job.Constraints = strings.TrimSpace(fields[17])
+			job.Reason = strings.TrimSpace(fields[18])
+		}
+		jobs = append(jobs, job)
 	}
 	return jobs, nil
+}
+
+func parseSlurmMemory(value string, cpus int) (uint64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" || value == "N/A" || value == "(null)" {
+		return 0, nil
+	}
+	perCPU := strings.HasSuffix(strings.ToLower(value), "c")
+	if perCPU {
+		value = value[:len(value)-1]
+	}
+	// Slurm reports unsuffixed memory values in MiB.
+	multiplier := uint64(1 << 20)
+	switch suffix := strings.ToUpper(value[len(value)-1:]); suffix {
+	case "K":
+		multiplier = 1 << 10
+		value = value[:len(value)-1]
+	case "M":
+		multiplier = 1 << 20
+		value = value[:len(value)-1]
+	case "G":
+		multiplier = 1 << 30
+		value = value[:len(value)-1]
+	case "T":
+		multiplier = 1 << 40
+		value = value[:len(value)-1]
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || number < 0 {
+		if err == nil {
+			err = errors.New("negative value")
+		}
+		return 0, err
+	}
+	bytes := uint64(number * float64(multiplier))
+	if perCPU {
+		bytes *= uint64(max(1, cpus))
+	}
+	return bytes, nil
 }
 
 func stringSet(values []string) map[string]struct{} {
@@ -613,11 +701,24 @@ func isSlurmPending(state string) bool {
 	}
 }
 
+func slurmEligibleForNext(job slurmJob) bool {
+	if !isSlurmPending(job.State) {
+		return false
+	}
+	switch normalizeSlurmReason(job.Reason) {
+	case "JobArrayTaskLimit", "Dependency", "DependencyNeverSatisfied":
+		return false
+	default:
+		return true
+	}
+}
+
 type slurmDisplayJob struct {
-	Cluster string
-	Job     slurmJob
-	Next    bool
-	Order   int
+	Cluster  string
+	Job      slurmJob
+	Next     bool
+	Order    int
+	Snapshot *slurmSnapshot
 }
 
 type nodeSlurmQueue struct {
@@ -649,6 +750,7 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 		return queue
 	}
 	state := m.slurmStates[clusterIndex]
+	queueSnapshot := state.Snapshot
 	queue.CollectedAt = state.Snapshot.CollectedAt
 	if state.Error != "" {
 		queue.Warning = "Slurm source offline: " + state.Error
@@ -672,7 +774,7 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 		if isSlurmRunning(job.State) {
 			if slurmNodeListContains(job.NodeList, nodeConfig.SlurmNode) {
 				queue.Jobs = append(queue.Jobs, slurmDisplayJob{
-					Cluster: state.Snapshot.Name, Job: job, Order: order,
+					Cluster: state.Snapshot.Name, Job: job, Order: order, Snapshot: &queueSnapshot,
 				})
 			}
 			continue
@@ -686,10 +788,10 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 		if !slurmPendingJobMatchesNode(job, nodeConfig.SlurmNode, state.Snapshot.Nodes) {
 			continue
 		}
-		next := !nextMarked
-		nextMarked = true
+		next := !nextMarked && slurmEligibleForNext(job)
+		nextMarked = nextMarked || next
 		queue.Jobs = append(queue.Jobs, slurmDisplayJob{
-			Cluster: state.Snapshot.Name, Job: job, Next: next, Order: order,
+			Cluster: state.Snapshot.Name, Job: job, Next: next, Order: order, Snapshot: &queueSnapshot,
 		})
 	}
 	sortSlurmJobs(queue.Jobs)
@@ -785,6 +887,329 @@ func slurmGPUCounts(value string) map[string]int {
 	return result
 }
 
+type slurmNodeFit struct {
+	Node            string
+	CPURequest      int
+	CPUAvailable    int
+	MemoryRequest   uint64
+	MemoryAvailable uint64
+	GPURequest      string
+	GPUAvailable    string
+	Blockers        []string
+}
+
+type slurmJobExplanation struct {
+	ReasonCode string
+	Badge      string
+	Source     string
+	Summary    string
+	Fits       []slurmNodeFit
+}
+
+func explainSlurmJob(job slurmJob, snapshot *slurmSnapshot) slurmJobExplanation {
+	reason := normalizeSlurmReason(job.Reason)
+	explanation := slurmJobExplanation{
+		ReasonCode: reason,
+		Badge:      slurmReasonBadge(reason),
+		Source:     "SLURM",
+		Summary:    slurmReasonSummary(reason),
+	}
+	if isSlurmRunning(job.State) {
+		explanation.Badge = "RUNNING"
+		explanation.Summary = "This job is running; Slurm reports no pending blocker."
+		return explanation
+	}
+	if reason == "JobArrayTaskLimit" {
+		if limit := slurmArrayThrottle(job.ID); limit > 0 {
+			explanation.Summary = fmt.Sprintf(
+				"The job array allows at most %d task%s to run concurrently.",
+				limit, plural(limit),
+			)
+			if snapshot != nil {
+				running := slurmRunningArraySiblings(job.ID, snapshot.Jobs)
+				explanation.Summary += fmt.Sprintf(" %d sibling task%s currently running.", running, plural(running))
+			}
+		}
+		return explanation
+	}
+	if reason != "Resources" || snapshot == nil {
+		return explanation
+	}
+	explanation.Fits = slurmCandidateNodeFits(job, *snapshot)
+	explanation.Source = "SLURM + FLEETTY INFERENCE"
+	if len(explanation.Fits) == 0 {
+		explanation.Badge = "NO CANDIDATE"
+		explanation.Summary = "No configured node matches the partition, node selection, and GPU request."
+		return explanation
+	}
+	best := explanation.Fits[0]
+	for _, fit := range explanation.Fits[1:] {
+		if len(fit.Blockers) < len(best.Blockers) {
+			best = fit
+		}
+	}
+	if len(best.Blockers) == 0 {
+		explanation.Badge = "RESOURCES"
+		explanation.Summary = "The visible node snapshot fits this request; Slurm may be waiting on scheduling state not exposed here."
+		return explanation
+	}
+	explanation.Badge = strings.Join(best.Blockers, "+")
+	explanation.Summary = fmt.Sprintf(
+		"Best candidate %s is currently short on %s.",
+		best.Node, strings.ToLower(strings.Join(best.Blockers, " and ")),
+	)
+	return explanation
+}
+
+func slurmCandidateNodeFits(job slurmJob, snapshot slurmSnapshot) []slurmNodeFit {
+	var result []slurmNodeFit
+	for _, node := range snapshot.Nodes {
+		if !slurmNodeInPartition(node, job.Partition) ||
+			!slurmPendingJobMatchesNode(job, node.Name, snapshot.Nodes) {
+			continue
+		}
+		fit := slurmNodeFit{
+			Node:            node.Name,
+			CPURequest:      slurmPerNodeCPUs(job),
+			CPUAvailable:    node.CPUsIdle,
+			MemoryRequest:   job.MemoryBytes,
+			MemoryAvailable: slurmNodeMemoryAvailable(node, snapshot.Jobs),
+		}
+		if !slurmNodeSchedulingState(node.State) {
+			fit.Blockers = append(fit.Blockers, "STATE")
+		}
+		if fit.CPURequest > 0 && fit.CPUAvailable < fit.CPURequest {
+			fit.Blockers = append(fit.Blockers, "CPU")
+		}
+		if fit.MemoryRequest > 0 && node.MemoryTotalBytes > 0 &&
+			fit.MemoryAvailable < fit.MemoryRequest {
+			fit.Blockers = append(fit.Blockers, "MEM")
+		}
+		fit.GPURequest, fit.GPUAvailable, fit.Blockers =
+			slurmNodeGPUFit(job, node, snapshot.Jobs, fit.Blockers)
+		result = append(result, fit)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if len(result[i].Blockers) != len(result[j].Blockers) {
+			return len(result[i].Blockers) < len(result[j].Blockers)
+		}
+		return result[i].Node < result[j].Node
+	})
+	return result
+}
+
+func slurmNodeInPartition(node slurmNode, partition string) bool {
+	for _, value := range node.Partitions {
+		if value == partition {
+			return true
+		}
+	}
+	return false
+}
+
+func slurmNodeSchedulingState(state string) bool {
+	state = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(state), "*"))
+	return state == "" || strings.HasPrefix(state, "idle") ||
+		strings.HasPrefix(state, "mix") || strings.HasPrefix(state, "alloc")
+}
+
+func slurmPerNodeCPUs(job slurmJob) int {
+	return (job.CPUs + max(1, job.Nodes) - 1) / max(1, job.Nodes)
+}
+
+func slurmNodeMemoryAvailable(node slurmNode, jobs []slurmJob) uint64 {
+	if node.MemoryTotalBytes == 0 {
+		return 0
+	}
+	var allocated uint64
+	for _, running := range jobs {
+		if isSlurmRunning(running.State) && slurmNodeListContains(running.NodeList, node.Name) {
+			allocated += running.MemoryBytes
+		}
+	}
+	if allocated >= node.MemoryTotalBytes {
+		return 0
+	}
+	return node.MemoryTotalBytes - allocated
+}
+
+func slurmNodeGPUFit(
+	job slurmJob,
+	node slurmNode,
+	jobs []slurmJob,
+	blockers []string,
+) (string, string, []string) {
+	requested := slurmGPUCounts(job.GRES)
+	total := slurmGPUCounts(strings.Join(node.GRES, ","))
+	if len(requested) == 0 {
+		return "—", slurmGPUCountLabel(total), blockers
+	}
+	used := make(map[string]int)
+	for _, running := range jobs {
+		if !isSlurmRunning(running.State) || !slurmNodeListContains(running.NodeList, node.Name) {
+			continue
+		}
+		for gpuType, count := range slurmGPUCounts(running.GRES) {
+			used[gpuType] += count
+		}
+	}
+	fits := true
+	for gpuType, count := range requested {
+		if gpuType == "" {
+			if slurmGPUTotal(total)-slurmGPUTotal(used) < count {
+				fits = false
+			}
+			continue
+		}
+		available := total[gpuType] - used[gpuType] - used[""]
+		if available < count {
+			fits = false
+		}
+	}
+	if !fits {
+		blockers = append(blockers, "GPU")
+	}
+	return slurmGPUCountLabel(requested), slurmGPUAvailableLabel(total, used), blockers
+}
+
+func slurmGPUTotal(counts map[string]int) int {
+	total := 0
+	for _, count := range counts {
+		total += count
+	}
+	return total
+}
+
+func slurmGPUCountLabel(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "—"
+	}
+	var names []string
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var labels []string
+	for _, name := range names {
+		label := name
+		if label == "" {
+			label = "gpu"
+		}
+		labels = append(labels, fmt.Sprintf("%s×%d", label, counts[name]))
+	}
+	return strings.Join(labels, ",")
+}
+
+func slurmGPUAvailableLabel(total, used map[string]int) string {
+	if len(total) == 0 {
+		return "—"
+	}
+	available := make(map[string]int, len(total))
+	for name, count := range total {
+		available[name] = max(0, count-used[name]-used[""])
+	}
+	return slurmGPUCountLabel(available)
+}
+
+func normalizeSlurmReason(reason string) string {
+	return strings.Trim(strings.TrimSpace(reason), "()")
+}
+
+func slurmReasonBadge(reason string) string {
+	switch {
+	case reason == "", reason == "None":
+		return "READY"
+	case reason == "JobArrayTaskLimit":
+		return "ARRAY CAP"
+	case reason == "Resources":
+		return "RESOURCES"
+	case reason == "Priority":
+		return "PRIORITY"
+	case strings.Contains(reason, "Dependency"):
+		return "DEPENDENCY"
+	case strings.Contains(strings.ToLower(reason), "qos"):
+		return "QOS LIMIT"
+	case strings.Contains(reason, "Node"):
+		return "NODE"
+	default:
+		return strings.ToUpper(truncate(camelWords(reason), 14))
+	}
+}
+
+func slurmReasonSummary(reason string) string {
+	switch {
+	case reason == "JobArrayTaskLimit":
+		return "Slurm is enforcing this job array's concurrency throttle."
+	case reason == "Resources":
+		return "Slurm reports that the requested resources are not currently available."
+	case reason == "Priority":
+		return "A higher-priority eligible job is ahead in the scheduler."
+	case strings.Contains(reason, "Dependency"):
+		return "A declared job dependency has not completed."
+	case strings.Contains(strings.ToLower(reason), "qos"):
+		return "A QOS policy or resource limit is preventing the job from starting."
+	case strings.Contains(reason, "Node"):
+		return "The requested or eligible node is not currently schedulable."
+	default:
+		if reason == "" || reason == "None" {
+			return "Slurm reports no pending reason."
+		}
+		return "Slurm reports " + camelWords(reason) + "."
+	}
+}
+
+func camelWords(value string) string {
+	var result []rune
+	for index, char := range []rune(value) {
+		if index > 0 && char >= 'A' && char <= 'Z' {
+			result = append(result, ' ')
+		}
+		result = append(result, char)
+	}
+	return string(result)
+}
+
+func slurmArrayThrottle(id string) int {
+	index := strings.LastIndexByte(id, '%')
+	if index < 0 {
+		return 0
+	}
+	end := index + 1
+	for end < len(id) && id[end] >= '0' && id[end] <= '9' {
+		end++
+	}
+	value, _ := strconv.Atoi(id[index+1 : end])
+	return value
+}
+
+func slurmRunningArraySiblings(id string, jobs []slurmJob) int {
+	base := id
+	if index := strings.IndexByte(base, '_'); index >= 0 {
+		base = base[:index]
+	}
+	count := 0
+	for _, job := range jobs {
+		if !isSlurmRunning(job.State) {
+			continue
+		}
+		jobBase := job.ID
+		if index := strings.IndexByte(jobBase, '_'); index >= 0 {
+			jobBase = jobBase[:index]
+		}
+		if jobBase == base {
+			count++
+		}
+	}
+	return count
+}
+
+func plural(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func slurmNodeListContains(expression, node string) bool {
 	expression, node = strings.TrimSpace(expression), strings.TrimSpace(node)
 	if expression == "" || node == "" {
@@ -848,11 +1273,29 @@ func (m *hubModel) moveSlurmFilter(delta int) {
 	}
 	m.slurmFilter = min(max(-1, m.slurmFilter+delta), len(m.config.SlurmClusters)-1)
 	m.slurmOffset = 0
+	m.slurmCursor = 0
 	if m.slurmFilter < 0 {
 		m.status = "Showing jobs from all Slurm clusters."
 		return
 	}
 	m.status = "Showing jobs from " + m.config.SlurmClusters[m.slurmFilter].Name + "."
+}
+
+func (m *hubModel) clampSlurmCursor() {
+	jobs := m.selectedSlurmJobs()
+	if len(jobs) == 0 {
+		m.slurmCursor, m.slurmOffset, m.slurmExplain = 0, 0, false
+		return
+	}
+	m.slurmCursor = min(max(0, m.slurmCursor), len(jobs)-1)
+}
+
+func (m *hubModel) moveSlurmCursor(delta int) {
+	jobs := m.selectedSlurmJobs()
+	if len(jobs) == 0 {
+		return
+	}
+	m.slurmCursor = min(max(0, m.slurmCursor+delta), len(jobs)-1)
 }
 
 func (m *hubModel) slurmColumns() int {
@@ -911,6 +1354,20 @@ func (m *hubModel) slurmClusterAt(x, y int) (int, bool) {
 	return index, index >= 0 && index < len(m.config.SlurmClusters)
 }
 
+func (m *hubModel) slurmJobAt(x, y int) (int, bool) {
+	if x < 0 || x >= usableWidth(m.width) {
+		return 0, false
+	}
+	cardsHeight := lipgloss.Height(m.renderSlurmClusterCards(usableWidth(m.width)))
+	firstRow := 1 + cardsHeight + 2
+	if y < firstRow {
+		return 0, false
+	}
+	index := m.slurmOffset + y - firstRow
+	jobs := m.selectedSlurmJobs()
+	return index, index >= 0 && index < len(jobs)
+}
+
 func (m *hubModel) slurmQueueView() string {
 	width := usableWidth(m.width)
 	online := 0
@@ -929,6 +1386,9 @@ func (m *hubModel) slurmQueueView() string {
 	}
 	gap := max(2, width-lipgloss.Width(title)-lipgloss.Width(meta))
 	header := ansi.Truncate(title+strings.Repeat(" ", gap)+meta, width, "")
+	if m.slurmExplain {
+		return m.slurmExplanationView(header, width)
+	}
 
 	cards := m.renderSlurmClusterCards(width)
 	jobs := m.selectedSlurmJobs()
@@ -947,7 +1407,8 @@ func (m *hubModel) slurmQueueView() string {
 		keyHint("tab", "servers"),
 		keyHint("←→", "cluster"),
 		keyHint("a", "all"),
-		keyHint("↑↓", "scroll"),
+		keyHint("↑↓", "select"),
+		keyHint("enter", "explain"),
 		keyHint("r", "refresh"),
 		keyHint("t", "theme"),
 		keyHint("q", "hub"),
@@ -956,14 +1417,25 @@ func (m *hubModel) slurmQueueView() string {
 	jobPanelHeight := max(3, m.height-lipgloss.Height(header)-lipgloss.Height(cards)-lipgloss.Height(footer))
 	jobContentLines := max(1, jobPanelHeight-2)
 	tableRows := max(0, jobContentLines-1)
+	m.clampSlurmCursor()
+	if m.slurmCursor < m.slurmOffset {
+		m.slurmOffset = m.slurmCursor
+	}
+	if tableRows > 0 && m.slurmCursor >= m.slurmOffset+tableRows {
+		m.slurmOffset = m.slurmCursor - tableRows + 1
+	}
 	m.slurmOffset = min(max(0, m.slurmOffset), max(0, len(jobs)-tableRows))
 	end := min(len(jobs), m.slurmOffset+tableRows)
 	lines := []string{slurmJobTableHeader(width - 4)}
 	if len(jobs) == 0 {
 		lines = append(lines, dimStyle.Render("No jobs in the selected queue."))
 	} else {
-		for _, job := range jobs[m.slurmOffset:end] {
-			lines = append(lines, renderSlurmJobRow(job, width-4))
+		for index, job := range jobs[m.slurmOffset:end] {
+			row := renderSlurmJobRow(job, width-4)
+			if m.slurmOffset+index == m.slurmCursor {
+				row = selectedProcessStyle(m.colorMode).Width(width - 4).Render(row)
+			}
+			lines = append(lines, row)
 		}
 	}
 	for len(lines) < jobContentLines {
@@ -974,6 +1446,133 @@ func (m *hubModel) slurmQueueView() string {
 		filter, running, next, max(0, pending-next), len(jobs))
 	jobPanel := btopPanel(width, "JOBS", jobMeta, strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
 	return strings.Join([]string{header, cards, jobPanel, footer}, "\n")
+}
+
+func (m *hubModel) slurmExplanationView(header string, width int) string {
+	jobs := m.selectedSlurmJobs()
+	if len(jobs) == 0 {
+		m.slurmExplain = false
+		return m.slurmQueueView()
+	}
+	m.clampSlurmCursor()
+	display := jobs[m.slurmCursor]
+	job := display.Job
+	explanation := explainSlurmJob(job, display.Snapshot)
+	state, stateStyle := slurmDisplayState(display)
+	title := fmt.Sprintf("%s / %s", display.Cluster, job.ID)
+	meta := stateStyle.Render(state) + dimStyle.Render("  ·  ") +
+		slurmExplanationBadgeStyle(explanation).Render(explanation.Badge)
+
+	controllerReason := normalizeSlurmReason(job.Reason)
+	if controllerReason == "" {
+		controllerReason = "None"
+	}
+	lines := []string{
+		gpuTitleStyle.Render("WHY IT IS NOT RUNNING"),
+		"",
+		dimStyle.Render("CONTROLLER  ") + valueStyle.Render(controllerReason),
+		dimStyle.Render("EVIDENCE    ") + valueStyle.Render(explanation.Source),
+		dimStyle.Render("EXPLANATION ") + ansi.Truncate(explanation.Summary, max(10, width-20), ""),
+		"",
+		gpuTitleStyle.Render("REQUEST"),
+		fmt.Sprintf(
+			"CPU %s  ·  MEMORY %s  ·  GPU %s  ·  NODES %d  ·  QOS %s",
+			valueOrDash(job.CPUs), slurmMemoryLabel(job.MemoryBytes),
+			slurmGPUCountLabel(slurmGPUCounts(job.GRES)), job.Nodes, slurmQOSLabel(job.QOS),
+		),
+		fmt.Sprintf(
+			"PARTITION %s  ·  CONSTRAINT %s  ·  PRIORITY %d",
+			valueOrUnknown(job.Partition), slurmOptional(job.Constraints), job.Priority,
+		),
+		"",
+		gpuTitleStyle.Render("CANDIDATE NODE FIT  ") +
+			dimStyle.Render("Slurm reason is authoritative; resource dimensions below are Fleetty inference."),
+		slurmNodeFitHeader(width - 4),
+	}
+	if len(explanation.Fits) == 0 {
+		lines = append(lines, dimStyle.Render("No matching candidate nodes are visible in this snapshot."))
+	} else {
+		for _, fit := range explanation.Fits[:min(len(explanation.Fits), max(1, m.height-18))] {
+			lines = append(lines, renderSlurmNodeFit(fit, width-4))
+		}
+	}
+	contentHeight := max(1, m.height-lipgloss.Height(header)-3)
+	for len(lines) < contentHeight {
+		lines = append(lines, "")
+	}
+	if len(lines) > contentHeight {
+		lines = lines[:contentHeight]
+	}
+	panel := btopPanel(width, title, meta, strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
+	footer := ansi.Truncate(strings.Join([]string{
+		keyHint("esc/q", "queue"),
+		keyHint("↑↓", "previous/next job"),
+		keyHint("enter", "queue"),
+		keyHint("t", "theme"),
+	}, "  "), width, "")
+	return strings.Join([]string{header, panel, footer}, "\n")
+}
+
+func slurmNodeFitHeader(width int) string {
+	header := fmt.Sprintf("%-18s %-16s %-22s %-22s %s",
+		"NODE", "CPU FREE / REQ", "MEM FREE / REQ", "GPU FREE / REQ", "VERDICT")
+	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
+}
+
+func renderSlurmNodeFit(fit slurmNodeFit, width int) string {
+	verdict := "FITS"
+	style := processRunningStyle
+	if len(fit.Blockers) > 0 {
+		verdict = strings.Join(fit.Blockers, "+")
+		style = warningStyle
+	}
+	row := fmt.Sprintf("%-18s %7d / %-7d %-10s / %-10s %-10s / %-10s %s",
+		truncate(fit.Node, 18),
+		fit.CPUAvailable, fit.CPURequest,
+		slurmMemoryLabel(fit.MemoryAvailable), slurmMemoryLabel(fit.MemoryRequest),
+		truncate(fit.GPUAvailable, 10), truncate(fit.GPURequest, 10),
+		verdict,
+	)
+	return style.Render(truncate(row, width))
+}
+
+func slurmExplanationBadgeStyle(explanation slurmJobExplanation) lipgloss.Style {
+	if explanation.Badge == "RUNNING" {
+		return processRunningStyle
+	}
+	if explanation.ReasonCode == "Priority" {
+		return gpuTitleStyle
+	}
+	return warningStyle
+}
+
+func slurmMemoryLabel(value uint64) string {
+	if value == 0 {
+		return "—"
+	}
+	return bytes(value)
+}
+
+func slurmOptional(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "(null)" || value == "N/A" {
+		return "—"
+	}
+	return value
+}
+
+func valueOrUnknown(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
+}
+
+func valueOrDash(value int) string {
+	if value <= 0 {
+		return "—"
+	}
+	return strconv.Itoa(value)
 }
 
 func (m *hubModel) renderSlurmClusterCards(width int) string {
@@ -1068,7 +1667,13 @@ func fitSlurmClusterCardLines(lines []string, count int) []string {
 
 func slurmClusterQueueSummaryLine(snapshot slurmSnapshot) string {
 	running, pending, other := slurmStateCounts(snapshot.Jobs)
-	next := min(1, pending)
+	next := 0
+	for _, job := range snapshot.Jobs {
+		if slurmEligibleForNext(job) {
+			next = 1
+			break
+		}
+	}
 	line := fmt.Sprintf("%s %d  ·  %s %d  ·  %s %d",
 		processRunningStyle.Render("RUN"), running,
 		processWaitingStyle.Render("NEXT"), next,
@@ -1177,7 +1782,8 @@ func slurmPartitionStyle(partition slurmPartition) lipgloss.Style {
 
 func (m *hubModel) selectedSlurmJobs() []slurmDisplayJob {
 	var jobs []slurmDisplayJob
-	for index, state := range m.slurmStates {
+	for index := range m.slurmStates {
+		state := &m.slurmStates[index]
 		if m.slurmFilter >= 0 && index != m.slurmFilter {
 			continue
 		}
@@ -1186,10 +1792,11 @@ func (m *hubModel) selectedSlurmJobs() []slurmDisplayJob {
 		}
 		nextMarked := false
 		for order, job := range state.Snapshot.Jobs {
-			next := !nextMarked && isSlurmPending(job.State)
+			next := !nextMarked && slurmEligibleForNext(job)
 			nextMarked = nextMarked || next
 			jobs = append(jobs, slurmDisplayJob{
 				Cluster: state.Snapshot.Name, Job: job, Next: next, Order: order,
+				Snapshot: &state.Snapshot,
 			})
 		}
 	}
@@ -1218,12 +1825,12 @@ func slurmJobTableHeader(width int) string {
 		reasonWidth := max(8, width-144)
 		header = fmt.Sprintf("%-14s %-15s %-10s %-11s %10s %-12s %-9s %-9s %5s %-16s %-22s %-*s",
 			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "LIMIT", "NODES", "PARTITION", "NAME",
-			reasonWidth, "NODE / REASON")
+			reasonWidth, "NODE / BLOCKER")
 	case width >= 112:
 		reasonWidth := max(8, width-104)
 		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-10s %-8s %5s %-18s %-*s",
 			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "NODES", "NAME",
-			reasonWidth, "NODE / REASON")
+			reasonWidth, "NODE / BLOCKER")
 	case width >= 80:
 		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-10s %-8s",
 			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED")
@@ -1236,6 +1843,7 @@ func slurmJobTableHeader(width int) string {
 func renderSlurmJobRow(display slurmDisplayJob, width int) string {
 	job := display.Job
 	stateLabel, stateStyle := slurmDisplayState(display)
+	reason := slurmDisplayReason(display)
 	reasonStyle := dimStyle
 	if display.Next {
 		reasonStyle = warningStyle
@@ -1257,7 +1865,7 @@ func renderSlurmJobRow(display slurmDisplayJob, width int) string {
 			fixedCell(strconv.Itoa(job.Nodes), 5, true),
 			fixedCell(job.Partition, 16, false),
 			fixedCell(job.Name, 22, false),
-			reasonStyle.Render(fixedCell(job.Reason, reasonWidth, false)),
+			reasonStyle.Render(fixedCell(reason, reasonWidth, false)),
 		}, " ")
 	case width >= 112:
 		reasonWidth := max(8, width-104)
@@ -1271,7 +1879,7 @@ func renderSlurmJobRow(display slurmDisplayJob, width int) string {
 			fixedCell(job.Elapsed, 8, true),
 			fixedCell(strconv.Itoa(job.Nodes), 5, true),
 			fixedCell(job.Name, 18, false),
-			reasonStyle.Render(fixedCell(job.Reason, reasonWidth, false)),
+			reasonStyle.Render(fixedCell(reason, reasonWidth, false)),
 		}, " ")
 	case width >= 80:
 		return strings.Join([]string{
@@ -1290,6 +1898,16 @@ func renderSlurmJobRow(display slurmDisplayJob, width int) string {
 			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 10, false)) + " " +
 			fixedCell(job.User, max(6, width-46), false)
 	}
+}
+
+func slurmDisplayReason(display slurmDisplayJob) string {
+	if isSlurmRunning(display.Job.State) {
+		if slurmNodeExpressionPresent(display.Job.NodeList) {
+			return display.Job.NodeList
+		}
+		return normalizeSlurmReason(display.Job.Reason)
+	}
+	return explainSlurmJob(display.Job, display.Snapshot).Badge
 }
 
 func slurmQOSLabel(qos string) string {
@@ -1370,10 +1988,10 @@ func slurmNodeJobHeader(width int) string {
 	switch {
 	case width >= 108:
 		header = fmt.Sprintf("%-15s %-10s %-9s %10s %-12s %-9s %-9s %-16s %s",
-			"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "LIMIT", "PARTITION", "NAME / REASON")
+			"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "LIMIT", "PARTITION", "NAME / BLOCKER")
 	case width >= 76:
 		header = fmt.Sprintf("%-14s %-9s %-9s %10s %-10s %-8s %s",
-			"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "NAME / REASON")
+			"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "NAME / BLOCKER")
 	case width >= 54:
 		header = fmt.Sprintf("%-13s %-9s %10s %-10s %s", "JOB ID", "STATE", "WEIGHT", "QOS", "NAME")
 	default:
@@ -1387,7 +2005,7 @@ func renderSlurmNodeJobRow(display slurmDisplayJob, width int) string {
 	state, style := slurmDisplayState(display)
 	detail := job.Name
 	if isSlurmPending(job.State) && job.Reason != "" {
-		detail += "  " + job.Reason
+		detail += "  [" + slurmDisplayReason(display) + "]"
 	}
 	switch {
 	case width >= 108:

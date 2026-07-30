@@ -471,7 +471,7 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 				"SLURM QUEUES", "A100 Cluster", "General GPU", "NODES 1",
 				"GPU 1/2", "GPU  A100×2", "RTX 3090×1", "+2 TYPES",
 				"CPU 20/20", "LIVE", "WEIGHT", "urgent", "71001", "57612",
-				"NEXT", "613_[0-7%1]", "(Priority)",
+				"NEXT", "613_[0-7%1]", "PRIORITY",
 			} {
 				if !strings.Contains(rendered, expected) {
 					t.Fatalf("%dx%d Slurm view missing %q\n%s", size.width, size.height, expected, rendered)
@@ -503,6 +503,25 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	model.moveSlurmFilter(1)
 	if model.slurmFilter != 0 {
 		t.Fatalf("Slurm filter = %d, want first cluster", model.slurmFilter)
+	}
+	model.moveSlurmCursor(1)
+	if _, command := model.Update(testKey("enter")); command != nil || !model.slurmExplain {
+		t.Fatalf("Enter did not open Slurm explanation: explain=%t command=%v", model.slurmExplain, command)
+	}
+	explanation := model.slurmQueueView()
+	for _, expected := range []string{
+		"WHY IT IS NOT RUNNING", "CONTROLLER", "Resources", "REQUEST", "CANDIDATE NODE FIT",
+	} {
+		if !strings.Contains(explanation, expected) {
+			t.Fatalf("Slurm explanation missing %q\n%s", expected, explanation)
+		}
+	}
+	if got := lipgloss.Height(explanation); got != model.height {
+		t.Fatalf("Slurm explanation height = %d, want %d\n%s", got, model.height, explanation)
+	}
+	if _, command := model.Update(testKey("q")); command != nil || model.slurmExplain || !model.slurmView {
+		t.Fatalf("q from explanation should return to queue: explain=%t view=%t command=%v",
+			model.slurmExplain, model.slurmView, command)
 	}
 	updated, command := model.Update(testKey("q"))
 	if updated != model || command != nil || model.slurmView {
@@ -604,6 +623,83 @@ func TestNodeSlurmQueueFiltersPendingJobsByGPUType(t *testing.T) {
 		queue5090.Jobs[0].Job.ID != "1511" || !queue5090.Jobs[0].Next ||
 		queue5090.Jobs[1].Job.ID != "1513" {
 		t.Fatalf("gpu5090 queue contains incompatible jobs: %#v", queue5090)
+	}
+}
+
+func TestSlurmExplanationDistinguishesArrayLimitAndResourceFit(t *testing.T) {
+	memory59G, err := parseSlurmMemory("59000M", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory24G, _ := parseSlurmMemory("24G", 4)
+	memory48G, _ := parseSlurmMemory("48G", 6)
+	snapshot := slurmSnapshot{
+		Nodes: []slurmNode{{
+			Name: "gpu5090", Partitions: []string{"mixed-gpu"},
+			GRES:  []string{"gpu:rtx_5090:1,gpu:rtx_5080:1"},
+			State: "mix", CPUsAlloc: 4, CPUsIdle: 4, CPUsTotal: 8,
+			MemoryTotalBytes: memory59G,
+		}},
+		Jobs: []slurmJob{
+			{
+				ID: "5268", Partition: "mixed-gpu", State: "RUNNING", Nodes: 1,
+				NodeList: "gpu5090", CPUs: 4, MemoryBytes: memory24G,
+				GRES: "gres/gpu:rtx_5090:1",
+			},
+			{
+				ID: "4949_[42-43%1]", Partition: "mixed-gpu", State: "PENDING", Nodes: 1,
+				CPUs: 6, MemoryBytes: memory48G, GRES: "gres/gpu:rtx_5080:1",
+				Reason: "(Resources)",
+			},
+			{
+				ID: "7000_1", Partition: "mixed-gpu", State: "RUNNING", NodeList: "gpu5090",
+			},
+			{
+				ID: "7000_[2-8%1]", Partition: "mixed-gpu", State: "PENDING",
+				Reason: "(JobArrayTaskLimit)",
+			},
+		},
+	}
+
+	resource := explainSlurmJob(snapshot.Jobs[1], &snapshot)
+	if resource.Source != "SLURM + FLEETTY INFERENCE" || resource.Badge != "CPU+MEM" ||
+		len(resource.Fits) != 1 || strings.Join(resource.Fits[0].Blockers, "+") != "CPU+MEM" {
+		t.Fatalf("unexpected resource explanation: %#v", resource)
+	}
+	array := explainSlurmJob(snapshot.Jobs[3], &snapshot)
+	if array.Badge != "ARRAY CAP" || array.Source != "SLURM" ||
+		!strings.Contains(array.Summary, "at most 1 task") ||
+		!strings.Contains(array.Summary, "1 sibling task") {
+		t.Fatalf("unexpected array explanation: %#v", array)
+	}
+	if slurmEligibleForNext(snapshot.Jobs[3]) {
+		t.Fatal("array-throttled job must not be marked NEXT")
+	}
+}
+
+func TestParseExtendedSlurmResourceFields(t *testing.T) {
+	jobs, err := parseSlurmJobs(
+		"4949_[42-43%1]\tmixed-gpu\trong-dgl\themeng\tPENDING\t2000\tnormal\t0:00\t1:00:00\t1\t\tgres/gpu:rtx_5080:1\t\tgpu5090\t\t6\t49152M\tampere\t(Resources)",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := parseSlurmNodes(
+		"gpu5090\tmixed-gpu*\tgpu:rtx_5090:1,gpu:rtx_5080:1\tmix\t4/4/0/8\t59000\t32000",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].CPUs != 6 || jobs[0].MemoryBytes != 48<<30 ||
+		jobs[0].Constraints != "ampere" || jobs[0].Reason != "(Resources)" {
+		t.Fatalf("unexpected extended job: %#v", jobs)
+	}
+	if len(nodes) != 1 || nodes[0].CPUsIdle != 4 ||
+		nodes[0].MemoryTotalBytes != uint64(59000)<<20 ||
+		nodes[0].MemoryFreeBytes != uint64(32000)<<20 {
+		t.Fatalf("unexpected extended node: %#v", nodes)
 	}
 }
 
