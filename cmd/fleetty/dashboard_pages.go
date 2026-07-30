@@ -240,6 +240,8 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 			keyHint("↑↓", "select"),
 			keyHint("enter/click", "open"),
 			keyHint("pg↑↓", "pages"),
+			keyHint("d", "delete"),
+			keyHint("z", "7z + delete"),
 			keyHint("←/⌫", "up"),
 			keyHint("home", "root"),
 		)

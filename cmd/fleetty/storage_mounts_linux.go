@@ -16,11 +16,15 @@ func localStorageMountPolicy() (storageMountPolicy, error) {
 	if err != nil {
 		return storageMountPolicy{
 			excluded: defaultLinuxVirtualMounts(),
+			mounts:   defaultLinuxVirtualMounts(),
 		}, errors.New("could not inspect mount types; using conservative virtual mount exclusions")
 	}
 	defer file.Close()
 
-	policy := storageMountPolicy{excluded: make(map[string]string)}
+	policy := storageMountPolicy{
+		excluded: make(map[string]string),
+		mounts:   make(map[string]string),
+	}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		left, right, ok := strings.Cut(scanner.Text(), " - ")
@@ -34,6 +38,7 @@ func localStorageMountPolicy() (storageMountPolicy, error) {
 		}
 		mountPoint := filepath.Clean(unescapeLinuxMountField(leftFields[4]))
 		fileSystem := strings.ToLower(rightFields[0])
+		policy.mounts[mountPoint] = fileSystem
 		if reason := excludedStorageFileSystem(fileSystem); reason != "" {
 			policy.excluded[mountPoint] = reason
 		}

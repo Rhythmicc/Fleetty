@@ -95,6 +95,7 @@ type storageTreemapPageInfo struct {
 
 type storageMountPolicy struct {
 	excluded map[string]string
+	mounts   map[string]string
 	warning  string
 }
 

@@ -115,9 +115,10 @@ func runServer() {
 	}
 }
 
-// monitorModel is deliberately read-only: it never starts a shell or proxies
-// terminal programs. Every SSH session owns one small collector and Bubble Tea
-// program, so the monitor has no daemon process besides this Go binary.
+// Remote monitor sessions are deliberately read-only: they never start a shell
+// or proxy terminal programs. Local `fleetty top` sessions may additionally
+// expose storage actions, constrained by the current Unix user's permissions
+// and the local storage scan root.
 type monitorModel struct {
 	backend           monitorBackend
 	admin             *adminController
@@ -169,6 +170,9 @@ type monitorModel struct {
 	pageTabY          int
 	pageTabs          []monitorPageTab
 	storage           *storageMapState
+	storageAction     *storageActionRequest
+	storageConfirm    string
+	storageActionStop context.CancelFunc
 }
 
 type monitorPage int
@@ -209,6 +213,7 @@ const (
 	screenConfirm
 	screenProcessDetail
 	screenProcessTerminateConfirm
+	screenStorageConfirm
 	screenLayout
 )
 
@@ -287,6 +292,11 @@ type storageScanProgressMsg struct {
 	generation uint64
 	result     storageScanResult
 	updates    <-chan storageScanUpdate
+}
+type storageActionResultMsg struct {
+	request     storageActionRequest
+	archivePath string
+	err         error
 }
 
 func (m *monitorModel) collect() tea.Cmd {
@@ -378,6 +388,8 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.applyStorageScanProgress(msg) {
 			return m, waitForStorageScanUpdate(msg.generation, msg.updates)
 		}
+	case storageActionResultMsg:
+		return m, m.applyStorageActionResult(msg)
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
@@ -396,6 +408,8 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		if m.screen == screenPassword {
 			m.appendPassword(msg.Content)
+		} else if m.screen == screenStorageConfirm {
+			m.appendStorageConfirmation(msg.Content)
 		} else if (m.screen == screenAdmin || m.screen == screenMonitor) && m.filtering {
 			m.appendFilter(msg.Content)
 		}
@@ -407,6 +421,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	key := msg.String()
 	if key == "ctrl+c" {
 		m.cancelStorageScan()
+		m.cancelStorageActionProcess()
 		return tea.Quit
 	}
 	if m.screen == screenMonitor && m.filtering {
@@ -468,6 +483,14 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 			m.status = "Refreshing now…"
 			return m.startCollect()
+		case "d":
+			if m.monitorPage == monitorPageStorage {
+				m.prepareStorageAction(storageActionDelete)
+			}
+		case "z":
+			if m.monitorPage == monitorPageStorage {
+				m.prepareStorageAction(storageActionArchiveDelete)
+			}
 		case "l":
 			if m.profile == machineProfileNAS || m.snapshot.Profile == machineProfileNAS {
 				m.status = "Custom NAS layouts are not available yet."
@@ -699,6 +722,34 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.status = fmt.Sprintf("Sending SIGTERM to PID %d…", m.selectedProcess.PID)
 				return m.terminateProcess(m.selectedProcess.PID, m.processDetail.StartTimeTicks)
 			}
+		}
+	case screenStorageConfirm:
+		switch key {
+		case "esc":
+			if m.busy {
+				m.cancelStorageActionProcess()
+				m.status = "Cancelling storage action…"
+			} else {
+				m.cancelStorageAction("Storage action cancelled.")
+			}
+		case "backspace", "delete":
+			m.storageConfirm = trimLastRune(m.storageConfirm)
+		case "enter":
+			if m.storageAction == nil {
+				m.cancelStorageAction("Storage action is no longer available.")
+			} else if m.storageConfirm != m.storageAction.confirmation() {
+				m.status = "Confirmation phrase does not match."
+			} else if !m.busy {
+				m.busy = true
+				m.status = "Running " + m.storageAction.label() + "…"
+				return m.runStorageAction(*m.storageAction)
+			}
+		default:
+			text := msg.Key().Text
+			if text == "" && len([]rune(key)) == 1 {
+				text = key
+			}
+			m.appendStorageConfirmation(text)
 		}
 	case screenLayout:
 		switch key {
@@ -1107,6 +1158,8 @@ func (m *monitorModel) View() tea.View {
 		body = m.processDetailView()
 	case screenProcessTerminateConfirm:
 		body = m.processTerminateConfirmView()
+	case screenStorageConfirm:
+		body = m.storageConfirmView()
 	case screenLayout:
 		body = m.layoutView()
 	default:
