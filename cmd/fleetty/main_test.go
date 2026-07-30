@@ -2655,6 +2655,78 @@ func TestStorageScanExcludesMountsSymlinksAndCountsAllocatedData(t *testing.T) {
 	}
 }
 
+func TestStorageScanUsesBoundedWorkersAndDeduplicatesParallelHardLinks(t *testing.T) {
+	root := t.TempDir()
+	directories := make([]string, 4)
+	for index := range directories {
+		directories[index] = filepath.Join(root, fmt.Sprintf("worker-%d", index))
+		if err := os.Mkdir(directories[index], 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := filepath.Join(directories[0], "weights.bin")
+	if err := os.WriteFile(original, stdbytes.Repeat([]byte("x"), 128<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(original, filepath.Join(directories[1], "weights-hardlink.bin")); err != nil {
+		t.Fatal(err)
+	}
+	for index := 2; index < len(directories); index++ {
+		if err := os.WriteFile(filepath.Join(directories[index], "data.bin"),
+			stdbytes.Repeat([]byte{byte(index)}, 8<<10), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := scanStorageDirectoryWithPolicyProgress(
+		context.Background(), root,
+		storageMountPolicy{excluded: map[string]string{}},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Workers != 4 {
+		t.Fatalf("storage workers = %d, want 4", result.Workers)
+	}
+	if result.Files != 4 {
+		t.Fatalf("parallel scan files = %d, want 4", result.Files)
+	}
+
+	expectedSize := uint64(0)
+	for _, path := range append([]string{root, original}, directories...) {
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		size, _ := storageAllocatedSize(info)
+		expectedSize += size
+	}
+	for index := 2; index < len(directories); index++ {
+		info, statErr := os.Lstat(filepath.Join(directories[index], "data.bin"))
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		size, _ := storageAllocatedSize(info)
+		expectedSize += size
+	}
+	if result.Size != expectedSize {
+		t.Fatalf("parallel hard-link size = %d, want %d", result.Size, expectedSize)
+	}
+}
+
+func TestStorageScanWorkerCountIsBounded(t *testing.T) {
+	if got := storageScanWorkerCount(0); got != 1 {
+		t.Fatalf("zero-task workers = %d, want 1", got)
+	}
+	if got := storageScanWorkerCount(1); got != 1 {
+		t.Fatalf("single-task workers = %d, want 1", got)
+	}
+	if got := storageScanWorkerCount(10_000); got < 2 || got > 8 {
+		t.Fatalf("large scan workers = %d, want 2..8", got)
+	}
+}
+
 func TestStorageScannerPublishesGrowingPartialResults(t *testing.T) {
 	entry := &storageEntry{Name: "models", Path: "/models", IsDir: true}
 	var updates []storageScanResult

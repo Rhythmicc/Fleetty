@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -41,6 +43,7 @@ type storageScanResult struct {
 	FinishedAt     time.Time
 	Duration       time.Duration
 	PolicyWarning  string
+	Workers        int
 }
 
 type storageEntry struct {
@@ -68,6 +71,7 @@ type storageMountPolicy struct {
 }
 
 type storageScanner struct {
+	mu                  sync.Mutex
 	root                string
 	policy              storageMountPolicy
 	seen                map[string]struct{}
@@ -80,6 +84,7 @@ type storageScanner struct {
 	progressDirectories uint64
 	progressEntries     []*storageEntry
 	publish             func(storageScanResult)
+	workers             int
 }
 
 type storageScanUpdate struct {
@@ -355,6 +360,7 @@ func scanStorageDirectoryWithPolicyProgress(
 		},
 		started: started,
 		publish: publish,
+		workers: 1,
 	}
 	node, err := scanner.scanEntry(ctx, path, info, true, nil)
 	if err != nil {
@@ -373,6 +379,7 @@ func scanStorageDirectoryWithPolicyProgress(
 	})
 	scanner.result.FinishedAt = time.Now()
 	scanner.result.Duration = time.Since(started)
+	scanner.result.Workers = scanner.workers
 	return scanner.result, nil
 }
 
@@ -394,12 +401,12 @@ func (s *storageScanner) scanEntry(
 		return storageScanNode{}, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		s.result.Skipped++
+		s.markStorageSkipped()
 		return storageScanNode{}, nil
 	}
 	if path != s.root {
 		if _, excluded := s.policy.excluded[filepath.Clean(path)]; excluded {
-			s.result.ExcludedMounts++
+			s.markStorageMountExcluded()
 			return storageScanNode{}, nil
 		}
 	}
@@ -411,11 +418,10 @@ func (s *storageScanner) scanEntry(
 			s.recordStorageProgress(progressEntry, node.Size, node.Files, 0)
 			return node, nil
 		}
-		if _, duplicate := s.seen[key]; duplicate {
+		if !s.claimStorageFile(key) {
 			s.recordStorageProgress(progressEntry, 0, node.Files, 0)
 			return node, nil
 		}
-		s.seen[key] = struct{}{}
 		node.Size = allocated
 		s.recordStorageProgress(progressEntry, node.Size, node.Files, 0)
 		return node, nil
@@ -425,30 +431,29 @@ func (s *storageScanner) scanEntry(
 	s.recordStorageProgress(progressEntry, allocated, 0, 1)
 	directory, err := os.Open(path)
 	if err != nil {
-		s.result.Skipped++
+		s.markStorageSkipped()
 		return node, nil
 	}
 	openedInfo, statErr := directory.Stat()
 	if statErr != nil {
 		_ = directory.Close()
-		s.result.Skipped++
+		s.markStorageSkipped()
 		return node, nil
 	}
 	_, openedKey := storageAllocatedSize(openedInfo)
 	if !openedInfo.IsDir() || key != "" && openedKey != key {
 		_ = directory.Close()
-		s.result.Skipped++
+		s.markStorageSkipped()
 		return node, nil
 	}
 	entries, readErr := directory.ReadDir(-1)
 	_ = directory.Close()
 	if readErr != nil {
-		s.result.Skipped++
+		s.markStorageSkipped()
 		return node, nil
 	}
 	if captureChildren {
-		node.children = make([]storageEntry, 0, len(entries))
-		s.progressEntries = make([]*storageEntry, 0, len(entries))
+		return s.scanStorageChildrenParallel(ctx, path, node, entries)
 	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
@@ -457,48 +462,156 @@ func (s *storageScanner) scanEntry(
 		childPath := filepath.Join(path, entry.Name())
 		childInfo, infoErr := entry.Info()
 		if infoErr != nil {
-			s.result.Skipped++
+			s.markStorageSkipped()
 			s.maybePublishStorageProgress(false)
 			continue
 		}
-		childProgress := progressEntry
-		if captureChildren {
-			childProgress = &storageEntry{
-				Name:  sanitizeTerminalText(entry.Name()),
-				Path:  childPath,
-				IsDir: childInfo.IsDir(),
-			}
-			s.progressEntries = append(s.progressEntries, childProgress)
-			s.maybePublishStorageProgress(true)
-		}
-		child, scanErr := s.scanEntry(ctx, childPath, childInfo, false, childProgress)
+		child, scanErr := s.scanEntry(ctx, childPath, childInfo, false, progressEntry)
 		if scanErr != nil {
 			return storageScanNode{}, scanErr
 		}
 		node.Size += child.Size
 		node.Files += child.Files
 		node.Directories += child.Directories
-		if captureChildren && (child.Size > 0 || child.Files > 0 || child.Directories > 0) {
-			childProgress.Size = child.Size
-			childProgress.Files = child.Files
-			childProgress.Directories = child.Directories
-			node.children = append(node.children, storageEntry{
-				Name: sanitizeTerminalText(entry.Name()), Path: childPath,
-				Size: child.Size, Files: child.Files, Directories: child.Directories,
-				IsDir: childInfo.IsDir(),
-			})
-		}
-		if captureChildren {
-			s.maybePublishStorageProgress(true)
-		}
 	}
 	return node, nil
+}
+
+type storageChildTask struct {
+	name     string
+	path     string
+	info     os.FileInfo
+	progress *storageEntry
+}
+
+type storageChildResult struct {
+	node storageScanNode
+	err  error
+}
+
+func (s *storageScanner) scanStorageChildrenParallel(
+	ctx context.Context,
+	path string,
+	node storageScanNode,
+	entries []os.DirEntry,
+) (storageScanNode, error) {
+	tasks := make([]storageChildTask, 0, len(entries))
+	progressEntries := make([]*storageEntry, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return storageScanNode{}, err
+		}
+		childInfo, err := entry.Info()
+		if err != nil {
+			s.markStorageSkipped()
+			continue
+		}
+		childPath := filepath.Join(path, entry.Name())
+		progress := &storageEntry{
+			Name:  sanitizeTerminalText(entry.Name()),
+			Path:  childPath,
+			IsDir: childInfo.IsDir(),
+		}
+		progressEntries = append(progressEntries, progress)
+		tasks = append(tasks, storageChildTask{
+			name: entry.Name(), path: childPath, info: childInfo, progress: progress,
+		})
+	}
+
+	workerCount := storageScanWorkerCount(len(tasks))
+	s.mu.Lock()
+	s.progressEntries = progressEntries
+	s.workers = workerCount
+	s.mu.Unlock()
+	s.maybePublishStorageProgress(true)
+	if len(tasks) == 0 {
+		return node, nil
+	}
+
+	results := make([]storageChildResult, len(tasks))
+	jobs := make(chan int, len(tasks))
+	for index := range tasks {
+		jobs <- index
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				task := tasks[index]
+				child, err := s.scanEntry(ctx, task.path, task.info, false, task.progress)
+				results[index] = storageChildResult{node: child, err: err}
+			}
+		}()
+	}
+	workers.Wait()
+
+	node.children = make([]storageEntry, 0, len(tasks))
+	for index, result := range results {
+		if result.err != nil {
+			return storageScanNode{}, result.err
+		}
+		child := result.node
+		node.Size += child.Size
+		node.Files += child.Files
+		node.Directories += child.Directories
+		if child.Size == 0 && child.Files == 0 && child.Directories == 0 {
+			continue
+		}
+		task := tasks[index]
+		s.mu.Lock()
+		task.progress.Size = child.Size
+		task.progress.Files = child.Files
+		task.progress.Directories = child.Directories
+		s.mu.Unlock()
+		node.children = append(node.children, storageEntry{
+			Name: sanitizeTerminalText(task.name), Path: task.path,
+			Size: child.Size, Files: child.Files, Directories: child.Directories,
+			IsDir: task.info.IsDir(),
+		})
+	}
+	s.maybePublishStorageProgress(true)
+	return node, nil
+}
+
+func storageScanWorkerCount(tasks int) int {
+	if tasks <= 1 {
+		return max(1, tasks)
+	}
+	return min(tasks, max(2, min(8, runtime.GOMAXPROCS(0))))
+}
+
+func (s *storageScanner) claimStorageFile(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, duplicate := s.seen[key]; duplicate {
+		return false
+	}
+	s.seen[key] = struct{}{}
+	return true
+}
+
+func (s *storageScanner) markStorageSkipped() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.result.Skipped++
+}
+
+func (s *storageScanner) markStorageMountExcluded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.result.ExcludedMounts++
 }
 
 func (s *storageScanner) recordStorageProgress(
 	entry *storageEntry,
 	size, files, directories uint64,
 ) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.progressSize += size
 	s.progressFiles += files
 	s.progressDirectories += directories
@@ -508,10 +621,16 @@ func (s *storageScanner) recordStorageProgress(
 		entry.Directories += directories
 	}
 	s.progressOperations++
-	s.maybePublishStorageProgress(false)
+	s.maybePublishStorageProgressLocked(false)
 }
 
 func (s *storageScanner) maybePublishStorageProgress(force bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybePublishStorageProgressLocked(force)
+}
+
+func (s *storageScanner) maybePublishStorageProgressLocked(force bool) {
 	if s.publish == nil {
 		return
 	}
@@ -545,6 +664,7 @@ func (s *storageScanner) maybePublishStorageProgress(force bool) {
 		Entries:        entries,
 		Duration:       now.Sub(s.started),
 		PolicyWarning:  s.result.PolicyWarning,
+		Workers:        s.workers,
 	}
 	s.lastPublished = now
 	s.publish(result)
@@ -617,12 +737,13 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 		rects[index].Y += mapY
 	}
 	m.storage.Rects = rects
+	workers := max(1, result.Workers)
 	phase := ""
 	if m.storage.Scanning {
-		phase = "SCANNING · "
+		phase = fmt.Sprintf("SCANNING ×%d · ", workers)
 	}
-	meta := fmt.Sprintf("%s · %s%s · %s", m.storage.Scope, phase, bytes(result.Size),
-		compactStorageDuration(result.Duration))
+	meta := fmt.Sprintf("%s · %s%s · %s · ×%d", m.storage.Scope, phase,
+		bytes(result.Size), compactStorageDuration(result.Duration), workers)
 	return btopPanel(width, "STORAGE MAP", meta, strings.Join(lines, "\n"),
 		diskTitleStyle, colorDiskBorder), nil
 }
