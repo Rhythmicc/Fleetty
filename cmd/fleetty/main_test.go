@@ -2862,6 +2862,141 @@ func TestStoragePageRendersPartialTreemapWhileScanning(t *testing.T) {
 	model.cancelStorageScan()
 }
 
+func TestStorageNavigationRestoresFreshCompletedParentFromCache(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "models")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldContext, oldCancel := context.WithCancel(context.Background())
+	parentResult := storageScanResult{
+		Path: root, Size: 64 << 20, FinishedAt: time.Now(),
+		Entries: []storageEntry{{
+			Name: "models", Path: child, Size: 64 << 20, IsDir: true,
+		}},
+	}
+	storage := &storageMapState{
+		Root: root, Path: child, Scope: "HOME", Scanning: true,
+		Generation: 7, Cancel: oldCancel, Cache: make(map[string]storageCachedResult),
+		Result: storageScanResult{
+			Path: child,
+			Entries: []storageEntry{{
+				Name: "checkpoint.bin", Path: filepath.Join(child, "checkpoint.bin"),
+				Size: 8 << 20,
+			}},
+		},
+	}
+	storage.cacheResult(parentResult, true)
+	model := &monitorModel{storage: storage}
+
+	command := model.storageNavigateParent()
+	if command != nil {
+		t.Fatal("fresh completed parent cache should restore without starting a scan")
+	}
+	if model.storage.Path != root || model.storage.Scanning || !model.storage.CacheHit ||
+		model.storage.Generation != 8 {
+		t.Fatalf("unexpected restored state: %#v", model.storage)
+	}
+	if model.storage.Result.Path != root || len(model.storage.Result.Entries) != 1 {
+		t.Fatalf("parent result was not restored: %#v", model.storage.Result)
+	}
+	select {
+	case <-oldContext.Done():
+	default:
+		t.Fatal("restoring the parent did not cancel the child scan")
+	}
+	if cached, ok := model.storage.Cache[child]; !ok || cached.Complete {
+		t.Fatalf("partial child scan was not preserved in cache: %#v", cached)
+	}
+}
+
+func TestStorageNavigationShowsPartialCacheDuringBackgroundRefresh(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "models")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentResult := storageScanResult{
+		Path: root, Size: 24 << 20,
+		Entries: []storageEntry{{
+			Name: "models", Path: child, Size: 24 << 20, IsDir: true,
+		}},
+	}
+	storage := &storageMapState{
+		Root: root, Path: child, Scope: "HOME",
+		Cache: make(map[string]storageCachedResult),
+	}
+	storage.cacheResult(parentResult, false)
+	model := &monitorModel{storage: storage}
+
+	command := model.storageNavigateParent()
+	if command == nil {
+		t.Fatal("partial parent cache should be refreshed in the background")
+	}
+	if !model.storage.Scanning || !model.storage.CacheHit ||
+		model.storage.Result.Path != root || len(model.storage.Result.Entries) != 1 {
+		t.Fatalf("partial cache was not shown during refresh: %#v", model.storage)
+	}
+	model.cancelStorageScan()
+}
+
+func TestStorageRefreshBypassesFreshCacheAndKeepsMapVisible(t *testing.T) {
+	root := t.TempDir()
+	result := storageScanResult{
+		Path: root, Size: 12 << 20, FinishedAt: time.Now(),
+		Entries: []storageEntry{{
+			Name: "models", Path: filepath.Join(root, "models"), Size: 12 << 20, IsDir: true,
+		}},
+	}
+	storage := &storageMapState{
+		Root: root, Path: root, Scope: "HOME",
+		Result: result, Cache: make(map[string]storageCachedResult),
+	}
+	storage.cacheResult(result, true)
+	model := &monitorModel{storage: storage}
+
+	command := model.refreshStorageScan(root)
+	if command == nil || !model.storage.Scanning || !model.storage.CacheHit {
+		t.Fatalf("forced refresh did not start over the cached map: %#v", model.storage)
+	}
+	if len(model.storage.Result.Entries) != 1 {
+		t.Fatalf("forced refresh hid the cached map: %#v", model.storage.Result)
+	}
+	model.cancelStorageScan()
+}
+
+func TestStorageStaleCacheRefreshesAndCacheIsBounded(t *testing.T) {
+	root := t.TempDir()
+	storage := &storageMapState{
+		Root: root, Path: root, Scope: "HOME",
+		Cache: make(map[string]storageCachedResult),
+	}
+	for index := 0; index < storageCacheLimit+1; index++ {
+		path := filepath.Join(root, fmt.Sprintf("item-%02d", index))
+		storage.cacheResult(storageScanResult{
+			Path: path, FinishedAt: time.Now(),
+		}, true)
+	}
+	if len(storage.Cache) != storageCacheLimit || len(storage.CacheOrder) != storageCacheLimit {
+		t.Fatalf("storage cache is not bounded: cache=%d order=%d",
+			len(storage.Cache), len(storage.CacheOrder))
+	}
+	if _, ok := storage.Cache[filepath.Join(root, "item-00")]; ok {
+		t.Fatal("storage cache did not evict the least recently used result")
+	}
+
+	stalePath := filepath.Join(root, "item-01")
+	stale := storage.Cache[stalePath]
+	stale.CachedAt = time.Now().Add(-storageCacheTTL - time.Second)
+	storage.Cache[stalePath] = stale
+	model := &monitorModel{storage: storage}
+	command := model.beginStorageScan(stalePath)
+	if command == nil || !model.storage.Scanning || !model.storage.CacheHit {
+		t.Fatalf("stale cache should render while a refresh starts: %#v", model.storage)
+	}
+	model.cancelStorageScan()
+}
+
 func TestStoragePageFillsTerminalAndSupportsRecursiveMouseNavigation(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "models")

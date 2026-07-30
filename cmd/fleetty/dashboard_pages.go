@@ -1338,6 +1338,7 @@ func (m *monitorModel) switchMonitorPage(page monitorPage) tea.Cmd {
 	}
 	if m.monitorPage == monitorPageStorage && page != monitorPageStorage &&
 		m.storage != nil && m.storage.Scanning {
+		m.storage.cacheCurrentResult()
 		m.cancelStorageScan()
 		m.storage.Generation++
 		m.storage.Scanning = false

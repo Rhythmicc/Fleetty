@@ -30,6 +30,15 @@ type storageMapState struct {
 	Cancel     context.CancelFunc
 	Cursor     int
 	Rects      []storageMapRect
+	Cache      map[string]storageCachedResult
+	CacheOrder []string
+	CacheHit   bool
+}
+
+type storageCachedResult struct {
+	Result   storageScanResult
+	Complete bool
+	CachedAt time.Time
 }
 
 type storageScanResult struct {
@@ -93,7 +102,11 @@ type storageScanUpdate struct {
 	done   bool
 }
 
-const storageScanPublishInterval = 125 * time.Millisecond
+const (
+	storageScanPublishInterval = 125 * time.Millisecond
+	storageCacheTTL            = 2 * time.Minute
+	storageCacheLimit          = 32
+)
 
 func newStorageMapState() *storageMapState {
 	root := "/"
@@ -118,10 +131,21 @@ func newStorageMapState() *storageMapState {
 			Err: fmt.Errorf("could not resolve storage scan root: %w", err),
 		}
 	}
-	return &storageMapState{Root: root, Path: root, Scope: scope}
+	return &storageMapState{
+		Root: root, Path: root, Scope: scope,
+		Cache: make(map[string]storageCachedResult),
+	}
 }
 
 func (m *monitorModel) beginStorageScan(path string) tea.Cmd {
+	return m.beginStorageScanMode(path, false)
+}
+
+func (m *monitorModel) refreshStorageScan(path string) tea.Cmd {
+	return m.beginStorageScanMode(path, true)
+}
+
+func (m *monitorModel) beginStorageScanMode(path string, force bool) tea.Cmd {
 	if m.storage == nil {
 		return nil
 	}
@@ -130,18 +154,43 @@ func (m *monitorModel) beginStorageScan(path string) tea.Cmd {
 		m.status = "Storage navigation is restricted to " + m.storage.Root + "."
 		return nil
 	}
+	m.storage.cacheCurrentResult()
 	m.cancelStorageScan()
 	m.storage.Generation++
 	generation := m.storage.Generation
+	cached, hasCached := m.storage.cachedResult(path)
+	if hasCached && cached.Complete && time.Since(cached.CachedAt) <= storageCacheTTL && !force {
+		m.storage.Cancel = nil
+		m.storage.Path = path
+		m.storage.Result = cloneStorageScanResult(cached.Result)
+		m.storage.Err = nil
+		m.storage.Scanning = false
+		m.storage.Cursor = 0
+		m.storage.Rects = nil
+		m.storage.CacheHit = true
+		m.status = fmt.Sprintf("Restored %s from the scan cache · press r to refresh.",
+			path)
+		return nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.storage.Cancel = cancel
 	m.storage.Path = path
-	m.storage.Result = storageScanResult{}
+	if hasCached {
+		m.storage.Result = cloneStorageScanResult(cached.Result)
+		m.storage.CacheHit = true
+	} else {
+		m.storage.Result = storageScanResult{}
+		m.storage.CacheHit = false
+	}
 	m.storage.Err = nil
 	m.storage.Scanning = true
 	m.storage.Cursor = 0
 	m.storage.Rects = nil
-	m.status = "Scanning " + path + " on local filesystems…"
+	action := "Scanning "
+	if hasCached {
+		action = "Refreshing cached "
+	}
+	m.status = action + path + " on local filesystems…"
 	return func() tea.Msg {
 		updates := make(chan storageScanUpdate, 1)
 		go func() {
@@ -215,6 +264,12 @@ func (m *monitorModel) applyStorageScanResult(msg storageScanResultMsg) {
 		if errors.Is(msg.err, context.Canceled) {
 			return
 		}
+		if m.storage.Result.Path != "" {
+			m.storage.Err = nil
+			m.storage.CacheHit = true
+			m.status = "Storage refresh failed; showing the last cached map: " + msg.err.Error()
+			return
+		}
 		m.storage.Err = msg.err
 		m.status = "Storage scan failed: " + msg.err.Error()
 		return
@@ -222,6 +277,8 @@ func (m *monitorModel) applyStorageScanResult(msg storageScanResultMsg) {
 	m.storage.Result = msg.result
 	m.storage.Err = nil
 	m.storage.Cursor = 0
+	m.storage.CacheHit = false
+	m.storage.cacheResult(msg.result, true)
 	m.status = fmt.Sprintf("Scanned %s in %s · %s across %d items.",
 		msg.result.Path, compactStorageDuration(msg.result.Duration), bytes(msg.result.Size),
 		len(msg.result.Entries))
@@ -233,9 +290,82 @@ func (m *monitorModel) applyStorageScanProgress(msg storageScanProgressMsg) bool
 	}
 	m.storage.Result = msg.result
 	m.storage.Err = nil
+	m.storage.CacheHit = false
+	m.storage.cacheResult(msg.result, false)
 	m.status = fmt.Sprintf("Scanning %s · %s discovered across %d items…",
 		msg.result.Path, bytes(msg.result.Size), len(msg.result.Entries))
 	return true
+}
+
+func (s *storageMapState) cacheCurrentResult() {
+	if s == nil || s.Result.Path == "" {
+		return
+	}
+	complete := !s.Result.FinishedAt.IsZero() && !s.Scanning
+	if !complete && len(s.Result.Entries) == 0 {
+		return
+	}
+	path := filepath.Clean(s.Result.Path)
+	if cached, ok := s.Cache[path]; ok && cached.Complete && complete {
+		return
+	}
+	s.cacheResult(s.Result, complete)
+	if complete && !s.Result.FinishedAt.IsZero() {
+		cached := s.Cache[path]
+		cached.CachedAt = s.Result.FinishedAt
+		s.Cache[path] = cached
+	}
+}
+
+func (s *storageMapState) cacheResult(result storageScanResult, complete bool) {
+	if s == nil || strings.TrimSpace(result.Path) == "" ||
+		!complete && len(result.Entries) == 0 {
+		return
+	}
+	if s.Cache == nil {
+		s.Cache = make(map[string]storageCachedResult)
+	}
+	path := filepath.Clean(result.Path)
+	for index, cachedPath := range s.CacheOrder {
+		if cachedPath == path {
+			s.CacheOrder = append(s.CacheOrder[:index], s.CacheOrder[index+1:]...)
+			break
+		}
+	}
+	s.Cache[path] = storageCachedResult{
+		Result: cloneStorageScanResult(result), Complete: complete, CachedAt: time.Now(),
+	}
+	s.CacheOrder = append(s.CacheOrder, path)
+	for len(s.CacheOrder) > storageCacheLimit {
+		oldest := s.CacheOrder[0]
+		s.CacheOrder = s.CacheOrder[1:]
+		delete(s.Cache, oldest)
+	}
+}
+
+func (s *storageMapState) cachedResult(path string) (storageCachedResult, bool) {
+	if s == nil || s.Cache == nil {
+		return storageCachedResult{}, false
+	}
+	path = filepath.Clean(path)
+	cached, ok := s.Cache[path]
+	if !ok {
+		return storageCachedResult{}, false
+	}
+	for index, cachedPath := range s.CacheOrder {
+		if cachedPath == path {
+			s.CacheOrder = append(s.CacheOrder[:index], s.CacheOrder[index+1:]...)
+			s.CacheOrder = append(s.CacheOrder, path)
+			break
+		}
+	}
+	cached.Result = cloneStorageScanResult(cached.Result)
+	return cached, true
+}
+
+func cloneStorageScanResult(result storageScanResult) storageScanResult {
+	result.Entries = append([]storageEntry(nil), result.Entries...)
+	return result
 }
 
 func (m *monitorModel) storageNavigateRoot() tea.Cmd {
@@ -688,8 +818,7 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 		return btopPanel(width, "STORAGE MAP", "ERROR", strings.Join(lines, "\n"),
 			diskTitleStyle, colorDiskBorder), nil
 	}
-	if m.storage.Scanning && len(m.storage.Result.Entries) == 0 ||
-		!m.storage.Scanning && m.storage.Result.FinishedAt.IsZero() {
+	if len(m.storage.Result.Entries) == 0 && m.storage.Result.FinishedAt.IsZero() {
 		lines := m.renderStorageScanning(contentWidth, contentHeight)
 		return btopPanel(width, "STORAGE MAP", m.storage.Scope+" · LOCAL FILESYSTEMS",
 			strings.Join(lines, "\n"), diskTitleStyle, colorDiskBorder), nil
@@ -741,6 +870,11 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 	phase := ""
 	if m.storage.Scanning {
 		phase = fmt.Sprintf("SCANNING ×%d · ", workers)
+		if m.storage.CacheHit {
+			phase = fmt.Sprintf("REFRESHING ×%d · ", workers)
+		}
+	} else if m.storage.CacheHit {
+		phase = "CACHED · "
 	}
 	meta := fmt.Sprintf("%s · %s%s · %s · ×%d", m.storage.Scope, phase,
 		bytes(result.Size), compactStorageDuration(result.Duration), workers)

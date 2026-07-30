@@ -461,7 +461,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.screen, m.password, m.status = screenPassword, "", "Enter the management password."
 		case "r":
 			if m.monitorPage == monitorPageStorage {
-				return m.beginStorageScan(m.storage.Path)
+				return m.refreshStorageScan(m.storage.Path)
 			}
 			m.status = "Refreshing now…"
 			return m.startCollect()
