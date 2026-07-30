@@ -869,17 +869,43 @@ func (m *hubModel) slurmColumns() int {
 	return columns
 }
 
+func (m *hubModel) slurmClusterCardLineCount() int {
+	if len(m.config.SlurmClusters) == 0 {
+		return 1
+	}
+	width := usableWidth(m.width)
+	maximum := 5
+	switch {
+	case width >= 132 && m.height >= 34:
+		maximum = 9
+	case width >= 92 && m.height >= 28:
+		maximum = 7
+	}
+	columns := max(1, m.slurmColumns())
+	rows := (len(m.config.SlurmClusters) + columns - 1) / columns
+	for _, lines := range []int{9, 7, 5, 3} {
+		if lines > maximum {
+			continue
+		}
+		cardsHeight := rows * (lines + 2)
+		// Keep enough room for the page header, footer, and a useful jobs
+		// panel. Dense topologies automatically use compact cards.
+		if m.height-cardsHeight >= 10 {
+			return lines
+		}
+	}
+	return 3
+}
+
 func (m *hubModel) slurmClusterAt(x, y int) (int, bool) {
-	if y < 1 || x < 0 {
+	if len(m.config.SlurmClusters) == 0 || y < 1 || x < 0 {
 		return 0, false
 	}
 	columns := m.slurmColumns()
 	width := usableWidth(m.width)
 	cardWidth := max(20, (width-(columns-1))/columns)
-	row := (y - 1) / hubCardHeight
-	if (y-1)%hubCardHeight >= hubCardHeight {
-		return 0, false
-	}
+	cardHeight := m.slurmClusterCardLineCount() + 2
+	row := (y - 1) / cardHeight
 	column := x / (cardWidth + 1)
 	if column >= columns || x%(cardWidth+1) >= cardWidth {
 		return 0, false
@@ -927,10 +953,12 @@ func (m *hubModel) slurmQueueView() string {
 		keyHint("↑↓", "scroll"),
 		keyHint("r", "refresh"),
 		keyHint("t", "theme"),
-		keyHint("q", "quit"),
+		keyHint("q", "hub"),
 	}, "  ")
 	footer = ansi.Truncate(footer, width, "")
-	tableRows := max(1, m.height-lipgloss.Height(header)-lipgloss.Height(cards)-lipgloss.Height(footer)-3)
+	jobPanelHeight := max(3, m.height-lipgloss.Height(header)-lipgloss.Height(cards)-lipgloss.Height(footer))
+	jobContentLines := max(1, jobPanelHeight-2)
+	tableRows := max(0, jobContentLines-1)
 	m.slurmOffset = min(max(0, m.slurmOffset), max(0, len(jobs)-tableRows))
 	end := min(len(jobs), m.slurmOffset+tableRows)
 	lines := []string{slurmJobTableHeader(width - 4)}
@@ -941,6 +969,10 @@ func (m *hubModel) slurmQueueView() string {
 			lines = append(lines, renderSlurmJobRow(job, width-4))
 		}
 	}
+	for len(lines) < jobContentLines {
+		lines = append(lines, "")
+	}
+	lines = lines[:jobContentLines]
 	jobMeta := fmt.Sprintf("%s  ·  %d RUN  ·  %d NEXT  ·  %d WAIT  ·  %d JOBS",
 		filter, running, next, max(0, pending-next), len(jobs))
 	jobPanel := btopPanel(width, "JOBS", jobMeta, strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
@@ -953,6 +985,7 @@ func (m *hubModel) renderSlurmClusterCards(width int) string {
 			gpuTitleStyle, colorGPUBorder)
 	}
 	columns := m.slurmColumns()
+	contentLines := m.slurmClusterCardLineCount()
 	cardWidth := max(20, (width-(columns-1))/columns)
 	var rows []string
 	for start := 0; start < len(m.config.SlurmClusters); start += columns {
@@ -962,14 +995,14 @@ func (m *hubModel) renderSlurmClusterCards(width int) string {
 			if len(cards) > 0 {
 				cards = append(cards, " ")
 			}
-			cards = append(cards, m.renderSlurmClusterCard(index, cardWidth))
+			cards = append(cards, m.renderSlurmClusterCard(index, cardWidth, contentLines))
 		}
 		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, cards...))
 	}
 	return strings.Join(rows, "\n")
 }
 
-func (m *hubModel) renderSlurmClusterCard(index, width int) string {
+func (m *hubModel) renderSlurmClusterCard(index, width, contentLines int) string {
 	config := m.config.SlurmClusters[index]
 	state := slurmClusterState{}
 	if index < len(m.slurmStates) {
@@ -982,13 +1015,13 @@ func (m *hubModel) renderSlurmClusterCard(index, width int) string {
 		border = lipgloss.Color("#B9A4FF")
 	}
 	meta := "CHECKING"
-	content := []string{
+	content := fitSlurmClusterCardLines([]string{
 		dimStyle.Render(truncate(config.Description, width-4)),
 		dimStyle.Render(strings.ToUpper(config.Transport)),
 		"Waiting for the first queue snapshot…",
 		dimStyle.Render(strings.Repeat("·", max(1, width-4))),
 		dimStyle.Render("Click or use ← → to filter"),
-	}
+	}, contentLines)
 	if state.Error != "" {
 		meta = "OFFLINE"
 		source := "LOCAL"
@@ -999,13 +1032,13 @@ func (m *hubModel) renderSlurmClusterCard(index, width int) string {
 		if !state.LastSeen.IsZero() {
 			lastSeen = "Last seen " + hubAge(time.Since(state.LastSeen)) + " ago"
 		}
-		content = []string{
+		content = fitSlurmClusterCardLines([]string{
 			dangerStyle.Render("● SLURM SOURCE OFFLINE"),
 			dimStyle.Render(source),
 			dimStyle.Render(lastSeen),
 			warningStyle.Render(truncate(state.Error, width-4)),
 			dimStyle.Render("[r] retry now"),
-		}
+		}, contentLines)
 	} else if !state.Snapshot.CollectedAt.IsZero() {
 		meta = fmt.Sprintf("%dms", state.Latency.Milliseconds())
 		if state.Warning != "" {
@@ -1020,7 +1053,18 @@ func (m *hubModel) renderSlurmClusterCard(index, width int) string {
 				processWaitingStyle.Render("NEXT"), next,
 				gpuTitleStyle.Render("WAIT"), max(0, pending-next),
 				dimStyle.Render("OTHER"), other),
-			dimStyle.Render(fmt.Sprintf("%d partitions  ·  %s", len(snapshot.Partitions), snapshot.Version)),
+			slurmClusterCapacityLine(snapshot),
+		}
+		if contentLines >= 7 {
+			content = append(content,
+				slurmClusterGPUTypeLine(snapshot),
+				slurmClusterWorkloadLine(snapshot),
+			)
+		}
+		if contentLines >= 5 {
+			content = append(content,
+				dimStyle.Render(fmt.Sprintf("PARTITIONS %d  ·  %s", len(snapshot.Partitions), snapshot.Version)),
+			)
 		}
 		for _, partition := range snapshot.Partitions {
 			name := partition.Name
@@ -1031,15 +1075,105 @@ func (m *hubModel) renderSlurmClusterCard(index, width int) string {
 			line := fmt.Sprintf("%-16s %2dN  CPU %d/%d  %s",
 				truncate(name, 16), partition.Nodes, partition.CPUsAlloc, partition.CPUsTotal, stateLabel)
 			content = append(content, slurmPartitionStyle(partition).Render(truncate(line, width-4)))
-			if len(content) == 5 {
+			reserved := 0
+			if contentLines >= 9 {
+				reserved = 1
+			}
+			if len(content) >= contentLines-reserved {
 				break
 			}
 		}
-		for len(content) < 5 {
-			content = append(content, "")
+		if contentLines >= 9 {
+			source := "LOCAL"
+			if config.Transport == "ssh" {
+				source = "SSH " + normalizeSSHAddress(config.Address)
+			}
+			ageDuration := time.Since(snapshot.CollectedAt)
+			if ageDuration < 0 {
+				ageDuration = 0
+			}
+			age := hubAge(ageDuration)
+			content = append(content, dimStyle.Render(fmt.Sprintf(
+				"SOURCE %s  ·  %dms  ·  UPDATED %s AGO", source, state.Latency.Milliseconds(), age)))
 		}
+		content = fitSlurmClusterCardLines(content, contentLines)
 	}
 	return btopPanel(width, config.Name, meta, strings.Join(content, "\n"), titleForCard, border)
+}
+
+func fitSlurmClusterCardLines(lines []string, count int) []string {
+	count = max(1, count)
+	if len(lines) > count {
+		lines = lines[:count]
+	}
+	for len(lines) < count {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+func slurmClusterCapacityLine(snapshot slurmSnapshot) string {
+	gpus, _ := slurmClusterGPUInventory(snapshot)
+	return dimStyle.Render(fmt.Sprintf("NODES %d  ·  GPUS %d  ·  PARTITIONS %d  ·  JOBS %d",
+		len(snapshot.Nodes), gpus, len(snapshot.Partitions), len(snapshot.Jobs)))
+}
+
+func slurmClusterGPUTypeLine(snapshot slurmSnapshot) string {
+	_, inventory := slurmClusterGPUInventory(snapshot)
+	if len(inventory) == 0 {
+		return dimStyle.Render("GPU TYPES —")
+	}
+	names := make([]string, 0, len(inventory))
+	for name := range inventory {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		label := strings.TrimSpace(strings.ReplaceAll(name, "_", " "))
+		if label == "" {
+			label = "generic"
+		}
+		parts = append(parts, fmt.Sprintf("%s×%d", label, inventory[name]))
+	}
+	return gpuTitleStyle.Render("GPU TYPES " + strings.Join(parts, "  "))
+}
+
+func slurmClusterGPUInventory(snapshot slurmSnapshot) (int, map[string]int) {
+	inventory := make(map[string]int)
+	total := 0
+	for _, node := range snapshot.Nodes {
+		for _, gres := range node.GRES {
+			for gpuType, count := range slurmGPUCounts(gres) {
+				inventory[gpuType] += count
+				total += count
+			}
+		}
+	}
+	return total, inventory
+}
+
+func slurmClusterWorkloadLine(snapshot slurmSnapshot) string {
+	users := make(map[string]struct{})
+	qos := make(map[string]struct{})
+	for _, job := range snapshot.Jobs {
+		if value := strings.TrimSpace(job.User); value != "" {
+			users[value] = struct{}{}
+		}
+		if value := strings.TrimSpace(job.QOS); value != "" && value != "—" {
+			qos[value] = struct{}{}
+		}
+	}
+	qosNames := make([]string, 0, len(qos))
+	for name := range qos {
+		qosNames = append(qosNames, name)
+	}
+	sort.Strings(qosNames)
+	qosLabel := "—"
+	if len(qosNames) > 0 {
+		qosLabel = strings.Join(qosNames, ", ")
+	}
+	return dimStyle.Render(fmt.Sprintf("USERS %d  ·  QOS %s", len(users), qosLabel))
 }
 
 func slurmRefreshLabel(clusters []slurmClusterConfig) string {

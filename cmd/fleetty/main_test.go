@@ -430,6 +430,9 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		slurmStates: []slurmClusterState{
 			{Snapshot: slurmSnapshot{
 				Name: "A100 Cluster", CollectedAt: now, Version: "slurm-wlm 23.11.4",
+				Nodes: []slurmNode{{
+					Name: "a100", Partitions: []string{"gpu-part"}, GRES: []string{"gpu:a100:2"},
+				}},
 				Partitions: []slurmPartition{{
 					Name: "gpu-part", Default: true, Available: "up", Nodes: 1,
 					States: []string{"alloc"}, CPUsAlloc: 20, CPUsTotal: 20,
@@ -441,6 +444,10 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 			}, Latency: 20 * time.Millisecond},
 			{Snapshot: slurmSnapshot{
 				Name: "General GPU", CollectedAt: now, Version: "slurm-wlm 25.11.2",
+				Nodes: []slurmNode{
+					{Name: "gpu01", Partitions: []string{"mixed-gpu"}, GRES: []string{"gpu:rtx_4090:1,gpu:rtx_3090:1"}},
+					{Name: "gpu02", Partitions: []string{"mixed-gpu"}, GRES: []string{"gpu:rtx_5090:1,gpu:rtx_5080:1"}},
+				},
 				Partitions: []slurmPartition{{
 					Name: "mixed-gpu", Default: true, Available: "up", Nodes: 2,
 					States: []string{"mix"}, CPUsAlloc: 6, CPUsTotal: 24,
@@ -458,13 +465,18 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		model.width, model.height, model.slurmOffset = size.width, size.height, 0
 		rendered := model.slurmQueueView()
 		if size.width == 160 {
-			for _, expected := range []string{"SLURM QUEUES", "A100 Cluster", "General GPU", "WEIGHT", "QOS", "urgent", "71001", "57612", "NEXT", "613_[0-7%1]", "(Priority)"} {
+			for _, expected := range []string{
+				"SLURM QUEUES", "A100 Cluster", "General GPU", "NODES 1", "GPUS 2",
+				"GPU TYPES a100×2", "USERS 2", "QOS a100, high", "PARTITIONS 1",
+				"SOURCE SSH", "UPDATED", "WEIGHT", "urgent", "71001", "57612",
+				"NEXT", "613_[0-7%1]", "(Priority)",
+			} {
 				if !strings.Contains(rendered, expected) {
 					t.Fatalf("%dx%d Slurm view missing %q\n%s", size.width, size.height, expected, rendered)
 				}
 			}
 		}
-		if got := lipgloss.Height(rendered); got > size.height {
+		if got := lipgloss.Height(rendered); got != size.height {
 			t.Fatalf("%dx%d Slurm height = %d\n%s", size.width, size.height, got, rendered)
 		}
 		for index, line := range strings.Split(rendered, "\n") {
@@ -475,6 +487,10 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	}
 	if index, ok := model.slurmClusterAt(0, 1); !ok || index != 0 {
 		t.Fatalf("Slurm cluster click resolved to index=%d ok=%t", index, ok)
+	}
+	secondCardY := model.slurmClusterCardLineCount() + 3
+	if index, ok := model.slurmClusterAt(0, secondCardY); !ok || index != 1 {
+		t.Fatalf("second Slurm cluster click resolved to index=%d ok=%t", index, ok)
 	}
 	model.moveSlurmFilter(1)
 	if model.slurmFilter != 0 {
