@@ -266,7 +266,7 @@ func (m *monitorModel) storageNavigateParent() tea.Cmd {
 }
 
 func (m *monitorModel) storageOpenSelected() tea.Cmd {
-	if m.storage == nil || m.storage.Scanning || len(m.storage.Rects) == 0 {
+	if m.storage == nil || len(m.storage.Rects) == 0 {
 		return nil
 	}
 	m.storage.Cursor = min(max(0, m.storage.Cursor), len(m.storage.Rects)-1)
@@ -292,7 +292,7 @@ func (m *monitorModel) moveStorageSelection(delta int) {
 }
 
 func (m *monitorModel) handleStorageClick(x, y int) tea.Cmd {
-	if m.storage == nil || m.storage.Scanning {
+	if m.storage == nil {
 		return nil
 	}
 	for index, rect := range m.storage.Rects {

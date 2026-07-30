@@ -2809,6 +2809,11 @@ func TestStorageProgressAccumulatesNestedFilesIntoTopLevelBlock(t *testing.T) {
 
 func TestStoragePageRendersPartialTreemapWhileScanning(t *testing.T) {
 	root := t.TempDir()
+	target := filepath.Join(root, "var")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldContext, oldCancel := context.WithCancel(context.Background())
 	model := &monitorModel{
 		screen: screenMonitor, width: 100, height: 28, monitorPage: monitorPageStorage,
 		admin: &adminController{},
@@ -2816,12 +2821,13 @@ func TestStoragePageRendersPartialTreemapWhileScanning(t *testing.T) {
 			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1,
 		},
 		storage: &storageMapState{
-			Root: root, Path: root, Scope: "ROOT", Scanning: true,
+			Root: root, Path: root, Scope: "ROOT", Scanning: true, Generation: 4,
+			Cancel: oldCancel,
 			Result: storageScanResult{
 				Path: root, Size: 20 << 20, Files: 12, Directories: 2,
 				Duration: 450 * time.Millisecond,
 				Entries: []storageEntry{{
-					Name: "var", Path: filepath.Join(root, "var"),
+					Name: "var", Path: target,
 					Size: 20 << 20, Files: 12, Directories: 1, IsDir: true,
 				}},
 			},
@@ -2840,6 +2846,20 @@ func TestStoragePageRendersPartialTreemapWhileScanning(t *testing.T) {
 	if got := lipgloss.Height(rendered); got != model.height {
 		t.Fatalf("partial storage page height = %d, want %d", got, model.height)
 	}
+
+	rect := model.storage.Rects[0]
+	command := model.handleStorageClick(rect.X, rect.Y)
+	if command == nil || model.storage.Path != target || !model.storage.Scanning ||
+		model.storage.Generation != 5 {
+		t.Fatalf("partial block click did not replace scan: path=%q scanning=%t generation=%d command=%v",
+			model.storage.Path, model.storage.Scanning, model.storage.Generation, command)
+	}
+	select {
+	case <-oldContext.Done():
+	default:
+		t.Fatal("partial block click did not cancel the previous scan")
+	}
+	model.cancelStorageScan()
 }
 
 func TestStoragePageFillsTerminalAndSupportsRecursiveMouseNavigation(t *testing.T) {
