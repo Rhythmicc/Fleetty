@@ -101,7 +101,7 @@ func newStorageActionRequest(
 		Root: filepath.Clean(root), Name: info.Name(), Size: entry.Size,
 		IsDir: info.IsDir(), SourceMode: info.Mode(),
 	}
-	_, request.SourceKey = storageAllocatedSize(info)
+	request.SourceKey = storageFileIdentity(info)
 	if kind == storageActionArchiveDelete {
 		request.SevenZip, err = findSevenZip()
 		if err != nil {
@@ -302,7 +302,7 @@ func validateStorageActionRequest(request storageActionRequest) (os.FileInfo, er
 	if info.Mode() != request.SourceMode || info.IsDir() != request.IsDir {
 		return nil, errors.New("target type changed after confirmation")
 	}
-	if _, key := storageAllocatedSize(info); request.SourceKey != "" && key != request.SourceKey {
+	if key := storageFileIdentity(info); request.SourceKey != "" && key != request.SourceKey {
 		return nil, errors.New("target identity changed after confirmation")
 	}
 	return info, nil
@@ -344,8 +344,8 @@ func removeStorageTarget(path string, info os.FileInfo) error {
 }
 
 func sameStorageIdentity(first, second os.FileInfo) bool {
-	_, firstKey := storageAllocatedSize(first)
-	_, secondKey := storageAllocatedSize(second)
+	firstKey := storageFileIdentity(first)
+	secondKey := storageFileIdentity(second)
 	return firstKey != "" && firstKey == secondKey
 }
 
@@ -388,7 +388,7 @@ func archiveAndDeleteStorageTarget(
 			fmt.Errorf("inspect isolated source: %w", err),
 		)
 	}
-	_, stagedKey := storageAllocatedSize(stagedInfo)
+	stagedKey := storageFileIdentity(stagedInfo)
 	if request.SourceKey == "" || stagedKey != request.SourceKey {
 		return "", restoreStagedArchiveSource(
 			stagedSource, request.Path, tempDirectory,

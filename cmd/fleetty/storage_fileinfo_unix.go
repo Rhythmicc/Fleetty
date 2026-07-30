@@ -20,6 +20,18 @@ func storageAllocatedSize(info os.FileInfo) (uint64, string) {
 	return allocated, fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
 }
 
+func storageFileIdentity(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	_, inode := storageAllocatedSize(info)
+	if inode == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d:%d:%d",
+		inode, info.Size(), info.ModTime().UnixNano(), uint32(info.Mode().Type()))
+}
+
 func max64(a, b int64) int64 {
 	if a > b {
 		return a
