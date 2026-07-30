@@ -3127,6 +3127,102 @@ func TestStoragePageFillsTerminalAndSupportsRecursiveMouseNavigation(t *testing.
 	model.cancelStorageScan()
 }
 
+func TestStorageTreemapPagesSeparateSizeBandsAndBoundTileCount(t *testing.T) {
+	entries := make([]storageEntry, 40)
+	for index := range entries {
+		size := uint64(1 << 20)
+		if index < 4 {
+			size = 1 << 30
+		}
+		entries[index] = storageEntry{
+			Name: fmt.Sprintf("item-%02d", index), Size: size,
+		}
+	}
+
+	ranges := storageTreemapPageRanges(entries, 120, 24)
+	if len(ranges) < 3 {
+		t.Fatalf("storage page ranges = %#v, want multiple readable pages", ranges)
+	}
+	if ranges[0] != [2]int{0, 4} {
+		t.Fatalf("large size band was not isolated: %#v", ranges)
+	}
+	covered := 0
+	for _, span := range ranges {
+		if span[0] != covered || span[1] <= span[0] || span[1]-span[0] > 16 {
+			t.Fatalf("invalid storage page range %#v in %#v", span, ranges)
+		}
+		covered = span[1]
+	}
+	if covered != len(entries) {
+		t.Fatalf("storage pages cover %d entries, want %d", covered, len(entries))
+	}
+
+	pageEntries, page := storageTreemapEntries(entries, 120, 24, 999)
+	if page.Page != page.Pages-1 || page.End != len(entries) ||
+		len(pageEntries) != page.End-page.Start {
+		t.Fatalf("requested page was not clamped: page=%#v entries=%d", page, len(pageEntries))
+	}
+	for _, entry := range pageEntries {
+		if entry.Synthetic {
+			t.Fatalf("pagination should preserve real clickable entries: %#v", entry)
+		}
+	}
+}
+
+func TestStorageTreemapSupportsKeyboardAndMousePaging(t *testing.T) {
+	root := t.TempDir()
+	entries := make([]storageEntry, 30)
+	for index := range entries {
+		path := filepath.Join(root, fmt.Sprintf("directory-%02d", index))
+		entries[index] = storageEntry{
+			Name: fmt.Sprintf("directory-%02d", index), Path: path,
+			Size: uint64(30-index) << 20, IsDir: true,
+		}
+	}
+	model := &monitorModel{
+		screen: screenMonitor, width: 120, height: 32,
+		monitorPage: monitorPageStorage, admin: &adminController{},
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1,
+		},
+		storage: &storageMapState{
+			Root: root, Path: root, Scope: "HOME",
+			Result: storageScanResult{
+				Path: root, Size: 465 << 20, Entries: entries,
+				FinishedAt: time.Now(),
+			},
+		},
+	}
+
+	firstPage := model.monitorView()
+	if model.storage.PageCount < 2 || model.storage.NextPage == nil ||
+		len(model.storage.Rects) > 16 {
+		t.Fatalf("storage pager was not prepared: state=%#v", model.storage)
+	}
+	if !strings.Contains(firstPage, "PAGE 1/") || !strings.Contains(firstPage, "ITEMS 1–16 OF 30") {
+		t.Fatalf("first storage page metadata is missing:\n%s", firstPage)
+	}
+	firstEntry := model.storage.Rects[0].Entry.Path
+	next := *model.storage.NextPage
+	if command := model.handleStorageClick(next.X, next.Y); command != nil {
+		t.Fatal("storage page button unexpectedly started an asynchronous command")
+	}
+	if model.storage.Page != 1 {
+		t.Fatalf("mouse did not advance storage page: %d", model.storage.Page)
+	}
+	secondPage := model.monitorView()
+	if model.storage.Rects[0].Entry.Path == firstEntry ||
+		!strings.Contains(secondPage, "PAGE 2/") ||
+		model.storage.PrevPage == nil {
+		t.Fatalf("second storage page was not rendered:\n%s", secondPage)
+	}
+	model.handleKey(testKey("pgup"))
+	if model.storage.Page != 0 {
+		t.Fatalf("PageUp did not return to the first storage page: %d", model.storage.Page)
+	}
+	assertStorageFrameFillsTerminal(t, model, "paginated storage")
+}
+
 func TestStoragePageIsAvailableOnlyWhenLocalTopEnablesIt(t *testing.T) {
 	model := &monitorModel{
 		screen: screenMonitor, monitorPage: monitorPageNetwork,

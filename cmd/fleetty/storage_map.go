@@ -30,6 +30,10 @@ type storageMapState struct {
 	Cancel     context.CancelFunc
 	Cursor     int
 	Rects      []storageMapRect
+	Page       int
+	PageCount  int
+	PrevPage   *storageHitRect
+	NextPage   *storageHitRect
 	Cache      map[string]storageCachedResult
 	CacheOrder []string
 	CacheHit   bool
@@ -72,6 +76,21 @@ type storageMapRect struct {
 	Y      int
 	Width  int
 	Height int
+}
+
+type storageHitRect struct {
+	X      int
+	Y      int
+	Width  int
+	Height int
+}
+
+type storageTreemapPageInfo struct {
+	Page  int
+	Pages int
+	Start int
+	End   int
+	Total int
 }
 
 type storageMountPolicy struct {
@@ -154,6 +173,7 @@ func (m *monitorModel) beginStorageScanMode(path string, force bool) tea.Cmd {
 		m.status = "Storage navigation is restricted to " + m.storage.Root + "."
 		return nil
 	}
+	pathChanged := filepath.Clean(m.storage.Path) != path
 	m.storage.cacheCurrentResult()
 	m.cancelStorageScan()
 	m.storage.Generation++
@@ -167,6 +187,9 @@ func (m *monitorModel) beginStorageScanMode(path string, force bool) tea.Cmd {
 		m.storage.Scanning = false
 		m.storage.Cursor = 0
 		m.storage.Rects = nil
+		if pathChanged {
+			m.storage.Page = 0
+		}
 		m.storage.CacheHit = true
 		m.status = fmt.Sprintf("Restored %s from the scan cache · press r to refresh.",
 			path)
@@ -186,6 +209,9 @@ func (m *monitorModel) beginStorageScanMode(path string, force bool) tea.Cmd {
 	m.storage.Scanning = true
 	m.storage.Cursor = 0
 	m.storage.Rects = nil
+	if pathChanged {
+		m.storage.Page = 0
+	}
 	action := "Scanning "
 	if hasCached {
 		action = "Refreshing cached "
@@ -421,8 +447,32 @@ func (m *monitorModel) moveStorageSelection(delta int) {
 	m.status = fmt.Sprintf("%s · %s", entry.Path, bytes(entry.Size))
 }
 
+func (m *monitorModel) moveStoragePage(delta int) {
+	if m.storage == nil || m.storage.PageCount <= 1 {
+		return
+	}
+	next := min(max(0, m.storage.Page+delta), m.storage.PageCount-1)
+	if next == m.storage.Page {
+		m.status = fmt.Sprintf("Already on storage page %d of %d.",
+			m.storage.Page+1, m.storage.PageCount)
+		return
+	}
+	m.storage.Page = next
+	m.storage.Cursor = 0
+	m.storage.Rects = nil
+	m.status = fmt.Sprintf("Storage page %d of %d.", next+1, m.storage.PageCount)
+}
+
 func (m *monitorModel) handleStorageClick(x, y int) tea.Cmd {
 	if m.storage == nil {
+		return nil
+	}
+	if storageHit(m.storage.PrevPage, x, y) {
+		m.moveStoragePage(-1)
+		return nil
+	}
+	if storageHit(m.storage.NextPage, x, y) {
+		m.moveStoragePage(1)
 		return nil
 	}
 	for index, rect := range m.storage.Rects {
@@ -433,6 +483,11 @@ func (m *monitorModel) handleStorageClick(x, y int) tea.Cmd {
 		return m.storageOpenSelected()
 	}
 	return nil
+}
+
+func storageHit(rect *storageHitRect, x, y int) bool {
+	return rect != nil && x >= rect.X && x < rect.X+rect.Width &&
+		y >= rect.Y && y < rect.Y+rect.Height
 }
 
 func storagePathWithinRoot(path, root string) bool {
@@ -806,6 +861,8 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 	contentHeight := max(1, bodyHeight-2)
 	contentWidth := max(1, width-4)
 	m.storage.Rects = nil
+	m.storage.PrevPage = nil
+	m.storage.NextPage = nil
 
 	if m.storage.Err != nil && !m.storage.Scanning {
 		lines := []string{
@@ -825,8 +882,12 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 	}
 
 	result := m.storage.Result
-	mapHeight := max(1, contentHeight-2)
-	entries := storageTreemapEntries(result.Entries, contentWidth, mapHeight)
+	mapHeight := max(1, contentHeight-3)
+	entries, page := storageTreemapEntries(
+		result.Entries, contentWidth, mapHeight, m.storage.Page,
+	)
+	m.storage.Page = page.Page
+	m.storage.PageCount = page.Pages
 	rects := layoutStorageTreemap(entries, 0, 0, contentWidth, mapHeight)
 	if len(rects) > 0 {
 		m.storage.Cursor = min(max(0, m.storage.Cursor), len(rects)-1)
@@ -849,9 +910,11 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 		summaryPrefix,
 		bytes(result.Size), result.Files, max(0, int(result.Directories)-1),
 		result.Skipped, result.ExcludedMounts)
+	pager, prevPage, nextPage := renderStoragePager(page, contentWidth, m.colorMode)
 	lines := []string{
 		accentStyle.Render(ansi.Truncate(breadcrumb, contentWidth, "…")),
 		dimStyle.Render(ansi.Truncate(summary, contentWidth, "…")),
+		pager,
 	}
 	lines = append(lines, mapLines...)
 	for len(lines) < contentHeight {
@@ -859,10 +922,22 @@ func (m *monitorModel) renderStoragePage(width int) (string, []widgetPlacement) 
 	}
 	lines = lines[:contentHeight]
 
-	panelY := 2
-	mapY := panelY + 1 + 2
+	panelY := lipgloss.Height(m.renderMonitorPageHeader(width))
+	contentX := 2
+	pagerY := panelY + 3
+	if prevPage != nil {
+		prevPage.X += contentX
+		prevPage.Y += pagerY
+		m.storage.PrevPage = prevPage
+	}
+	if nextPage != nil {
+		nextPage.X += contentX
+		nextPage.Y += pagerY
+		m.storage.NextPage = nextPage
+	}
+	mapY := panelY + 1 + 3
 	for index := range rects {
-		rects[index].X += 2
+		rects[index].X += contentX
 		rects[index].Y += mapY
 	}
 	m.storage.Rects = rects
@@ -924,25 +999,92 @@ func storageBreadcrumb(root, path string, width int) string {
 	return ansi.Truncate(label, width, "…")
 }
 
-func storageTreemapEntries(entries []storageEntry, width, height int) []storageEntry {
+func storageTreemapEntries(
+	entries []storageEntry,
+	width, height, requestedPage int,
+) ([]storageEntry, storageTreemapPageInfo) {
 	if len(entries) == 0 {
-		return nil
+		return nil, storageTreemapPageInfo{Pages: 1}
 	}
-	limit := min(64, max(6, width*height/18))
-	if len(entries) <= limit {
-		return append([]storageEntry(nil), entries...)
+	ranges := storageTreemapPageRanges(entries, width, height)
+	page := min(max(0, requestedPage), len(ranges)-1)
+	span := ranges[page]
+	info := storageTreemapPageInfo{
+		Page: page, Pages: len(ranges), Start: span[0], End: span[1], Total: len(entries),
 	}
-	visible := append([]storageEntry(nil), entries[:limit-1]...)
-	other := storageEntry{
-		Name: "Other", Synthetic: true, ItemCount: len(entries) - len(visible),
+	return append([]storageEntry(nil), entries[span[0]:span[1]]...), info
+}
+
+func storageTreemapPageRanges(entries []storageEntry, width, height int) [][2]int {
+	if len(entries) == 0 {
+		return [][2]int{{0, 0}}
 	}
-	for _, entry := range entries[len(visible):] {
-		other.Size += entry.Size
-		other.Files += entry.Files
-		other.Directories += entry.Directories
+	const maximumSizeRatio = uint64(24)
+	capacity := min(16, max(4, width*height/64))
+	ranges := make([][2]int, 0, (len(entries)+capacity-1)/capacity)
+	for start := 0; start < len(entries); {
+		end := start + 1
+		largest := entries[start].Size
+		if largest == 0 {
+			largest = 1
+		}
+		for end < len(entries) && end-start < capacity {
+			candidate := entries[end].Size
+			if candidate == 0 {
+				candidate = 1
+			}
+			if end-start >= 4 && largest > candidate &&
+				largest/candidate > maximumSizeRatio {
+				break
+			}
+			end++
+		}
+		ranges = append(ranges, [2]int{start, end})
+		start = end
 	}
-	visible = append(visible, other)
-	return visible
+	return ranges
+}
+
+func renderStoragePager(
+	page storageTreemapPageInfo,
+	width int,
+	mode colorMode,
+) (string, *storageHitRect, *storageHitRect) {
+	if page.Pages < 1 {
+		page.Pages = 1
+	}
+	compact := width < 64
+	prevLabel, nextLabel := "‹ PREV", "NEXT ›"
+	if compact {
+		prevLabel, nextLabel = "‹", "›"
+	}
+	center := fmt.Sprintf("PAGE %d/%d", page.Page+1, page.Pages)
+	if page.Total > 0 {
+		center += fmt.Sprintf("  ·  ITEMS %d–%d OF %d", page.Start+1, page.End, page.Total)
+	}
+	leftWidth, rightWidth := lipgloss.Width(prevLabel), lipgloss.Width(nextLabel)
+	centerWidth := max(1, width-leftWidth-rightWidth-2)
+	center = fixedCell(ansi.Truncate(center, centerWidth, "…"), centerWidth, false)
+
+	active := accentStyle
+	inactive := dimStyle
+	if mode == colorModeLight {
+		active = processTitleStyle
+	}
+	leftStyle, rightStyle := inactive, inactive
+	var prevRect, nextRect *storageHitRect
+	if page.Page > 0 {
+		leftStyle = active
+		prevRect = &storageHitRect{X: 0, Width: leftWidth, Height: 1}
+	}
+	nextX := width - rightWidth
+	if page.Page+1 < page.Pages {
+		rightStyle = active
+		nextRect = &storageHitRect{X: nextX, Width: rightWidth, Height: 1}
+	}
+	line := leftStyle.Render(prevLabel) + " " + dimStyle.Render(center) + " " +
+		rightStyle.Render(nextLabel)
+	return ansi.Truncate(line, width, ""), prevRect, nextRect
 }
 
 func layoutStorageTreemap(entries []storageEntry, x, y, width, height int) []storageMapRect {

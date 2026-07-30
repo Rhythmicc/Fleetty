@@ -536,9 +536,17 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.adjustDashboardScroll(1)
 			}
 		case "pgup":
-			m.adjustDashboardScroll(-max(3, m.dashboardViewport/2))
+			if m.monitorPage == monitorPageStorage {
+				m.moveStoragePage(-1)
+			} else {
+				m.adjustDashboardScroll(-max(3, m.dashboardViewport/2))
+			}
 		case "pgdown":
-			m.adjustDashboardScroll(max(3, m.dashboardViewport/2))
+			if m.monitorPage == monitorPageStorage {
+				m.moveStoragePage(1)
+			} else {
+				m.adjustDashboardScroll(max(3, m.dashboardViewport/2))
+			}
 		case "home":
 			if m.monitorPage == monitorPageStorage {
 				return m.storageNavigateRoot()

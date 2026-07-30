@@ -239,6 +239,7 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 		hints = append(hints,
 			keyHint("↑↓", "select"),
 			keyHint("enter/click", "open"),
+			keyHint("pg↑↓", "pages"),
 			keyHint("←/⌫", "up"),
 			keyHint("home", "root"),
 		)
