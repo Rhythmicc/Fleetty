@@ -461,7 +461,10 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.screen, m.password, m.status = screenPassword, "", "Enter the management password."
 		case "r":
 			if m.monitorPage == monitorPageStorage {
-				return m.refreshStorageScan(m.storage.Path)
+				return tea.Sequence(
+					forceFullScreenRedraw(),
+					m.refreshStorageScan(m.storage.Path),
+				)
 			}
 			m.status = "Refreshing now…"
 			return m.startCollect()
@@ -1061,6 +1064,12 @@ func (m *monitorModel) runAction(action adminAction) tea.Cmd {
 		}
 		output, err := m.backend.RunAction(action.ID, m.adminCredential)
 		return actionResultMsg{action: action, output: output, err: err}
+	}
+}
+
+func forceFullScreenRedraw() tea.Cmd {
+	return func() tea.Msg {
+		return tea.ClearScreen()
 	}
 }
 

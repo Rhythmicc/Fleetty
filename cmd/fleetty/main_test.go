@@ -2965,6 +2965,80 @@ func TestStorageRefreshBypassesFreshCacheAndKeepsMapVisible(t *testing.T) {
 	model.cancelStorageScan()
 }
 
+func TestStorageRefreshForcesAndPreservesFullScreenFrames(t *testing.T) {
+	if got, want := fmt.Sprintf("%T", forceFullScreenRedraw()()),
+		fmt.Sprintf("%T", tea.ClearScreen()); got != want {
+		t.Fatalf("full-screen redraw command emitted %s, want %s", got, want)
+	}
+
+	root := t.TempDir()
+	child := filepath.Join(root, "models")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result := storageScanResult{
+		Path: root, Size: 64 << 20, FinishedAt: time.Now(), Workers: 4,
+		Entries: []storageEntry{{
+			Name: "models", Path: child, Size: 64 << 20, IsDir: true,
+		}},
+	}
+	model := &monitorModel{
+		screen: screenMonitor, width: 120, height: 32,
+		monitorPage: monitorPageStorage, admin: &adminController{},
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1,
+		},
+		storage: &storageMapState{
+			Root: root, Path: root, Scope: "HOME", Result: result,
+			Cache: make(map[string]storageCachedResult),
+		},
+	}
+	model.storage.cacheResult(result, true)
+
+	command := model.handleKey(testKey("r"))
+	if command == nil {
+		t.Fatal("storage refresh did not request a scan and full-screen redraw")
+	}
+	assertStorageFrameFillsTerminal(t, model, "cached refresh")
+
+	model.applyStorageScanProgress(storageScanProgressMsg{
+		generation: model.storage.Generation,
+		result: storageScanResult{
+			Path: root, Size: 8 << 20, Workers: 4,
+			Entries: []storageEntry{{
+				Name: "models", Path: child, Size: 8 << 20, IsDir: true,
+			}},
+		},
+	})
+	assertStorageFrameFillsTerminal(t, model, "partial refresh")
+
+	model.applyStorageScanResult(storageScanResultMsg{
+		generation: model.storage.Generation,
+		result: storageScanResult{
+			Path: root, Size: 72 << 20, FinishedAt: time.Now(), Workers: 4,
+			Entries: []storageEntry{{
+				Name: "models", Path: child, Size: 72 << 20, IsDir: true,
+			}},
+		},
+	})
+	assertStorageFrameFillsTerminal(t, model, "completed refresh")
+	model.cancelStorageScan()
+}
+
+func assertStorageFrameFillsTerminal(t *testing.T, model *monitorModel, phase string) {
+	t.Helper()
+	rendered := model.monitorView()
+	if got := lipgloss.Height(rendered); got != model.height {
+		t.Fatalf("%s frame height = %d, want %d\n%s", phase, got, model.height, rendered)
+	}
+	for lineNumber, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got != model.width {
+			t.Fatalf("%s frame line %d width = %d, want %d\n%q",
+				phase, lineNumber, got, model.width, line)
+		}
+	}
+}
+
 func TestStorageStaleCacheRefreshesAndCacheIsBounded(t *testing.T) {
 	root := t.TempDir()
 	storage := &storageMapState{
