@@ -68,6 +68,7 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 		colorMode:   mode,
 		panelLayout: panelLayout,
 		layoutPath:  layoutPath,
+		storage:     newStorageMapState(),
 	}
 	if layoutErr != nil {
 		model.status = "Using the default layout: " + layoutErr.Error()

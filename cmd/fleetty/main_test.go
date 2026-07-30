@@ -1,6 +1,7 @@
 package main
 
 import (
+	stdbytes "bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -2577,6 +2579,127 @@ func TestSelectedProcessStyleIsStableAcrossTerminalPalettes(t *testing.T) {
 	light := selectedProcessStyle(colorModeLight).Render("row")
 	if !strings.Contains(light, "38;5;17") || !strings.Contains(light, "48;5;189") {
 		t.Fatalf("light selection should use explicit xterm colors: %q", light)
+	}
+}
+
+func TestStorageScanExcludesMountsSymlinksAndCountsAllocatedData(t *testing.T) {
+	root := t.TempDir()
+	large := filepath.Join(root, "large")
+	small := filepath.Join(root, "small")
+	remote := filepath.Join(root, "remote")
+	for _, directory := range []string{large, small, remote} {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(large, "model.bin"), stdbytes.Repeat([]byte("x"), 128<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(small, "notes.txt"), stdbytes.Repeat([]byte("y"), 8<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, "remote.bin"), stdbytes.Repeat([]byte("z"), 256<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(large, filepath.Join(root, "large-link")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := scanStorageDirectoryWithPolicy(context.Background(), root, storageMountPolicy{
+		excluded: map[string]string{remote: "remote"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Size == 0 || result.Files != 2 || result.ExcludedMounts != 1 || result.Skipped != 1 {
+		t.Fatalf("unexpected storage summary: %#v", result)
+	}
+	if len(result.Entries) != 2 || result.Entries[0].Name != "large" ||
+		result.Entries[0].Size <= result.Entries[1].Size {
+		t.Fatalf("unexpected storage entries: %#v", result.Entries)
+	}
+	for _, entry := range result.Entries {
+		if entry.Name == "remote" || entry.Name == "large-link" {
+			t.Fatalf("excluded entry leaked into result: %#v", entry)
+		}
+	}
+}
+
+func TestStoragePageFillsTerminalAndSupportsRecursiveMouseNavigation(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "models")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := &monitorModel{
+		screen: screenMonitor, width: 120, height: 32, monitorPage: monitorPageStorage,
+		admin: &adminController{},
+		snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), MemoryTotal: 1, DiskTotal: 1,
+		},
+		storage: &storageMapState{
+			Root: root, Path: root, Scope: "HOME",
+			Result: storageScanResult{
+				Path: root, Size: 100 << 20, Files: 42, Directories: 3,
+				Skipped: 2, ExcludedMounts: 1, FinishedAt: time.Now(),
+				Duration: 250 * time.Millisecond,
+				Entries: []storageEntry{
+					{Name: "models", Path: child, Size: 75 << 20, Files: 30, Directories: 1, IsDir: true},
+					{Name: "cache", Path: filepath.Join(root, "cache"), Size: 20 << 20, Files: 10, Directories: 1, IsDir: true},
+					{Name: "notes.db", Path: filepath.Join(root, "notes.db"), Size: 5 << 20, Files: 1},
+				},
+			},
+		},
+	}
+	rendered := model.monitorView()
+	for _, expected := range []string{
+		"4 STORAGE", "STORAGE MAP", "models", "75.0 MiB", "42 FILES",
+		"1 REMOTE MOUNTS EXCLUDED",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("storage page missing %q:\n%s", expected, rendered)
+		}
+	}
+	if got := lipgloss.Height(rendered); got != model.height {
+		t.Fatalf("storage page height = %d, want %d", got, model.height)
+	}
+	if len(model.storage.Rects) != 3 {
+		t.Fatalf("storage rectangles = %#v", model.storage.Rects)
+	}
+	for _, rect := range model.storage.Rects {
+		if rect.X < 0 || rect.Y < 0 || rect.X+rect.Width > model.width ||
+			rect.Y+rect.Height > model.height-1 {
+			t.Fatalf("storage rectangle outside terminal: %#v", rect)
+		}
+	}
+	first := model.storage.Rects[0]
+	command := model.handleClick(first.X, first.Y)
+	if command == nil || !model.storage.Scanning || model.storage.Path != child {
+		t.Fatalf("storage click did not start recursive scan: path=%q scanning=%t cmd=%v",
+			model.storage.Path, model.storage.Scanning, command)
+	}
+	model.cancelStorageScan()
+}
+
+func TestStoragePageIsAvailableOnlyWhenLocalTopEnablesIt(t *testing.T) {
+	model := &monitorModel{
+		screen: screenMonitor, monitorPage: monitorPageNetwork,
+		admin: &adminController{},
+	}
+	if command := model.handleKey(testKey("4")); command != nil ||
+		model.monitorPage != monitorPageNetwork {
+		t.Fatalf("remote-style model unexpectedly enabled storage: page=%v command=%v",
+			model.monitorPage, command)
+	}
+	root := t.TempDir()
+	model.storage = &storageMapState{Root: root, Path: root, Scope: "HOME"}
+	command := model.handleKey(testKey("4"))
+	if command == nil || model.monitorPage != monitorPageStorage || !model.storage.Scanning {
+		t.Fatalf("local top did not enable storage: page=%v scanning=%t command=%v",
+			model.monitorPage, model.storage.Scanning, command)
+	}
+	model.cancelStorageScan()
+	if storagePathWithinRoot(filepath.Dir(root), root) {
+		t.Fatal("storage root boundary allowed parent traversal")
 	}
 }
 

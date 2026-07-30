@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -46,6 +47,8 @@ func (page monitorPage) label() string {
 		return "COMPUTE"
 	case monitorPageNetwork:
 		return "NETWORK"
+	case monitorPageStorage:
+		return "STORAGE"
 	case monitorPageCustom:
 		return "CUSTOM"
 	default:
@@ -162,9 +165,7 @@ func (m *monitorModel) renderMonitorPageHeader(width int) string {
 	gap := max(2, width-lipgloss.Width(left)-lipgloss.Width(right))
 	firstLine := ansi.Truncate(left+strings.Repeat(" ", gap)+right, width, "")
 
-	pages := []monitorPage{
-		monitorPageOverview, monitorPageCompute, monitorPageNetwork,
-	}
+	pages := m.availableMonitorPages()
 	var tabParts []string
 	x := 0
 	for index, page := range pages {
@@ -225,12 +226,23 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 		return ansi.Truncate(accentStyle.Render("FILTER /")+" "+
 			inputStyle.Render(value+"█")+"  "+dimStyle.Render("[enter] apply  [esc] cancel"), width, "")
 	}
+	pageRange := "1–3"
+	if m.storage != nil {
+		pageRange = "1–4"
+	}
 	hints := []string{
-		keyHint("1–3", "pages"),
+		keyHint(pageRange, "pages"),
 		keyHint("tab", "next"),
 		keyHint("m", "management"),
 	}
-	if m.monitorPage == monitorPageOverview ||
+	if m.monitorPage == monitorPageStorage {
+		hints = append(hints,
+			keyHint("↑↓", "select"),
+			keyHint("enter/click", "open"),
+			keyHint("←/⌫", "up"),
+			keyHint("home", "root"),
+		)
+	} else if m.monitorPage == monitorPageOverview ||
 		m.monitorPage == monitorPageCompute {
 		hints = append(hints,
 			keyHint("↑↓", "select"),
@@ -261,6 +273,8 @@ func (m *monitorModel) renderMonitorPage(width int) (string, []widgetPlacement) 
 		return m.renderComputePage(width)
 	case monitorPageNetwork:
 		return m.renderNetworkPage(width)
+	case monitorPageStorage:
+		return m.renderStoragePage(width)
 	default:
 		return m.renderOverviewPage(width)
 	}
@@ -1303,22 +1317,53 @@ func renderNetworkInterfaceDetailedRow(networkInterface networkInterfaceInfo, wi
 	}, " ")
 }
 
-func (m *monitorModel) switchMonitorPage(page monitorPage) {
-	if page < monitorPageOverview || page > monitorPageNetwork {
-		return
+func (m *monitorModel) availableMonitorPages() []monitorPage {
+	pages := []monitorPage{monitorPageOverview, monitorPageCompute, monitorPageNetwork}
+	if m.storage != nil {
+		pages = append(pages, monitorPageStorage)
+	}
+	return pages
+}
+
+func (m *monitorModel) switchMonitorPage(page monitorPage) tea.Cmd {
+	available := false
+	for _, candidate := range m.availableMonitorPages() {
+		if candidate == page {
+			available = true
+			break
+		}
+	}
+	if !available {
+		return nil
+	}
+	if m.monitorPage == monitorPageStorage && page != monitorPageStorage &&
+		m.storage != nil && m.storage.Scanning {
+		m.cancelStorageScan()
+		m.storage.Generation++
+		m.storage.Scanning = false
+		m.storage.Err = nil
 	}
 	m.monitorPage = page
 	m.dashboardScroll = 0
 	m.monitorFocus = monitorFocusProcesses
 	m.status = page.label() + " page."
 	m.filtering = false
+	if page == monitorPageStorage && m.storage != nil &&
+		!m.storage.Scanning && m.storage.Result.FinishedAt.IsZero() {
+		return m.beginStorageScan(m.storage.Path)
+	}
+	return nil
 }
 
-func (m *monitorModel) cycleMonitorPage(delta int) {
-	page := int(m.monitorPage)
-	if page < int(monitorPageOverview) || page > int(monitorPageNetwork) {
-		page = int(monitorPageOverview)
+func (m *monitorModel) cycleMonitorPage(delta int) tea.Cmd {
+	pages := m.availableMonitorPages()
+	index := 0
+	for candidate := range pages {
+		if pages[candidate] == m.monitorPage {
+			index = candidate
+			break
+		}
 	}
-	page = (page + delta + 3) % 3
-	m.switchMonitorPage(monitorPage(page))
+	index = (index + delta + len(pages)) % len(pages)
+	return m.switchMonitorPage(pages[index])
 }

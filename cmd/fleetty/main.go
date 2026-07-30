@@ -168,6 +168,7 @@ type monitorModel struct {
 	layoutFirstRowY   int
 	pageTabY          int
 	pageTabs          []monitorPageTab
+	storage           *storageMapState
 }
 
 type monitorPage int
@@ -176,6 +177,7 @@ const (
 	monitorPageOverview monitorPage = iota
 	monitorPageCompute
 	monitorPageNetwork
+	monitorPageStorage
 	monitorPageCustom
 )
 
@@ -276,6 +278,11 @@ type processTerminateResultMsg struct {
 	pid int
 	err error
 }
+type storageScanResultMsg struct {
+	generation uint64
+	result     storageScanResult
+	err        error
+}
 
 func (m *monitorModel) collect() tea.Cmd {
 	return func() tea.Msg {
@@ -360,6 +367,8 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedProcess, m.processDetail, m.detailErr = nil, nil, nil
 			return m, m.startCollect()
 		}
+	case storageScanResultMsg:
+		m.applyStorageScanResult(msg)
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg.Mouse().X, msg.Mouse().Y)
@@ -388,6 +397,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	key := msg.String()
 	if key == "ctrl+c" {
+		m.cancelStorageScan()
 		return tea.Quit
 	}
 	if m.screen == screenMonitor && m.filtering {
@@ -413,6 +423,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	if key == "q" && m.screen == screenMonitor {
+		m.cancelStorageScan()
 		return tea.Quit
 	}
 	themeKey := key == "T" || key == "t" &&
@@ -426,11 +437,13 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case screenMonitor:
 		switch key {
 		case "1":
-			m.switchMonitorPage(monitorPageOverview)
+			return m.switchMonitorPage(monitorPageOverview)
 		case "2":
-			m.switchMonitorPage(monitorPageCompute)
+			return m.switchMonitorPage(monitorPageCompute)
 		case "3":
-			m.switchMonitorPage(monitorPageNetwork)
+			return m.switchMonitorPage(monitorPageNetwork)
+		case "4":
+			return m.switchMonitorPage(monitorPageStorage)
 		case "m":
 			if !m.admin.enabled() {
 				m.status = "Management mode is disabled: configure ADMIN_PASSWORD_HASH."
@@ -438,6 +451,9 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 			m.screen, m.password, m.status = screenPassword, "", "Enter the management password."
 		case "r":
+			if m.monitorPage == monitorPageStorage {
+				return m.beginStorageScan(m.storage.Path)
+			}
 			m.status = "Refreshing now…"
 			return m.startCollect()
 		case "l":
@@ -465,14 +481,20 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 				}
 				m.status = "Focused " + m.monitorFocus.label() + "."
 			} else {
-				m.cycleMonitorPage(1)
+				return m.cycleMonitorPage(1)
 			}
 		case "shift+tab", "backtab":
-			m.cycleMonitorPage(-1)
+			return m.cycleMonitorPage(-1)
 		case "left", "h":
-			m.cycleMonitorPage(-1)
+			if m.monitorPage == monitorPageStorage {
+				return m.storageNavigateParent()
+			}
+			return m.cycleMonitorPage(-1)
 		case "right":
-			m.cycleMonitorPage(1)
+			if m.monitorPage == monitorPageStorage {
+				return m.storageOpenSelected()
+			}
+			return m.cycleMonitorPage(1)
 		case "+", "=":
 			if m.monitorPage == monitorPageCustom {
 				m.adjustFocusedWidgetSize(1)
@@ -482,7 +504,9 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.adjustFocusedWidgetSize(-1)
 			}
 		case "up", "k":
-			if m.monitorPage == monitorPageCustom ||
+			if m.monitorPage == monitorPageStorage {
+				m.moveStorageSelection(-1)
+			} else if m.monitorPage == monitorPageCustom ||
 				m.monitorPage == monitorPageOverview ||
 				m.monitorPage == monitorPageCompute {
 				m.moveMonitorSelection(-1)
@@ -490,7 +514,9 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.adjustDashboardScroll(-1)
 			}
 		case "down", "j":
-			if m.monitorPage == monitorPageCustom ||
+			if m.monitorPage == monitorPageStorage {
+				m.moveStorageSelection(1)
+			} else if m.monitorPage == monitorPageCustom ||
 				m.monitorPage == monitorPageOverview ||
 				m.monitorPage == monitorPageCompute {
 				m.moveMonitorSelection(1)
@@ -502,12 +528,18 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "pgdown":
 			m.adjustDashboardScroll(max(3, m.dashboardViewport/2))
 		case "home":
+			if m.monitorPage == monitorPageStorage {
+				return m.storageNavigateRoot()
+			}
 			m.dashboardScroll = 0
 			m.status = "Dashboard scrolled to the first widget."
 		case "end":
 			m.dashboardScroll = max(0, m.dashboardContent-m.dashboardViewport)
 			m.status = "Dashboard scrolled to the last widget."
 		case "enter":
+			if m.monitorPage == monitorPageStorage {
+				return m.storageOpenSelected()
+			}
 			if m.monitorPage == monitorPageOverview ||
 				m.monitorPage == monitorPageCompute ||
 				m.monitorPage == monitorPageCustom &&
@@ -531,6 +563,10 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "c":
 			m.filter, m.monitorCursor, m.monitorOffset = "", 0, 0
 			m.status = "Process filter cleared."
+		case "backspace", "delete", "esc":
+			if m.monitorPage == monitorPageStorage {
+				return m.storageNavigateParent()
+			}
 		}
 	case screenPassword:
 		switch key {
@@ -715,10 +751,12 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 		if m.monitorPage != monitorPageCustom && y == m.pageTabY {
 			for _, tab := range m.pageTabs {
 				if x >= tab.X && x < tab.X+tab.Width {
-					m.switchMonitorPage(tab.Page)
-					return nil
+					return m.switchMonitorPage(tab.Page)
 				}
 			}
+		}
+		if m.monitorPage == monitorPageStorage {
+			return m.handleStorageClick(x, y)
 		}
 		if m.monitorPage == monitorPageCustom {
 			if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelNodeQueue); ok &&
