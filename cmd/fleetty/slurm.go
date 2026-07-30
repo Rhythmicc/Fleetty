@@ -1291,7 +1291,8 @@ func (m *hubModel) clampSlurmCursor() {
 	}
 	if m.slurmExplain && m.slurmJobID != "" {
 		for index, display := range jobs {
-			if display.Job.ID == m.slurmJobID && display.Cluster == m.slurmJobCluster {
+			if slurmStableJobID(display.Job) == m.slurmJobID &&
+				display.Cluster == m.slurmJobCluster {
 				m.slurmCursor = index
 				return
 			}
@@ -1320,8 +1321,18 @@ func (m *hubModel) rememberSlurmSelection() {
 		m.slurmJobID, m.slurmJobCluster = "", ""
 		return
 	}
-	m.slurmJobID = jobs[m.slurmCursor].Job.ID
+	m.slurmJobID = slurmStableJobID(jobs[m.slurmCursor].Job)
 	m.slurmJobCluster = jobs[m.slurmCursor].Cluster
+}
+
+func slurmStableJobID(job slurmJob) string {
+	if isSlurmPending(job.State) {
+		if separator := strings.IndexByte(job.ID, '_'); separator >= 0 &&
+			separator+1 < len(job.ID) && job.ID[separator+1] == '[' {
+			return job.ID[:separator] + "_[]"
+		}
+	}
+	return job.ID
 }
 
 func (m *hubModel) slurmColumns() int {

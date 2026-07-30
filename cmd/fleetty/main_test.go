@@ -690,6 +690,9 @@ func TestSlurmExplanationDistinguishesArrayLimitAndResourceFit(t *testing.T) {
 	if slurmEligibleForNext(snapshot.Jobs[3]) {
 		t.Fatal("array-throttled job must not be marked NEXT")
 	}
+	if got := slurmStableJobID(snapshot.Jobs[3]); got != "7000_[]" {
+		t.Fatalf("stable array job ID = %q", got)
+	}
 }
 
 func TestParseExtendedSlurmResourceFields(t *testing.T) {
