@@ -519,6 +519,21 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	if got := lipgloss.Height(explanation); got != model.height {
 		t.Fatalf("Slurm explanation height = %d, want %d\n%s", got, model.height, explanation)
 	}
+	updatedStates := append([]slurmClusterState(nil), model.slurmStates...)
+	updatedSnapshot := updatedStates[0].Snapshot
+	updatedSnapshot.Jobs = append([]slurmJob{{
+		ID: "57613", Partition: "gpu-part", Name: "new-runner", User: "alice",
+		State: "RUNNING", Priority: 70000, Nodes: 1, NodeList: "a100",
+	}}, updatedSnapshot.Jobs...)
+	updatedStates[0].Snapshot = updatedSnapshot
+	if _, command := model.Update(hubSnapshotsMsg{SlurmStates: updatedStates}); command != nil {
+		t.Fatalf("snapshot refresh returned command %v", command)
+	}
+	if !model.slurmExplain || model.slurmJobID != "57615" ||
+		model.selectedSlurmJobs()[model.slurmCursor].Job.ID != "57615" {
+		t.Fatalf("Slurm explanation did not retain stable job selection: cursor=%d id=%q",
+			model.slurmCursor, model.slurmJobID)
+	}
 	if _, command := model.Update(testKey("q")); command != nil || model.slurmExplain || !model.slurmView {
 		t.Fatalf("q from explanation should return to queue: explain=%t view=%t command=%v",
 			model.slurmExplain, model.slurmView, command)

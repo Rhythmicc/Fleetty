@@ -341,23 +341,25 @@ type hubSnapshotsMsg struct {
 type hubTickMsg struct{}
 
 type hubModel struct {
-	service      *hubService
-	config       hubConfig
-	states       []hubNodeState
-	width        int
-	height       int
-	cursor       int
-	offset       int
-	collecting   bool
-	colorMode    colorMode
-	status       string
-	detail       *monitorModel
-	slurmView    bool
-	slurmFilter  int
-	slurmOffset  int
-	slurmCursor  int
-	slurmExplain bool
-	slurmStates  []slurmClusterState
+	service         *hubService
+	config          hubConfig
+	states          []hubNodeState
+	width           int
+	height          int
+	cursor          int
+	offset          int
+	collecting      bool
+	colorMode       colorMode
+	status          string
+	detail          *monitorModel
+	slurmView       bool
+	slurmFilter     int
+	slurmOffset     int
+	slurmCursor     int
+	slurmExplain    bool
+	slurmJobID      string
+	slurmJobCluster string
+	slurmStates     []slurmClusterState
 }
 
 type hubNodeGroup struct {
@@ -478,16 +480,19 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.slurmView {
 				if m.slurmExplain {
 					m.slurmExplain = false
+					m.slurmJobID, m.slurmJobCluster = "", ""
 					return m, nil
 				}
 				if index, ok := m.slurmClusterAt(msg.Mouse().X, msg.Mouse().Y); ok {
 					m.slurmFilter = index
 					m.slurmOffset = 0
 					m.slurmCursor = 0
+					m.slurmJobID, m.slurmJobCluster = "", ""
 					m.status = "Showing jobs from " + m.config.SlurmClusters[index].Name + "."
 				} else if index, ok := m.slurmJobAt(msg.Mouse().X, msg.Mouse().Y); ok {
 					m.slurmCursor = index
 					m.slurmExplain = true
+					m.rememberSlurmSelection()
 				}
 				return m, nil
 			}
@@ -504,6 +509,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.slurmView {
 				if m.slurmExplain {
 					m.slurmExplain = false
+					m.slurmJobID, m.slurmJobCluster = "", ""
 					m.status = "Returned to the Slurm queue."
 					return m, nil
 				}
@@ -527,6 +533,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.slurmOffset = 0
 				m.slurmCursor = 0
 				m.slurmExplain = false
+				m.slurmJobID, m.slurmJobCluster = "", ""
 				if m.slurmView {
 					m.status = "Slurm queue overview."
 				} else {
@@ -539,12 +546,14 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.slurmOffset = 0
 				m.slurmCursor = 0
 				m.slurmExplain = false
+				m.slurmJobID, m.slurmJobCluster = "", ""
 				m.status = "Slurm queue overview."
 			}
 		case "esc":
 			if m.slurmView {
 				if m.slurmExplain {
 					m.slurmExplain = false
+					m.slurmJobID, m.slurmJobCluster = "", ""
 					m.status = "Returned to the Slurm queue."
 					break
 				}
@@ -556,6 +565,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.slurmFilter = -1
 				m.slurmOffset = 0
 				m.slurmCursor = 0
+				m.slurmJobID, m.slurmJobCluster = "", ""
 				m.status = "Showing jobs from all Slurm clusters."
 			}
 		case "left", "h":
@@ -600,6 +610,11 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.slurmView {
 				if len(m.selectedSlurmJobs()) > 0 {
 					m.slurmExplain = !m.slurmExplain
+					if m.slurmExplain {
+						m.rememberSlurmSelection()
+					} else {
+						m.slurmJobID, m.slurmJobCluster = "", ""
+					}
 				}
 				break
 			}

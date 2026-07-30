@@ -1274,6 +1274,7 @@ func (m *hubModel) moveSlurmFilter(delta int) {
 	m.slurmFilter = min(max(-1, m.slurmFilter+delta), len(m.config.SlurmClusters)-1)
 	m.slurmOffset = 0
 	m.slurmCursor = 0
+	m.slurmJobID, m.slurmJobCluster = "", ""
 	if m.slurmFilter < 0 {
 		m.status = "Showing jobs from all Slurm clusters."
 		return
@@ -1285,7 +1286,19 @@ func (m *hubModel) clampSlurmCursor() {
 	jobs := m.selectedSlurmJobs()
 	if len(jobs) == 0 {
 		m.slurmCursor, m.slurmOffset, m.slurmExplain = 0, 0, false
+		m.slurmJobID, m.slurmJobCluster = "", ""
 		return
+	}
+	if m.slurmExplain && m.slurmJobID != "" {
+		for index, display := range jobs {
+			if display.Job.ID == m.slurmJobID && display.Cluster == m.slurmJobCluster {
+				m.slurmCursor = index
+				return
+			}
+		}
+		m.slurmExplain = false
+		m.slurmJobID, m.slurmJobCluster = "", ""
+		m.status = "The selected job left the queue."
 	}
 	m.slurmCursor = min(max(0, m.slurmCursor), len(jobs)-1)
 }
@@ -1296,6 +1309,19 @@ func (m *hubModel) moveSlurmCursor(delta int) {
 		return
 	}
 	m.slurmCursor = min(max(0, m.slurmCursor+delta), len(jobs)-1)
+	if m.slurmExplain {
+		m.rememberSlurmSelection()
+	}
+}
+
+func (m *hubModel) rememberSlurmSelection() {
+	jobs := m.selectedSlurmJobs()
+	if m.slurmCursor < 0 || m.slurmCursor >= len(jobs) {
+		m.slurmJobID, m.slurmJobCluster = "", ""
+		return
+	}
+	m.slurmJobID = jobs[m.slurmCursor].Job.ID
+	m.slurmJobCluster = jobs[m.slurmCursor].Cluster
 }
 
 func (m *hubModel) slurmColumns() int {
