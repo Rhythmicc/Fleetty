@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "release": {
+    "base_url": "https://github.com/Rhythmicc/fleetty/releases/latest/download",
+    "cache_dir": "/var/cache/fleetty/releases"
+  },
+  "parallel": 3,
+  "timeout_seconds": 15,
+  "targets": [
+    {
+      "name": "gpu-login",
+      "ssh": "gpu-login",
+      "role": "relay",
+      "arch": "amd64",
+      "children": [
+        {
+          "name": "gpu-1",
+          "ssh": "gpu-1-admin",
+          "role": "node",
+          "scope": "system",
+          "become": "sudo",
+          "arch": "amd64"
+        }
+      ]
+    },
+    {
+      "name": "storage-1",
+      "ssh": "storage-1-admin",
+      "role": "node",
+      "scope": "user",
+      "arch": "amd64"
+    }
+  ]
+}

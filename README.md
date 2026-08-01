@@ -285,6 +285,85 @@ manifest 不接受密码字段。SSH 凭据由 OpenSSH 管理，Fleetty 管理�
 
 只有 system scope 的部署账户等同于 root 级管理员：`become: "sudo"` 要求非交互式管理员 sudo，不能把它视为低权限授权。user scope 只管理该 SSH 用户自己的 Fleetty 文件和 user service，适合作为默认部署方式。
 
+### 由 Hub 自动更新节点
+
+Hub 可以作为 Fleetty 安装包的统一下载与分发点。每轮更新只在 Hub 上下载一次 Release 资产；通过 SHA-256 校验后写入本地缓存，再沿更新清单声明的邻接关系向外传播。直接相连的节点由 Hub 更新，隐藏在登录节点后的计算节点则由该登录节点继续推送。远端仍由 Fleetty 自带安装器原子替换，服务无法正常启动时会自动回滚。关机或暂时不可达的节点会标记为 `DEFERRED`，只暂停它所在的分支，不会阻塞其他节点，并会在下一轮重新尝试。
+
+在 Hub 上准备专用的部署 SSH 密钥和 OpenSSH host key 配置，然后安装 `fleettyctl`：
+
+```bash
+sudo install -d -o root -g root -m 0755 /opt/fleetty
+sudo install -o root -g root -m 0755 \
+  fleettyctl_linux_amd64 /opt/fleetty/fleettyctl
+sudo install -o root -g root -m 0600 \
+  fleet-update.example.json /etc/fleetty/fleet-update.json
+```
+
+更新清单不需要 `binary` 字段，而是声明 release 下载源：
+
+```json
+{
+  "version": 1,
+  "release": {
+    "base_url": "https://github.com/Rhythmicc/fleetty/releases/latest/download",
+    "cache_dir": "/var/cache/fleetty/releases"
+  },
+  "parallel": 3,
+  "timeout_seconds": 15,
+  "targets": [
+    {
+      "name": "gpu-login",
+      "ssh": "gpu-login",
+      "role": "relay",
+      "arch": "amd64",
+      "children": [
+        {
+          "name": "gpu-1",
+          "ssh": "gpu-1-admin",
+          "role": "node",
+          "scope": "system",
+          "become": "sudo",
+          "arch": "amd64"
+        }
+      ]
+    },
+    {
+      "name": "storage-1",
+      "ssh": "storage-1-admin",
+      "role": "node",
+      "scope": "user",
+      "arch": "amd64"
+    }
+  ]
+}
+```
+
+`ssh` 始终由目标的父节点解释。顶层条目使用 Hub 上的 OpenSSH 别名；`children` 中的别名只需在它所属的 `relay` 登录节点上可用。因此 Hub 无需获得叶子节点的路由、私钥或 `known_hosts`。`relay` 不会安装或重启服务：父节点向它发送经过校验的临时 `fleettyctl`、子树清单和所需二进制，由它完成相邻节点的计划或更新后立即清理。私钥和 SSH agent 不会随安装包转发。
+
+`relay` 可以继续包含下一层 `relay`，最大深度为 8、整棵树最多 512 个目标。嵌套目标必须显式填写 `arch`，使 Hub 能在无法直接探测叶子节点时准备完整的离线包；只有顶层直连目标可以省略，由 Hub 使用 `uname -m` 探测。每一跳都应启用 `StrictHostKeyChecking` 并使用独立部署密钥。system scope 要求相邻节点的部署账户可以执行非交互式 `sudo -n`，user scope 不调用 sudo。监控 RPC 密钥不会被用于软件更新，避免把只读监控权限扩大成系统管理权限。
+
+管理员始终只需在 Hub 执行 `fleettyctl update`。内部的 `cascade` 子命令由相邻中继自动调用，并要求清单中的每个临时二进制都带有匹配的 SHA-256；它不需要单独配置定时器。
+
+先查看更新计划，再执行一次更新：
+
+```bash
+sudo /opt/fleetty/fleettyctl update \
+  --file /etc/fleetty/fleet-update.json
+sudo /opt/fleetty/fleettyctl update \
+  --file /etc/fleetty/fleet-update.json --yes
+```
+
+需要自动运行时，安装随 Release 提供的 systemd unit。默认在开机 15 分钟后执行，之后每 6 小时检查一次，并加入随机延迟避免多套 Hub 同时访问下载源：
+
+```bash
+sudo install -o root -g root -m 0644 \
+  fleetty-update.service fleetty-update.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fleetty-update.timer
+systemctl list-timers fleetty-update.timer
+```
+
 ## 连接与操作
 
 监控端口不会登录系统账户，SSH 用户名只用于标记会话来源；客户端仍需持有已登记的私钥，连接后不会获得 shell：

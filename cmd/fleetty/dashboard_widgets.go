@@ -630,31 +630,16 @@ func renderNetworkInterfaceRow(networkInterface networkInterfaceInfo, width int)
 
 func (m *monitorModel) renderGPUWidget(width int, size widgetSize) string {
 	if size == widgetSizeSmall {
-		if m.snapshot.GPUError != "" {
-			return btopPanel(width, "GPU", "SMALL",
-				dimStyle.Render(truncate(m.snapshot.GPUError, max(4, width-4)))+"\n\n"+
-					dimStyle.Render(strings.Repeat("─", max(1, width-4))),
-				gpuTitleStyle, colorGPUBorder)
-		}
-		if len(m.snapshot.GPUs) == 0 {
+		if m.snapshot.GPUError == "" && len(m.snapshot.GPUs) == 0 {
 			return ""
 		}
-		gpu := m.snapshot.GPUs[0]
-		status, style := gpuLoadStatus(gpu.Utilization)
-		card := metricCard{
-			title: "GPU", value: fmt.Sprintf("%.0f%%  %s", gpu.Utilization, status),
-			detail: truncate(gpu.Name, max(4, width-4)),
-			visual: metricVisualMeter, usage: gpu.Utilization,
-			titleStyle: style, borderColor: colorGPUBorder,
-		}
-		return renderMetricWidget(card, width, widgetSizeSmall)
+		return newGPUCardComponent(m.snapshot).render(gpuCardCompact, width, 1)
 	}
-	copyModel := *m
-	if size == widgetSizeMedium && len(copyModel.snapshot.GPUs) > 1 {
-		copyModel.snapshot.GPUs = append([]gpuInfo(nil), copyModel.snapshot.GPUs[:1]...)
+	deviceLimit := 0
+	if size == widgetSizeMedium {
+		deviceLimit = 1
 	}
-	layout := dashboardLayout{width: width, height: m.height, compactGPU: true}
-	return copyModel.gpuPanel(layout)
+	return newGPUCardComponent(m.snapshot).render(gpuCardDetailed, width, deviceLimit)
 }
 
 func (m *monitorModel) adjustDashboardScroll(delta int) {

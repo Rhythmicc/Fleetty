@@ -17,6 +17,7 @@ const (
 	defaultTimeout      = 15
 	maxTimeout          = 120
 	maxManifestTargets  = 512
+	maxManifestDepth    = 8
 	maxManifestFileSize = 4 << 20
 	maxConfigEntrySize  = 16 << 20
 )
@@ -24,20 +25,29 @@ const (
 type fleetManifest struct {
 	Version        int              `json:"version"`
 	Binary         string           `json:"binary"`
+	Release        *releaseConfig   `json:"release,omitempty"`
 	Parallel       int              `json:"parallel,omitempty"`
 	TimeoutSeconds int              `json:"timeout_seconds,omitempty"`
 	Targets        []manifestTarget `json:"targets"`
 	baseDir        string
 }
 
+type releaseConfig struct {
+	BaseURL  string `json:"base_url,omitempty"`
+	CacheDir string `json:"cache_dir,omitempty"`
+}
+
 type manifestTarget struct {
-	Name      string `json:"name"`
-	SSH       string `json:"ssh"`
-	Role      string `json:"role"`
-	Scope     string `json:"scope,omitempty"`
-	Binary    string `json:"binary,omitempty"`
-	ConfigDir string `json:"config_dir,omitempty"`
-	Become    string `json:"become,omitempty"`
+	Name      string           `json:"name"`
+	SSH       string           `json:"ssh"`
+	Role      string           `json:"role"`
+	Scope     string           `json:"scope,omitempty"`
+	Binary    string           `json:"binary,omitempty"`
+	ConfigDir string           `json:"config_dir,omitempty"`
+	Become    string           `json:"become,omitempty"`
+	Arch      string           `json:"arch,omitempty"`
+	SHA256    string           `json:"sha256,omitempty"`
+	Children  []manifestTarget `json:"children,omitempty"`
 }
 
 type resolvedTarget struct {
@@ -49,10 +59,44 @@ type resolvedTarget struct {
 	Binary         string
 	ConfigDir      string
 	Become         string
+	Arch           string
+	SHA256         string
 	TimeoutSeconds int
+	Children       []resolvedTarget
 }
 
 func loadManifest(path string) (fleetManifest, []resolvedTarget, error) {
+	return loadManifestMode(path, true, false, false)
+}
+
+func loadUpdateManifest(path string) (fleetManifest, []resolvedTarget, error) {
+	return loadManifestMode(path, false, true, true)
+}
+
+func loadCascadeManifest(path string) (fleetManifest, []resolvedTarget, error) {
+	manifest, targets, err := loadManifestMode(path, true, false, true)
+	if err != nil {
+		return fleetManifest{}, nil, err
+	}
+	if err := requireCascadeChecksums(targets); err != nil {
+		return fleetManifest{}, nil, err
+	}
+	return manifest, targets, nil
+}
+
+func requireCascadeChecksums(targets []resolvedTarget) error {
+	for _, target := range targets {
+		if target.SHA256 == "" {
+			return fmt.Errorf("cascade target %q requires sha256", target.Name)
+		}
+		if err := requireCascadeChecksums(target.Children); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadManifestMode(path string, requireBinary, requireRelease, allowRelay bool) (fleetManifest, []resolvedTarget, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fleetManifest{}, nil, errors.New("manifest path is required")
@@ -85,7 +129,7 @@ func loadManifest(path string) (fleetManifest, []resolvedTarget, error) {
 	if err != nil {
 		return fleetManifest{}, nil, err
 	}
-	targets, err := manifest.validateAndResolve()
+	targets, err := manifest.validateAndResolve(requireBinary, requireRelease, allowRelay)
 	return manifest, targets, err
 }
 
@@ -99,15 +143,12 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return errors.New("manifest contains multiple JSON values")
 }
 
-func (manifest *fleetManifest) validateAndResolve() ([]resolvedTarget, error) {
+func (manifest *fleetManifest) validateAndResolve(requireBinary, requireRelease, allowRelay bool) ([]resolvedTarget, error) {
 	if manifest.Version != manifestVersion {
 		return nil, fmt.Errorf("unsupported manifest version %d; expected %d", manifest.Version, manifestVersion)
 	}
 	if len(manifest.Targets) == 0 {
 		return nil, errors.New("manifest has no targets")
-	}
-	if len(manifest.Targets) > maxManifestTargets {
-		return nil, fmt.Errorf("manifest has more than %d targets", maxManifestTargets)
 	}
 	if manifest.Parallel == 0 {
 		manifest.Parallel = defaultParallelism
@@ -121,77 +162,173 @@ func (manifest *fleetManifest) validateAndResolve() ([]resolvedTarget, error) {
 	if manifest.TimeoutSeconds < 1 || manifest.TimeoutSeconds > maxTimeout {
 		return nil, fmt.Errorf("timeout_seconds must be between 1 and %d", maxTimeout)
 	}
+	if requireRelease && manifest.Release == nil {
+		return nil, errors.New("update requires a release configuration")
+	}
+	if manifest.Release != nil {
+		if err := manifest.resolveReleaseConfig(); err != nil {
+			return nil, err
+		}
+	}
 	globalBinary, err := resolveRegularFile(manifest.baseDir, manifest.Binary, "binary")
 	if err != nil && strings.TrimSpace(manifest.Binary) != "" {
 		return nil, err
 	}
 	seen := make(map[string]struct{}, len(manifest.Targets))
-	targets := make([]resolvedTarget, 0, len(manifest.Targets))
-	for index, target := range manifest.Targets {
-		target.Name = strings.TrimSpace(target.Name)
-		target.SSH = strings.TrimSpace(target.SSH)
-		target.Role = strings.ToLower(strings.TrimSpace(target.Role))
-		target.Scope = strings.ToLower(strings.TrimSpace(target.Scope))
-		target.Become = strings.ToLower(strings.TrimSpace(target.Become))
-		if target.Name == "" || !safeLabel(target.Name) {
-			return nil, fmt.Errorf("target %d has invalid name %q", index+1, target.Name)
+	index := 0
+	var resolveTargets func([]manifestTarget, int, bool) ([]resolvedTarget, error)
+	resolveTargets = func(entries []manifestTarget, depth int, nested bool) ([]resolvedTarget, error) {
+		if depth > maxManifestDepth {
+			return nil, fmt.Errorf("manifest target depth exceeds %d", maxManifestDepth)
 		}
-		if _, exists := seen[target.Name]; exists {
-			return nil, fmt.Errorf("duplicate target name %q", target.Name)
-		}
-		seen[target.Name] = struct{}{}
-		if !safeSSHTarget(target.SSH) {
-			return nil, fmt.Errorf("target %q has invalid ssh destination %q", target.Name, target.SSH)
-		}
-		if target.Role != "node" && target.Role != "hub" && target.Role != "privileged-helper" {
-			return nil, fmt.Errorf("target %q role must be node, hub, or privileged-helper", target.Name)
-		}
-		if target.Scope == "" {
-			target.Scope = "system"
-		}
-		if target.Scope != "system" && target.Scope != "user" {
-			return nil, fmt.Errorf("target %q scope must be system or user", target.Name)
-		}
-		if target.Role == "privileged-helper" && target.Scope != "system" {
-			return nil, fmt.Errorf("target %q privileged-helper requires system scope", target.Name)
-		}
-		if target.Become == "" {
-			if target.Scope == "user" {
+		targets := make([]resolvedTarget, 0, len(entries))
+		for _, target := range entries {
+			index++
+			currentIndex := index - 1
+			if index > maxManifestTargets {
+				return nil, fmt.Errorf("manifest has more than %d targets", maxManifestTargets)
+			}
+			target.Name = strings.TrimSpace(target.Name)
+			target.SSH = strings.TrimSpace(target.SSH)
+			target.Role = strings.ToLower(strings.TrimSpace(target.Role))
+			target.Scope = strings.ToLower(strings.TrimSpace(target.Scope))
+			target.Become = strings.ToLower(strings.TrimSpace(target.Become))
+			rawArch := strings.TrimSpace(target.Arch)
+			target.Arch = normalizeReleaseArchitecture(rawArch)
+			target.SHA256 = strings.ToLower(strings.TrimSpace(target.SHA256))
+			if target.Name == "" || !safeLabel(target.Name) {
+				return nil, fmt.Errorf("target %d has invalid name %q", index, target.Name)
+			}
+			if _, exists := seen[target.Name]; exists {
+				return nil, fmt.Errorf("duplicate target name %q", target.Name)
+			}
+			seen[target.Name] = struct{}{}
+			if !safeSSHTarget(target.SSH) {
+				return nil, fmt.Errorf("target %q has invalid ssh destination %q", target.Name, target.SSH)
+			}
+			if target.Role != "node" && target.Role != "hub" && target.Role != "privileged-helper" && target.Role != "relay" {
+				return nil, fmt.Errorf("target %q role must be node, hub, privileged-helper, or relay", target.Name)
+			}
+			if target.Role == "relay" && !allowRelay {
+				return nil, fmt.Errorf("target %q relay role is only supported by update or cascade", target.Name)
+			}
+			if target.Role == "relay" && len(target.Children) == 0 {
+				return nil, fmt.Errorf("target %q relay has no children", target.Name)
+			}
+			if target.Role != "relay" && len(target.Children) != 0 {
+				return nil, fmt.Errorf("target %q has children but is not a relay", target.Name)
+			}
+			if nested && target.Arch == "" {
+				return nil, fmt.Errorf("nested target %q must declare arch", target.Name)
+			}
+			if target.Scope == "" {
+				target.Scope = "system"
+			}
+			if target.Scope != "system" && target.Scope != "user" {
+				return nil, fmt.Errorf("target %q scope must be system or user", target.Name)
+			}
+			if target.Role == "relay" {
+				target.Scope = "user"
 				target.Become = "none"
-			} else {
-				target.Become = "sudo"
+			} else if target.Role == "privileged-helper" && target.Scope != "system" {
+				return nil, fmt.Errorf("target %q privileged-helper requires system scope", target.Name)
 			}
-		}
-		if target.Become != "sudo" && target.Become != "none" {
-			return nil, fmt.Errorf("target %q become must be sudo or none", target.Name)
-		}
-		if target.Scope == "user" && target.Become != "none" {
-			return nil, fmt.Errorf("target %q user scope must use become none", target.Name)
-		}
-		binary := globalBinary
-		if strings.TrimSpace(target.Binary) != "" {
-			binary, err = resolveRegularFile(manifest.baseDir, target.Binary, "binary for "+target.Name)
-			if err != nil {
-				return nil, err
+			if target.Become == "" {
+				if target.Scope == "user" {
+					target.Become = "none"
+				} else {
+					target.Become = "sudo"
+				}
 			}
-		}
-		if binary == "" {
-			return nil, fmt.Errorf("target %q has no binary", target.Name)
-		}
-		configDir := ""
-		if strings.TrimSpace(target.ConfigDir) != "" {
-			configDir, err = resolveConfigDirectory(manifest.baseDir, target.ConfigDir)
-			if err != nil {
-				return nil, fmt.Errorf("target %q: %w", target.Name, err)
+			if target.Become != "sudo" && target.Become != "none" {
+				return nil, fmt.Errorf("target %q become must be sudo or none", target.Name)
 			}
+			if target.Scope == "user" && target.Become != "none" {
+				return nil, fmt.Errorf("target %q user scope must use become none", target.Name)
+			}
+			if rawArch != "" && target.Arch == "" {
+				return nil, fmt.Errorf("target %q arch must be amd64 or arm64", target.Name)
+			}
+			binary := globalBinary
+			if strings.TrimSpace(target.Binary) != "" {
+				binary, err = resolveRegularFile(manifest.baseDir, target.Binary, "binary for "+target.Name)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if binary == "" && requireBinary {
+				return nil, fmt.Errorf("target %q has no binary", target.Name)
+			}
+			if target.SHA256 != "" && !validSHA256(target.SHA256) {
+				return nil, fmt.Errorf("target %q has invalid sha256", target.Name)
+			}
+			if target.SHA256 != "" && binary != "" {
+				actual, hashErr := fileSHA256(binary)
+				if hashErr != nil {
+					return nil, fmt.Errorf("target %q hash binary: %w", target.Name, hashErr)
+				}
+				if actual != target.SHA256 {
+					return nil, fmt.Errorf("target %q binary checksum mismatch", target.Name)
+				}
+			}
+			configDir := ""
+			if strings.TrimSpace(target.ConfigDir) != "" {
+				configDir, err = resolveConfigDirectory(manifest.baseDir, target.ConfigDir)
+				if err != nil {
+					return nil, fmt.Errorf("target %q: %w", target.Name, err)
+				}
+			}
+			children, childErr := resolveTargets(target.Children, depth+1, true)
+			if childErr != nil {
+				return nil, childErr
+			}
+			targets = append(targets, resolvedTarget{
+				Index: currentIndex, Name: target.Name, SSH: target.SSH, Role: target.Role, Scope: target.Scope,
+				Binary: binary, ConfigDir: configDir, Become: target.Become, Arch: target.Arch,
+				SHA256: target.SHA256, TimeoutSeconds: manifest.TimeoutSeconds, Children: children,
+			})
 		}
-		targets = append(targets, resolvedTarget{
-			Index: index, Name: target.Name, SSH: target.SSH, Role: target.Role, Scope: target.Scope,
-			Binary: binary, ConfigDir: configDir, Become: target.Become,
-			TimeoutSeconds: manifest.TimeoutSeconds,
-		})
+		return targets, nil
 	}
-	return targets, nil
+	return resolveTargets(manifest.Targets, 1, false)
+}
+
+func (manifest *fleetManifest) resolveReleaseConfig() error {
+	release := manifest.Release
+	release.BaseURL = strings.TrimRight(strings.TrimSpace(release.BaseURL), "/")
+	if release.BaseURL == "" {
+		release.BaseURL = defaultReleaseBaseURL
+	}
+	if err := validateReleaseBaseURL(release.BaseURL); err != nil {
+		return err
+	}
+	release.CacheDir = strings.TrimSpace(release.CacheDir)
+	if release.CacheDir == "" {
+		cacheRoot, err := os.UserCacheDir()
+		if err != nil {
+			return fmt.Errorf("resolve release cache directory: %w", err)
+		}
+		release.CacheDir = filepath.Join(cacheRoot, "fleetty", "releases")
+	} else if !filepath.IsAbs(release.CacheDir) {
+		release.CacheDir = filepath.Join(manifest.baseDir, release.CacheDir)
+	}
+	absolute, err := filepath.Abs(release.CacheDir)
+	if err != nil {
+		return fmt.Errorf("resolve release cache directory: %w", err)
+	}
+	release.CacheDir = absolute
+	return nil
+}
+
+func normalizeReleaseArchitecture(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "amd64", "x86_64", "x86-64":
+		return "amd64"
+	case "arm64", "aarch64":
+		return "arm64"
+	default:
+		return ""
+	}
 }
 
 func resolveRegularFile(base, value, label string) (string, error) {

@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestStorageActionValidationProtectsRootsLinksAndMounts(t *testing.T) {
@@ -323,8 +326,8 @@ func TestStorageConfirmationRequiresPhraseAndInvalidatesRelatedCache(t *testing.
 	if model.screen != screenStorageConfirm || model.storageAction == nil {
 		t.Fatalf("delete did not open a confirmation screen: %#v", model)
 	}
-	if view := model.storageConfirmView(); !strings.Contains(view, "PERMANENTLY DELETE") ||
-		!strings.Contains(view, filepath.Base(child)) || !strings.Contains(view, "Type") {
+	if view := model.storageConfirmView(); !strings.Contains(view, "DELETE PERMANENTLY") ||
+		!strings.Contains(view, filepath.Base(child)) || !strings.Contains(view, "TYPE") {
 		t.Fatalf("storage confirmation does not identify the destructive target:\n%s", view)
 	}
 	model.appendStorageConfirmation("wrong")
@@ -356,4 +359,100 @@ func TestStorageConfirmationRequiresPhraseAndInvalidatesRelatedCache(t *testing.
 		t.Fatalf("related storage cache was not invalidated: %#v", model.storage.Cache)
 	}
 	model.cancelStorageScan()
+}
+
+func TestStorageConfirmationViewsAreCenteredResponsiveAndStateSpecific(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		kind   storageActionKind
+		width  int
+		height int
+		want   []string
+	}{
+		{
+			name: "compact delete", kind: storageActionDelete,
+			width: 58, height: 22,
+			want: []string{"DELETE PERMANENTLY", "IRREVERSIBLE", "No Trash", "TYPE DELETE"},
+		},
+		{
+			name: "wide archive", kind: storageActionArchiveDelete,
+			width: 120, height: 36,
+			want: []string{"ARCHIVE + DELETE", "CREATE", "VERIFY", "REMOVE", "TYPE ARCHIVE"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := &monitorModel{
+				width: test.width, height: test.height,
+				storageAction: &storageActionRequest{
+					Kind: test.kind, Name: "竞赛资料",
+					Path: "/Users/example/Documents/竞赛资料",
+					Size: 2 << 30, IsDir: true,
+				},
+				status: "Type DELETE to confirm.",
+			}
+			if test.kind == storageActionArchiveDelete {
+				model.status = "Type ARCHIVE to confirm."
+			}
+			view := model.storageConfirmView()
+			if got := lipgloss.Height(view); got != test.height {
+				t.Fatalf("confirmation height = %d, want %d\n%s", got, test.height, view)
+			}
+			for lineNumber, line := range strings.Split(view, "\n") {
+				if got := lipgloss.Width(line); got > test.width {
+					t.Fatalf("line %d width = %d, want <= %d: %q",
+						lineNumber, got, test.width, ansi.Strip(line))
+				}
+			}
+			plain := ansi.Strip(view)
+			for _, wanted := range test.want {
+				if !strings.Contains(plain, wanted) {
+					t.Fatalf("confirmation missing %q:\n%s", wanted, plain)
+				}
+			}
+			if !strings.Contains(plain, "竞赛资料") {
+				t.Fatalf("confirmation lost Unicode target name:\n%s", plain)
+			}
+
+			model.busy = true
+			model.status = "Running " + model.storageAction.label() + "…"
+			busy := ansi.Strip(model.storageConfirmView())
+			if !strings.Contains(busy, "● WORKING") ||
+				strings.Contains(busy, "TYPE "+model.storageAction.confirmation()) {
+				t.Fatalf("busy state is not visually distinct:\n%s", busy)
+			}
+			if test.kind == storageActionArchiveDelete &&
+				!strings.Contains(busy, "request cancellation") {
+				t.Fatalf("archive busy state lacks cancellation affordance:\n%s", busy)
+			}
+			if test.kind == storageActionDelete &&
+				!strings.Contains(busy, "cannot be interrupted") {
+				t.Fatalf("delete busy state misrepresents cancellation:\n%s", busy)
+			}
+		})
+	}
+}
+
+func TestStorageActionEscapeOnlyCancelsInterruptibleArchive(t *testing.T) {
+	cancelled := false
+	model := &monitorModel{
+		screen:        screenStorageConfirm,
+		busy:          true,
+		storageAction: &storageActionRequest{Kind: storageActionDelete},
+		storageActionStop: func() {
+			cancelled = true
+		},
+	}
+	model.handleKey(testKey("esc"))
+	if cancelled || !strings.Contains(model.status, "cannot be interrupted") {
+		t.Fatalf("delete cancellation state = cancelled %t, status %q",
+			cancelled, model.status)
+	}
+
+	model.storageAction.Kind = storageActionArchiveDelete
+	model.handleKey(testKey("esc"))
+	if !cancelled || model.storageActionStop != nil ||
+		!strings.Contains(model.status, "Cancellation requested") {
+		t.Fatalf("archive cancellation state = cancelled %t, stop %#v, status %q",
+			cancelled, model.storageActionStop, model.status)
+	}
 }

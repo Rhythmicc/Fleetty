@@ -504,11 +504,14 @@ func healthStatus(usage float64) (string, lipgloss.Style) {
 }
 
 func (m *monitorModel) computeActivityPanelSpec(width int) pagePanelSpec {
+	return newGPUCardComponent(m.snapshot).panelSpec(gpuCardOverview, width, 0)
+}
+
+func buildGPUOverviewPanelSpec(gpus []gpuInfo, gpuError string, width int) pagePanelSpec {
 	var lines []string
-	if m.snapshot.GPUError != "" && len(m.snapshot.GPUs) == 0 {
-		lines = append(lines, warningStyle.Render("GPU metrics unavailable: "+m.snapshot.GPUError))
+	if gpuError != "" && len(gpus) == 0 {
+		lines = append(lines, warningStyle.Render("GPU metrics unavailable: "+gpuError))
 	}
-	gpus := m.snapshot.GPUs
 	if len(gpus) > 1 {
 		lines = multiGPUOverviewLines(gpus, max(24, width-4))
 		meta := fmt.Sprintf("%d DEVICES", len(gpus))

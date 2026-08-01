@@ -2574,6 +2574,141 @@ func TestGPULoadStatusAndWideLayout(t *testing.T) {
 	}
 }
 
+func TestGPUComputePanelShowsActiveWorkloadCommand(t *testing.T) {
+	model := &monitorModel{snapshot: monitorSnapshot{GPUs: []gpuInfo{
+		{
+			Index: 0, Name: "NVIDIA H100", Utilization: 74,
+			MemoryUsed: 32 * 1024 * 1024 * 1024, MemoryTotal: 80 * 1024 * 1024 * 1024,
+			Workloads: []gpuWorkloadInfo{{PID: 4242, User: "jdoe", Name: "/opt/train.py"}},
+		},
+		{Index: 1, Name: "NVIDIA H100", MemoryTotal: 80 * 1024 * 1024 * 1024},
+	}}}
+
+	wide := model.gpuPanel(dashboardLayout{width: 128, height: 40})
+	plainWide := ansi.Strip(wide)
+	for _, expected := range []string{"JOB train.py · USER jdoe · PID 4242", "GPU 0", "GPU 1", "NO ACTIVE JOB"} {
+		if !strings.Contains(plainWide, expected) {
+			t.Fatalf("wide Compute GPU panel missing %q:\n%s", expected, plainWide)
+		}
+	}
+	if got := lipgloss.Height(wide); got != 6 {
+		t.Fatalf("wide GPU panel with one workload height = %d, want fixed height 6:\n%s", got, plainWide)
+	}
+
+	compact := model.gpuPanel(dashboardLayout{width: 88, height: 40, compactGPU: true})
+	if !strings.Contains(ansi.Strip(compact), "JOB train.py · USER jdoe · PID 4242") {
+		t.Fatalf("compact Compute GPU panel missing workload:\n%s", ansi.Strip(compact))
+	}
+
+	model.snapshot.GPUs[0].Workloads = append(model.snapshot.GPUs[0].Workloads,
+		gpuWorkloadInfo{PID: 5252, User: "alice-long", Name: "worker-b"})
+	multiple := ansi.Strip(model.gpuPanel(dashboardLayout{width: 128, height: 40}))
+	if !strings.Contains(multiple, "train.py · USER jdoe · PID 4242") ||
+		!strings.Contains(multiple, "worker-b · USER alice-long · PID 5252") {
+		t.Fatalf("multiple GPU workloads were not listed in full:\n%s", multiple)
+	}
+	if strings.Contains(multiple, "+1") {
+		t.Fatalf("multiple GPU workloads should not collapse to a + count:\n%s", multiple)
+	}
+}
+
+func TestGPUCardComponentMatchesLocalAndHubComputePages(t *testing.T) {
+	snapshot := monitorSnapshot{
+		CollectedAt: time.Now(),
+		Profile:     machineProfileGPU,
+		MemoryUsed:  8 << 30,
+		MemoryTotal: 64 << 30,
+		GPUs: []gpuInfo{
+			{
+				Index: 0, Name: "NVIDIA H100", Utilization: 74,
+				MemoryUsed: 32 << 30, MemoryTotal: 80 << 30,
+				Power: 420, PowerLimit: 700, ClockMHz: 1980, Temperature: 72,
+				Workloads: []gpuWorkloadInfo{{PID: 4242, User: "jdoe", Name: "/opt/train.py"}},
+			},
+			{Index: 1, Name: "NVIDIA H100", MemoryTotal: 80 << 30, Power: 68, PowerLimit: 700, ClockMHz: 345, Temperature: 32},
+		},
+		Processes: []processInfo{{PID: 4242, User: "jdoe", State: "R", Command: "train.py"}},
+	}
+	local := &monitorModel{
+		profile: machineProfileGPU, width: 128, height: 36,
+		monitorPage: monitorPageCompute, snapshot: snapshot,
+	}
+	remote := newRemoteMonitorModel(hubNodeConfig{
+		Name: "gpu-node", Profile: machineProfileGPU,
+	}, 128, 36, colorModeDark)
+	remote.monitorPage = monitorPageCompute
+	remote.snapshot = snapshot
+
+	var remoteBody string
+	for _, width := range []int{88, 128, 180} {
+		local.width = width
+		remote.width = width
+		localBody, _ := local.renderComputePage(width)
+		remoteBody, _ = remote.renderComputePage(width)
+		if localBody != remoteBody {
+			t.Fatalf("local and Hub Compute pages rendered different GPU cards at width %d\nLOCAL:\n%s\nHUB:\n%s", width, localBody, remoteBody)
+		}
+		for lineNumber, line := range strings.Split(remoteBody, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("shared GPU card width %d line %d = %d: %q", width, lineNumber, got, line)
+			}
+		}
+	}
+	remoteBody, _ = remote.renderComputePage(128)
+	plain := ansi.Strip(remoteBody)
+	for _, expected := range []string{
+		"GPU 0", "GPU 1", "JOB train.py · USER jdoe · PID 4242",
+		"PWR 420/700W", "CLK 1980MHz", "72°C",
+	} {
+		if !strings.Contains(plain, expected) {
+			t.Fatalf("shared Hub GPU card missing %q:\n%s", expected, plain)
+		}
+	}
+}
+
+func TestGPUComputeColumnsStayAlignedAndLiveSignalsChangeColor(t *testing.T) {
+	model := &monitorModel{snapshot: monitorSnapshot{GPUs: []gpuInfo{
+		{Index: 0, Name: "NVIDIA A100-PCIE-40GB", Utilization: 3, MemoryTotal: 40 * 1024 * 1024 * 1024, Power: 68, PowerLimit: 250, ClockMHz: 345, Temperature: 32,
+			Workloads: []gpuWorkloadInfo{{PID: 10, User: "alice", Name: "train-a"}}},
+		{Index: 1, Name: "NVIDIA H100", Utilization: 67, MemoryUsed: 529 * 1024 * 1024, MemoryTotal: 64 * 1024 * 1024 * 1024, Power: 115, PowerLimit: 700, ClockMHz: 1980, Temperature: 82,
+			Workloads: []gpuWorkloadInfo{{PID: 11, User: "bob", Name: "train-b"}}},
+	}}}
+	plain := ansi.Strip(model.gpuPanel(dashboardLayout{width: 128, height: 40}))
+	rows := make(map[string]string)
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "GPU 0") {
+			rows["GPU 0"] = line
+		}
+		if strings.Contains(line, "GPU 1") {
+			rows["GPU 1"] = line
+		}
+	}
+	for _, field := range []string{"MEM", "PWR", "CLK", "°C"} {
+		first, second := strings.Index(rows["GPU 0"], field), strings.Index(rows["GPU 1"], field)
+		if first < 0 || first != second {
+			t.Fatalf("GPU %s columns are not aligned: %d / %d\n%s\n%s", field, first, second, rows["GPU 0"], rows["GPU 1"])
+		}
+	}
+	workloadRows := []string{}
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "JOB train-") {
+			workloadRows = append(workloadRows, line)
+		}
+	}
+	if len(workloadRows) != 2 || strings.Index(workloadRows[0], "JOB") != strings.Index(workloadRows[1], "JOB") {
+		t.Fatalf("GPU workload rows are not aligned: %#v", workloadRows)
+	}
+	if gpuClockStyle(345).Render("CLK") == gpuClockStyle(1980).Render("CLK") {
+		t.Fatal("low and high GPU clocks should use different colors")
+	}
+	if gpuTemperatureStyle(40).Render("TEMP") == gpuTemperatureStyle(85).Render("TEMP") {
+		t.Fatal("cool and hot GPU temperatures should use different colors")
+	}
+	if narrow, wide := newGPUPanelColumns(88).barWidth, newGPUPanelColumns(180).barWidth; narrow >= wide {
+		t.Fatalf("GPU bars should grow with the panel width: narrow=%d wide=%d", narrow, wide)
+	}
+}
+
 func TestGPUMemoryColumnsAreAligned(t *testing.T) {
 	gpus := []gpuInfo{
 		{MemoryUsed: 425 * 1024 * 1024, MemoryTotal: 40 * 1024 * 1024 * 1024},

@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type storageActionKind int
@@ -548,48 +550,137 @@ func (writer *storageLimitedWriter) Write(data []byte) (int, error) {
 }
 
 func (m *monitorModel) storageConfirmView() string {
-	width := usableWidth(m.width)
 	if m.storageAction == nil {
 		m.cancelStorageAction("Storage action is no longer available.")
 		return m.monitorView()
 	}
 	request := m.storageAction
+	screenWidth := usableWidth(m.width)
+	dialogWidth := min(86, max(44, screenWidth-8))
+	if screenWidth < 52 {
+		dialogWidth = screenWidth
+	}
+	contentWidth := max(12, dialogWidth-4)
+
 	kind := "FILE"
 	if request.IsDir {
 		kind = "DIRECTORY"
 	}
-	explanation := "The selected item will be permanently removed."
+
+	actionTitle := "DELETE PERMANENTLY"
+	actionStyle := dangerStyle
+	meta := "CONFIRM"
 	if request.Kind == storageActionArchiveDelete {
-		explanation = "Fleetty will create and verify a new .7z archive beside the source. " +
-			"Only then will the original be permanently removed."
+		actionTitle = "ARCHIVE + DELETE"
+		actionStyle = diskTitleStyle
 	}
-	confirmation := request.confirmation()
-	input := m.storageConfirm
-	if input == "" {
-		input = dimStyle.Render(confirmation)
-	}
-	progress := ""
 	if m.busy {
-		progress = warningStyle.Render("Working… Do not close Fleetty until this operation finishes.")
+		meta = "IN PROGRESS"
 	}
-	content := strings.Join([]string{
-		titleStyle.Render("CONFIRM STORAGE ACTION"),
-		dangerStyle.Render(strings.ToUpper(request.label())),
-		"",
-		panelStyle(width).Render(strings.Join([]string{
-			sectionStyle.Render(kind + "  " + request.Name),
-			dimStyle.Render("PATH") + "  " + truncate(request.Path, max(12, width-12)),
-			dimStyle.Render("SIZE") + "  " + bytes(request.Size),
+
+	targetNameWidth := max(4, contentWidth-lipgloss.Width(kind)-
+		lipgloss.Width(bytes(request.Size))-4)
+	target := storageActionAlignedLine(
+		dimStyle.Render(kind)+"  "+
+			valueStyle.Render(ansi.Truncate(request.Name, targetNameWidth, "…")),
+		diskTitleStyle.Render(bytes(request.Size)),
+		contentWidth,
+	)
+	path := dimStyle.Render("PATH  ") +
+		valueStyle.Render(ansi.Truncate(
+			request.Path, max(6, contentWidth-lipgloss.Width("PATH  ")), "…",
+		))
+
+	lines := []string{
+		target,
+		path,
+		dimStyle.Render(strings.Repeat("─", contentWidth)),
+	}
+
+	if request.Kind == storageActionArchiveDelete {
+		lines = append(lines,
+			storageActionStep("1", "CREATE", "new .7z beside the source"),
+			storageActionStep("2", "VERIFY", "test archive integrity"),
+			storageActionStep("3", "REMOVE", "original only after verification"),
+		)
+	} else {
+		lines = append(lines,
+			dangerStyle.Render("IRREVERSIBLE")+
+				"  "+warningStyle.Render("No Trash or recovery step."),
+			dimStyle.Render("Safety checks run again immediately before deletion."),
+		)
+	}
+
+	if m.busy {
+		working := "REMOVING SELECTED ITEM"
+		reassurance := "Keep Fleetty open until this operation finishes."
+		if request.Kind == storageActionArchiveDelete {
+			working = "CREATING + VERIFYING ARCHIVE"
+			reassurance = "The original is removed only after archive verification succeeds."
+		}
+		lines = append(lines,
 			"",
-			warningStyle.Render(explanation),
-			dimStyle.Render("The operation uses the current Unix user's filesystem permissions."),
-		}, "\n")),
-		"",
-		fmt.Sprintf("Type %s to continue: %s",
-			accentStyle.Render(confirmation), inputStyle.Render(input+"█")),
-		progress,
-		"",
-		helpStyle.Render("[enter] execute  [esc] cancel") + "  " + dimStyle.Render(m.status),
-	}, "\n")
-	return centeredPanel(width, content)
+			warningStyle.Copy().Bold(true).Render("● WORKING")+
+				"  "+valueStyle.Render(working),
+			dimStyle.Render(reassurance),
+		)
+		if request.Kind == storageActionArchiveDelete {
+			lines = append(lines, "",
+				compactButton("esc", "request cancellation", false))
+		} else {
+			lines = append(lines, "",
+				dimStyle.Render("Deletion cannot be interrupted after it starts."))
+		}
+		lines = append(lines,
+			dimStyle.Render(ansi.Truncate(m.status, contentWidth, "…")))
+	} else {
+		confirmation := request.confirmation()
+		inputWidth := min(20, max(12, contentWidth/3))
+		input := inputStyle.Copy().
+			Width(inputWidth).
+			MaxWidth(inputWidth).
+			Render(m.storageConfirm + "█")
+
+		lines = append(lines,
+			"",
+			dimStyle.Render("TYPE ")+accentStyle.Render(confirmation)+
+				dimStyle.Render(" TO CONFIRM"),
+			input,
+			"",
+			compactButton("enter", "execute", true)+"  "+
+				compactButton("esc", "cancel", false),
+		)
+		if m.status != "" &&
+			!strings.HasPrefix(m.status, "Type "+confirmation) {
+			lines = append(lines,
+				dangerStyle.Render(ansi.Truncate(m.status, contentWidth, "…")))
+		}
+	}
+
+	dialog := btopPanel(
+		dialogWidth, actionTitle, meta, strings.Join(lines, "\n"),
+		actionStyle, colorDiskBorder,
+	)
+	if m.width <= 0 || m.height <= 0 {
+		return "\n" + dialog
+	}
+	return lipgloss.Place(
+		screenWidth, max(1, m.height),
+		lipgloss.Center, lipgloss.Center,
+		dialog,
+	)
+}
+
+func storageActionAlignedLine(left, right string, width int) string {
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 2 {
+		return ansi.Truncate(left+"  "+right, width, "…")
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func storageActionStep(number, action, detail string) string {
+	return accentStyle.Render(number) + "  " +
+		dimStyle.Copy().Bold(true).Render(fmt.Sprintf("%-7s", action)) +
+		valueStyle.Render(detail)
 }

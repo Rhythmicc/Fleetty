@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically update Fleetty subordinate nodes
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+Unit=fleetty-update.service
+
+[Install]
+WantedBy=timers.target

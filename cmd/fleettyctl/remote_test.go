@@ -210,6 +210,8 @@ type scriptedRemoteRunner struct {
 	installResult string
 	failSudo      bool
 	home          string
+	architecture  string
+	relayOutput   string
 	commands      []string
 }
 
@@ -239,6 +241,11 @@ func (runner *scriptedRemoteRunner) Run(_ context.Context, name string, args []s
 			home = "/home/test"
 		}
 		return []byte(home + "\n"), nil
+	case remote == "'uname' '-m'":
+		if runner.architecture == "" {
+			return nil, errors.New("target offline")
+		}
+		return []byte(runner.architecture + "\n"), nil
 	case strings.Contains(remote, "'systemctl'") && strings.Contains(remote, "'--property=Version'"):
 		return []byte("249\n"), nil
 	case strings.Contains(remote, "'mktemp'"):
@@ -260,6 +267,11 @@ func (runner *scriptedRemoteRunner) Run(_ context.Context, name string, args []s
 		return []byte(runner.enabled + "\n"), errors.New("exit status 1")
 	case strings.Contains(remote, "'install' '--role'"):
 		return []byte(runner.installResult + "\n"), nil
+	case strings.Contains(remote, "/fleettyctl'") && strings.Contains(remote, "'cascade'"):
+		if runner.relayOutput == "" {
+			return nil, errors.New("relay output is not configured")
+		}
+		return []byte(runner.relayOutput + "\n"), nil
 	case strings.Contains(remote, "'mkdir'"), strings.Contains(remote, "'chmod'"),
 		strings.Contains(remote, "'find'"):
 		return nil, nil

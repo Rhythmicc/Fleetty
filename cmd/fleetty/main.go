@@ -826,8 +826,13 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		switch key {
 		case "esc":
 			if m.busy {
-				m.cancelStorageActionProcess()
-				m.status = "Cancelling storage action…"
+				if m.storageAction != nil &&
+					m.storageAction.Kind == storageActionArchiveDelete {
+					m.cancelStorageActionProcess()
+					m.status = "Cancellation requested; waiting for a safe stop…"
+				} else {
+					m.status = "Deletion is already in progress and cannot be interrupted."
+				}
 			} else {
 				m.cancelStorageAction("Storage action cancelled.")
 			}
@@ -1347,49 +1352,151 @@ func dashboardHeaderNamed(label string, width int, collectedAt time.Time, mode c
 }
 
 func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
-	w := layout.width
-	if m.snapshot.GPUError != "" {
-		return btopPanel(w, "GPU", "UNAVAILABLE", dimStyle.Render("GPU metrics unavailable: "+m.snapshot.GPUError), gpuTitleStyle, colorGPUBorder)
+	return newGPUCardComponent(m.snapshot).render(gpuCardDetailed, layout.width, 0)
+}
+
+type gpuPanelColumns struct {
+	contentWidth int
+	compact      bool
+	index        int
+	name         int
+	util         int
+	memory       int
+	power        int
+	clock        int
+	temperature  int
+	barWidth     int
+}
+
+func newGPUPanelColumns(width int) gpuPanelColumns {
+	contentWidth := max(20, width-4)
+	compact := contentWidth < 72
+	columns := gpuPanelColumns{
+		contentWidth: contentWidth,
+		compact:      compact,
+		index:        6,
 	}
-	lines := make([]string, 0, max(1, len(m.snapshot.GPUs)*3))
-	memoryUsedWidth, memoryTotalWidth := gpuMemoryWidths(m.snapshot.GPUs)
-	nameWidth := gpuNameWidth(m.snapshot.GPUs, w)
-	for _, gpu := range m.snapshot.GPUs {
-		memory := gpuMemoryText(gpu, memoryUsedWidth, memoryTotalWidth)
-		status, statusStyle := gpuLoadStatus(gpu.Utilization)
-		summary := fmt.Sprintf("%s  %-*s  %s",
-			accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
-			nameWidth, truncate(gpu.Name, nameWidth),
-			statusStyle.Render(fmt.Sprintf("%-6s", status)),
-		)
-		if layout.compactGPU {
-			lines = append(lines,
-				summary,
-				bar(gpu.Utilization, max(8, w-lipgloss.Width(memory)-12))+fmt.Sprintf(" %3.0f%%  %s", gpu.Utilization, memory),
-				statusStyle.Render(gpuTelemetry(gpu, false)),
-			)
-			continue
+	if compact {
+		columns.barWidth = max(2, min(5, contentWidth/32))
+		columns.util = columns.barWidth + 5
+		columns.memory = columns.barWidth + 12
+		columns.power = columns.barWidth + 12
+		columns.clock = 8
+		columns.temperature = 6
+	} else {
+		columns.barWidth = max(4, min(12, contentWidth/24))
+		columns.util = columns.barWidth + 5
+		columns.memory = columns.barWidth + 16
+		columns.power = columns.barWidth + 16
+		columns.clock = 11
+		columns.temperature = 6
+	}
+	// There is one separator between each cell. Keep the model column fixed
+	// too, so a short model cannot pull all following metrics to the left.
+	separators := 6
+	fixed := columns.index + columns.util + columns.memory + columns.power + columns.clock + columns.temperature + separators
+	// Keep enough room for a recognizable model even on a narrow SSH
+	// terminal; the trailing temperature cell may be truncated instead.
+	columns.name = max(12, contentWidth-fixed)
+	return columns
+}
+
+func gpuStyledCell(style lipgloss.Style, value string, width int, right bool) string {
+	return style.Render(fixedCell(value, width, right))
+}
+
+func gpuPanelMetricsLine(gpu gpuInfo, width int) string {
+	columns := newGPUPanelColumns(width)
+	displayName := gpu.Name
+	if columns.compact {
+		displayName = shortGPUName(displayName)
+	}
+	name := gpuStyledCell(valueStyle, displayName, columns.name, false)
+	utilStyle := gpuLoadStyle(gpu.Utilization)
+	memoryUsage := percent(gpu.MemoryUsed, gpu.MemoryTotal)
+	memoryStyle := gpuLoadStyle(memoryUsage)
+	powerUsage := 0.0
+	if gpu.PowerLimit > 0 {
+		powerUsage = gpu.Power * 100 / gpu.PowerLimit
+	}
+	powerStyle := gpuLoadStyle(powerUsage)
+	memory := compactByteCount(gpu.MemoryUsed) + "/" + compactByteCount(gpu.MemoryTotal)
+	power := fmt.Sprintf("%.0fW", gpu.Power)
+	if gpu.PowerLimit > 0 {
+		power = fmt.Sprintf("%.0f/%.0fW", gpu.Power, gpu.PowerLimit)
+	}
+	barWidth := columns.barWidth
+	clockText := fmt.Sprintf("CLK %dMHz", gpu.ClockMHz)
+	if columns.compact {
+		memory = shortGPUCount(gpu.MemoryUsed) + "/" + shortGPUCount(gpu.MemoryTotal)
+		if gpu.PowerLimit > 0 {
+			power = fmt.Sprintf("%.0f/%.0fW", gpu.Power, gpu.PowerLimit)
 		}
-		showPowerLimit := w >= 128
-		telemetry := gpuTelemetry(gpu, showPowerLimit)
-		barWidth := min(42, max(10, w-lipgloss.Width(memory)-lipgloss.Width(telemetry)-22))
-		lines = append(lines,
-			summary,
-			fmt.Sprintf("       %s %3.0f%%  %s  %s",
-				bar(gpu.Utilization, barWidth), gpu.Utilization,
-				memory,
-				statusStyle.Render(telemetry),
-			),
+		clockText = fmt.Sprintf("%dMHz", gpu.ClockMHz)
+	}
+	utilPart := gpuStyledCell(utilStyle, fmt.Sprintf("%s %3.0f%%", shortGPUBar(gpu.Utilization, barWidth), gpu.Utilization), columns.util, false)
+	memoryLabel := "MEM"
+	powerLabel := "PWR"
+	if columns.compact {
+		memoryLabel = "M"
+		powerLabel = "P"
+	}
+	memoryPart := gpuStyledCell(memoryStyle, fmt.Sprintf("%s %s %s", shortGPUBar(memoryUsage, barWidth), memoryLabel, memory), columns.memory, false)
+	powerPart := gpuStyledCell(powerStyle, fmt.Sprintf("%s %s %s", shortGPUBar(powerUsage, barWidth), powerLabel, power), columns.power, false)
+	clockPart := gpuStyledCell(gpuClockStyle(gpu.ClockMHz), clockText, columns.clock, false)
+	temperaturePart := gpuStyledCell(gpuTemperatureStyle(gpu.Temperature), fmt.Sprintf("%d°C", gpu.Temperature), columns.temperature, false)
+	parts := []string{
+		gpuStyledCell(accentStyle, fmt.Sprintf("GPU %-2d", gpu.Index), columns.index, false),
+		name,
+		utilPart,
+		memoryPart,
+		powerPart,
+		clockPart,
+		temperaturePart,
+	}
+	return ansi.Truncate(strings.Join(parts, " "), columns.contentWidth, "…")
+}
+
+func shortGPUBar(value float64, width int) string {
+	filled := int(value / 100 * float64(width))
+	filled = max(0, min(width, filled))
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func shortGPUCount(value uint64) string {
+	return strings.ReplaceAll(compactByteCount(value), ".0", "")
+}
+
+func gpuPanelWorkloadLine(gpu gpuInfo, width int) string {
+	columns := newGPUPanelColumns(width)
+	indent := strings.Repeat(" ", columns.index+1)
+	if len(gpu.Workloads) == 0 {
+		if gpu.Platform == "apple" {
+			return dimStyle.Render(fmt.Sprintf("%sNO ACTIVE JOB  ·  RENDER %.0f%%  ·  TILER %.0f%%", indent,
+				gpu.RendererUtilization, gpu.TilerUtilization))
+		}
+		return dimStyle.Render(indent + "NO ACTIVE JOB")
+	}
+	parts := make([]string, 0, len(gpu.Workloads))
+	for _, workload := range gpu.Workloads {
+		name := strings.TrimSpace(workload.Name)
+		if separator := strings.LastIndex(name, "/"); separator >= 0 {
+			name = name[separator+1:]
+		}
+		if name == "" || strings.EqualFold(name, "[No data]") {
+			name = fmt.Sprintf("PID %d", workload.PID)
+		}
+		owner := strings.TrimSpace(workload.User)
+		if owner == "" {
+			owner = "unknown"
+		}
+		parts = append(parts,
+			gpuTitleStyle.Render("JOB ")+
+				valueStyle.Render(name)+
+				dimStyle.Render(" · USER "+owner+" · PID "+strconv.Itoa(workload.PID)),
 		)
 	}
-	if len(m.snapshot.GPUs) == 0 {
-		lines = append(lines, dimStyle.Render("No GPU was reported."))
-	}
-	meta := fmt.Sprintf("%d DEVICE", len(m.snapshot.GPUs))
-	if len(m.snapshot.GPUs) != 1 {
-		meta += "S"
-	}
-	return btopPanel(w, "GPU", meta, strings.Join(lines, "\n"), gpuTitleStyle, colorGPUBorder)
+	return ansi.Truncate(indent+strings.Join(parts, dimStyle.Render("  │  ")), columns.contentWidth, "…")
 }
 
 func gpuTelemetry(gpu gpuInfo, showPowerLimit bool) string {
@@ -1445,6 +1552,43 @@ func gpuLoadStatus(utilization float64) (string, lipgloss.Style) {
 		return "HIGH", gpuHighStyle
 	default:
 		return "MAX", gpuMaxStyle
+	}
+}
+
+// Clock and temperature are shown as live health signals on the Compute page.
+// The bands are intentionally hardware-agnostic: they communicate idle,
+// warming, busy, and hot states without requiring a per-GPU clock database.
+func gpuClockStyle(clockMHz int) lipgloss.Style {
+	switch {
+	case clockMHz <= 500:
+		return gpuIdleStyle
+	case clockMHz <= 1000:
+		return gpuLightStyle
+	case clockMHz <= 1800:
+		return gpuActiveStyle
+	case clockMHz <= 2300:
+		return gpuBusyStyle
+	case clockMHz <= 2700:
+		return gpuHighStyle
+	default:
+		return gpuMaxStyle
+	}
+}
+
+func gpuTemperatureStyle(temperature int) lipgloss.Style {
+	switch {
+	case temperature <= 45:
+		return gpuIdleStyle
+	case temperature <= 60:
+		return gpuLightStyle
+	case temperature <= 72:
+		return gpuActiveStyle
+	case temperature <= 82:
+		return gpuBusyStyle
+	case temperature <= 90:
+		return gpuHighStyle
+	default:
+		return gpuMaxStyle
 	}
 }
 
@@ -1717,8 +1861,6 @@ func newDashboardLayoutForMetrics(width, height, gpuCount int, gpuUnavailable bo
 		gpuContentLines = -2
 	} else if gpuUnavailable {
 		gpuContentLines = 1
-	} else if compactGPU {
-		gpuContentLines = gpuCount * 3
 	} else {
 		gpuContentLines = gpuCount * 2
 	}

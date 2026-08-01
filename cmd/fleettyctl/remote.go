@@ -36,6 +36,7 @@ type targetPlan struct {
 	SSH         string   `json:"ssh"`
 	Role        string   `json:"role"`
 	Scope       string   `json:"scope"`
+	Arch        string   `json:"arch,omitempty"`
 	Action      string   `json:"action"`
 	Service     string   `json:"service"`
 	DesiredHash string   `json:"desired_hash"`
@@ -47,11 +48,12 @@ type targetPlan struct {
 }
 
 type targetApply struct {
-	Index  int             `json:"-"`
-	Name   string          `json:"name"`
-	Action string          `json:"action"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Index   int             `json:"-"`
+	Name    string          `json:"name"`
+	Action  string          `json:"action"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Message string          `json:"message,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 type remoteDeploymentLayout struct {
@@ -71,7 +73,7 @@ func planTargets(ctx context.Context, targets []resolvedTarget, parallel int, ru
 func planTarget(parent context.Context, target resolvedTarget, runner commandRunner) targetPlan {
 	plan := targetPlan{
 		Index: target.Index, Name: target.Name, SSH: target.SSH, Role: target.Role,
-		Scope:   targetScope(target),
+		Scope: targetScope(target), Arch: target.Arch,
 		Service: serviceForRole(target.Role), State: "unknown", Enabled: "unknown",
 	}
 	desiredHash, err := fileSHA256(target.Binary)

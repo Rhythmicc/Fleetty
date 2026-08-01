@@ -47,6 +47,81 @@ func TestLoadManifestResolvesTargets(t *testing.T) {
 	}
 }
 
+func TestLoadUpdateManifestBuildsAdjacentRelayTree(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "fleet-update.json")
+	manifest := `{
+  "version":1,
+  "release":{"cache_dir":"cache"},
+  "targets":[{
+    "name":"a100-login","ssh":"a100","role":"relay","arch":"amd64",
+    "children":[{
+      "name":"a100-compute","ssh":"a100","role":"node","scope":"system",
+      "become":"none","arch":"amd64"
+    }]
+  }]
+}`
+	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, targets, err := loadUpdateManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Role != "relay" || targets[0].SSH != "a100" ||
+		targets[0].Scope != "user" || targets[0].Become != "none" ||
+		len(targets[0].Children) != 1 || targets[0].Children[0].Name != "a100-compute" ||
+		targets[0].Children[0].SSH != "a100" {
+		t.Fatalf("unexpected relay tree: %#v", targets)
+	}
+	if _, _, err := loadManifest(path); err == nil || !strings.Contains(err.Error(), "relay role") {
+		t.Fatalf("normal apply accepted relay tree: %v", err)
+	}
+}
+
+func TestRelayTreeValidationRejectsUnsafeTopology(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name, target, expected string
+	}{
+		{
+			name: "nested arch required",
+			target: `{"name":"login","ssh":"login","role":"relay","arch":"amd64","children":[
+        {"name":"compute","ssh":"compute","role":"node"}]}`,
+			expected: "must declare arch",
+		},
+		{
+			name: "only relay has children",
+			target: `{"name":"node","ssh":"node","role":"node","arch":"amd64","children":[
+        {"name":"compute","ssh":"compute","role":"node","arch":"amd64"}]}`,
+			expected: "is not a relay",
+		},
+		{
+			name:     "relay needs child",
+			target:   `{"name":"login","ssh":"login","role":"relay","arch":"amd64"}`,
+			expected: "has no children",
+		},
+		{
+			name: "global duplicate name",
+			target: `{"name":"login","ssh":"login","role":"relay","arch":"amd64","children":[
+        {"name":"login","ssh":"compute","role":"node","arch":"amd64"}]}`,
+			expected: "duplicate target name",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(root, strings.ReplaceAll(test.name, " ", "-")+".json")
+			manifest := `{"version":1,"release":{"cache_dir":"cache"},"targets":[` + test.target + `]}`
+			if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := loadUpdateManifest(path); err == nil || !strings.Contains(err.Error(), test.expected) {
+				t.Fatalf("loadUpdateManifest() error = %v, want %q", err, test.expected)
+			}
+		})
+	}
+}
+
 func TestLoadManifestRejectsUnsafeOrUnknownValues(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(root, "fleetty")
