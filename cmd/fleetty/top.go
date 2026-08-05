@@ -53,13 +53,15 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 
 	admin := newAdminController()
 	cache := newSnapshotCache(newMetricsCollector(machine))
+	history := newHistoryStore(defaultHistoryPath())
+	cache.record = history.Record
 	account, _ := user.Current()
 	userName := "local"
 	if account != nil && account.Username != "" {
 		userName = account.Username
 	}
 	model := &monitorModel{
-		backend:     newLocalMonitorBackend(admin, cache, userName, "local-terminal"),
+		backend:     newLocalMonitorBackend(admin, cache, history, userName, "local-terminal"),
 		admin:       admin,
 		user:        userName,
 		remote:      "local-terminal",

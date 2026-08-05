@@ -55,7 +55,9 @@ func runServer() {
 	}
 	admin := newAdminController()
 	cache := newSnapshotCache(newMetricsCollector(machine))
-	rpc := newNodeRPCService(admin, cache)
+	history := newHistoryStore(defaultHistoryPath())
+	cache.record = history.Record
+	rpc := newNodeRPCService(admin, cache, history)
 	hub, err := loadHubConfig(os.Getenv("HUB_NODES_FILE"))
 	if err != nil {
 		log.Fatal("Could not load hub configuration", "error", err)
@@ -84,7 +86,7 @@ func runServer() {
 				if hubRuntime != nil {
 					return newHubModel(hubRuntime, sess, pty.Window.Width, pty.Window.Height), nil
 				}
-				return newMonitorModel(admin, cache, machine, sess, pty.Window.Width, pty.Window.Height), nil
+				return newMonitorModel(admin, cache, history, machine, sess, pty.Window.Width, pty.Window.Height), nil
 			}),
 			activeterm.Middleware(),
 			nodeRPCMiddleware(rpc),
@@ -154,6 +156,8 @@ type monitorModel struct {
 	cpuHistory        []float64
 	networkRXHistory  []float64
 	networkTXHistory  []float64
+	hourCPUHistory    []float64
+	hourHistoryAt     time.Time
 	colorMode         colorMode
 	slurmQueue        *nodeSlurmQueue
 	monitorPage       monitorPage
@@ -218,13 +222,20 @@ const (
 	screenLayout
 )
 
-func newMonitorModel(admin *adminController, cache *snapshotCache, machine machineConfig, sess ssh.Session, width, height int) *monitorModel {
+func newMonitorModel(
+	admin *adminController,
+	cache *snapshotCache,
+	history *historyStore,
+	machine machineConfig,
+	sess ssh.Session,
+	width, height int,
+) *monitorModel {
 	remote := "local"
 	if addr := sess.RemoteAddr(); addr != nil {
 		remote = addr.String()
 	}
 	return &monitorModel{
-		backend:   newLocalMonitorBackend(admin, cache, sess.User(), remote),
+		backend:   newLocalMonitorBackend(admin, cache, history, sess.User(), remote),
 		admin:     admin,
 		user:      sess.User(),
 		remote:    remote,
@@ -261,6 +272,11 @@ func tick() tea.Cmd {
 }
 
 type tickMsg struct{}
+
+type historyMsg struct {
+	history []historySample
+	err     error
+}
 type snapshotMsg struct {
 	snapshot monitorSnapshot
 	err      error
@@ -333,6 +349,27 @@ func (m *monitorModel) startCollect() tea.Cmd {
 	return m.collect()
 }
 
+// hourHistoryCmd refreshes the persisted one-hour trend at most once per
+// minute. The shared node history is cheap locally; remote sessions perform
+// one small RPC per minute instead of per second.
+func (m *monitorModel) hourHistoryCmd() tea.Cmd {
+	if m.backend == nil || time.Since(m.hourHistoryAt) < time.Minute {
+		return nil
+	}
+	return func() tea.Msg {
+		history, err := m.backend.History(60)
+		return historyMsg{history: history, err: err}
+	}
+}
+
+func hourCPUValues(samples []historySample) []float64 {
+	values := make([]float64, 0, len(samples))
+	for _, sample := range samples {
+		values = append(values, sample.CPUPercent)
+	}
+	return values
+}
+
 func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -352,6 +389,11 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clampProcessCursor()
 		m.clampMonitorProcessCursor(m.monitorRows)
+	case historyMsg:
+		if msg.err == nil && len(msg.history) > 0 {
+			m.hourCPUHistory = hourCPUValues(msg.history)
+		}
+		m.hourHistoryAt = time.Now()
 	case authenticationResultMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -372,7 +414,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tickMsg:
-		return m, tea.Batch(m.startCollect(), tick())
+		return m, tea.Batch(m.startCollect(), tick(), m.hourHistoryCmd())
 	case actionResultMsg:
 		m.busy = false
 		if msg.err != nil {

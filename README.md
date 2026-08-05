@@ -34,6 +34,7 @@ Fleetty 是一个面向个人电脑、计算服务器、存储节点和 Slurm �
 - 每个节点只维护一份采集器和最近快照缓存：多个 SSH 会话与 Hub RPC 共享同一轮采集，避免每个会话重复执行 `ps`、`nvidia-smi` 和 `nettop`；
 - Hub 到每个节点复用一条持久 SSH 连接，连接断开后会自动重连，不再每轮刷新都重新握手；
 - 主机级指标保持每秒刷新；进程表每 3 秒刷新；GPU compute-apps 与 macOS 进程流量归因每 5 秒刷新，界面始终显示最近一次成功结果。
+- 节点本地保留最近 7 天的分钟级历史（JSONL 追加写入，默认 `~/.config/fleetty/history.jsonl`，可用 `FLEETTY_HISTORY_FILE` 指定）；Overview 显示 1 小时 CPU 曲线，Hub 卡片显示节点的 1 小时 CPU 趋势，`fleetty snapshot --json` 的 `history` 字段可直接读取。
 
 普通监控界面可以过滤进程并查看只读详情，不需要管理密码或 root 权限。管理模式可以向当前服务账户有权管理的进程发送 `SIGTERM`，并重启 Fleetty；可选的最小权限助手可以额外授权跨用户终止进程和重启主机。所有管理请求均为固定的结构化操作，不执行用户提供的 shell 命令。危险操作需要再次确认，PID 1 和监控程序自身不能从界面终止。
 
@@ -755,6 +756,7 @@ user scope 的配置位于 `~/.config/fleetty`，systemd unit 位于 `~/.config/
 | `DEFAULT_THEME` | `dark` | 新连接的默认主题，可设为 `light` |
 | `MACHINE_CONFIG_FILE` | 空 | 节点角色、网卡、挂载点及服务检查 JSON 配置 |
 | `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
+| `FLEETTY_HISTORY_FILE` | 空 | 节点历史 JSONL 路径；默认位于 machine.json 同目录，否则 `~/.config/fleetty/history.jsonl` |
 | `ADMIN_PASSWORD_HASH` | 空 | bcrypt 管理密码哈希；为空时禁用管理模式 |
 | `FLEETTY_PRIVILEGED_SOCKET` | 空 | 可选的特权助手 Unix socket；通常为 `/run/fleetty/privileged.sock` |
 

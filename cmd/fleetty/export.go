@@ -28,8 +28,12 @@ func runSnapshotCommand(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := newSnapshotCache(newMetricsCollector(machine)).Get(*processes)
+	history := newHistoryStore(defaultHistoryPath())
+	cache := newSnapshotCache(newMetricsCollector(machine))
+	cache.record = history.Record
+	snapshot, err := cache.Get(*processes)
 	export := exportSnapshot(snapshot)
+	export.History = history.Recent(60)
 	if err != nil {
 		export.Warning = err.Error()
 	}
@@ -111,6 +115,7 @@ type snapshotExport struct {
 	PM2Processes        []pm2Export        `json:"pm2_processes,omitempty"`
 	GPUs                []gpuExport        `json:"gpus,omitempty"`
 	Processes           []processExport    `json:"processes,omitempty"`
+	History             []historySample    `json:"history,omitempty"`
 	Warning             string             `json:"warning,omitempty"`
 }
 

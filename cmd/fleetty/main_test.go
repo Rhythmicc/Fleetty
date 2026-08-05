@@ -154,7 +154,9 @@ func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
 		},
 	}
 	service := newNodeRPCService(
-		admin, newSnapshotCache(newMetricsCollector(machineConfig{Profile: machineProfileGPU})),
+		admin,
+		newSnapshotCache(newMetricsCollector(machineConfig{Profile: machineProfileGPU})),
+		nil,
 	)
 	service.backend.runManagement = func(context.Context, privilegedRequest) (string, error) {
 		return "ok", nil
@@ -2359,7 +2361,9 @@ func TestDashboardPanelOrderAndCollapseAffectRendering(t *testing.T) {
 
 func TestRPCProcessDetailsAreReadOnlyWithoutAuthentication(t *testing.T) {
 	admin := &adminController{password: "secret"}
-	service := newNodeRPCService(admin, newSnapshotCache(newMetricsCollector(machineConfig{})))
+	service := newNodeRPCService(
+		admin, newSnapshotCache(newMetricsCollector(machineConfig{})), nil,
+	)
 	detail := service.Handle(nodeRPCRequest{
 		Version: nodeRPCVersion, Operation: rpcProcessDetail, PID: -1,
 	})

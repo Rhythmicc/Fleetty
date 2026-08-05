@@ -20,6 +20,7 @@ type snapshotCache struct {
 	fullFn    func() (monitorSnapshot, error)
 	summaryFn func() (monitorSnapshot, error)
 	warmupFn  func() bool
+	record    func(monitorSnapshot)
 
 	mu          sync.Mutex
 	full        monitorSnapshot
@@ -67,6 +68,9 @@ func (c *snapshotCache) Get(includeProcesses bool) (monitorSnapshot, error) {
 	if warmup {
 		time.Sleep(120 * time.Millisecond)
 		snapshot, err = collect()
+	}
+	if c.record != nil {
+		c.record(snapshot)
 	}
 	if includeProcesses {
 		c.full, c.fullErr, c.haveFull, c.fullAt = snapshot, err, true, now

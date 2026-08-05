@@ -391,13 +391,18 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 	cpuState, cpuStateStyle := healthStatus(m.snapshot.CPUPercent)
 	memoryState, memoryStateStyle := healthStatus(memoryUsage)
 	diskState, diskStateStyle := capacityStatus(diskUsage)
+	cpuHistoryLine := sparkline(m.cpuHistory, 28, 100, cpuTitleStyle)
+	if width >= 56 && len(m.hourCPUHistory) >= 2 {
+		cpuHistoryLine += "  " + dimStyle.Render("1H") + " " +
+			sparkline(m.hourCPUHistory, 12, 100, cpuTitleStyle)
+	}
 	lines := []string{
 		fmt.Sprintf("%s  %s  %s  %s",
 			cpuTitleStyle.Render("CPU"),
 			valueStyle.Render(fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent)),
 			cpuStateStyle.Render(cpuState),
 			dimStyle.Render(truncate(m.snapshot.LoadAverage, 30))),
-		sparkline(m.cpuHistory, 28, 100, cpuTitleStyle),
+		cpuHistoryLine,
 		fmt.Sprintf("%s  %s  %s  %s",
 			memoryTitleStyle.Render("MEMORY"),
 			valueStyle.Render(fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal))),
@@ -426,15 +431,20 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 			dimStyle.Render("  (1m 5m 15m)")
 		loadGraphWidth := min(24, max(6,
 			contentWidth-lipgloss.Width(loadText)-lipgloss.Width(cpuModel)-4))
+		cpuLine := loadText + "  " + sparkline(m.cpuHistory, loadGraphWidth, 100, cpuTitleStyle)
+		if contentWidth >= 72 && len(m.hourCPUHistory) >= 2 {
+			graphWidth := max(6, loadGraphWidth-16)
+			cpuLine = loadText + "  " + sparkline(m.cpuHistory, graphWidth, 100, cpuTitleStyle) +
+				"  " + dimStyle.Render("1H") + " " +
+				sparkline(m.hourCPUHistory, 10, 100, cpuTitleStyle)
+		}
 		lines = []string{
 			alignedPageLine(
 				cpuTitleStyle.Render("CPU")+"  "+
 					valueStyle.Render(fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent))+"  "+
 					cpuStateStyle.Render(cpuState),
 				dimStyle.Render(cpuCount), contentWidth),
-			alignedPageLine(
-				loadText+"  "+sparkline(m.cpuHistory, loadGraphWidth, 100, cpuTitleStyle),
-				dimStyle.Render(cpuModel), contentWidth),
+			alignedPageLine(cpuLine, dimStyle.Render(cpuModel), contentWidth),
 			pageRule(contentWidth),
 			alignedPageLine(memoryTitleStyle.Render("MEMORY"),
 				dimStyle.Render(bytes(m.snapshot.MemoryUsed)+" used"), contentWidth),

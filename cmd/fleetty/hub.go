@@ -20,6 +20,8 @@ const (
 	defaultHubRefreshInterval = time.Second
 	hubCardHeight             = 7
 	hubOverviewRPCTimeout     = 900 * time.Millisecond
+	hubHistoryRPCTimeout      = 900 * time.Millisecond
+	hubHistoryRefreshInterval = time.Minute
 	hubOfflineRetryInitial    = 5 * time.Second
 	hubOfflineRetryMaximum    = 30 * time.Second
 )
@@ -189,6 +191,8 @@ func (c hubConfig) refreshInterval() time.Duration {
 
 type hubNodeState struct {
 	Snapshot            monitorSnapshot
+	History             []historySample
+	historyAt           time.Time
 	Error               string
 	Warning             string
 	Latency             time.Duration
@@ -277,7 +281,8 @@ func collectHubNodeStatesWithPrevious(nodes []hubNodeConfig, previous []hubNodeS
 		go func(index int) {
 			defer wait.Done()
 			started := time.Now()
-			response, err := sharedRPCClientRegistry.clientFor(nodes[index]).CallWithTimeout(
+			client := sharedRPCClientRegistry.clientFor(nodes[index])
+			response, err := client.CallWithTimeout(
 				nodeRPCRequest{Operation: rpcSnapshot},
 				hubOverviewRPCTimeout,
 			)
@@ -299,6 +304,19 @@ func collectHubNodeStatesWithPrevious(nodes []hubNodeConfig, previous []hubNodeS
 			state.LastSeen = checked
 			state.NextRetry = time.Time{}
 			state.ConsecutiveFailures = 0
+			if state.History == nil ||
+				checked.Sub(state.historyAt) >= hubHistoryRefreshInterval {
+				historyResponse, historyErr := client.CallWithTimeout(
+					nodeRPCRequest{Operation: rpcHistory, HistoryMinutes: 60},
+					hubHistoryRPCTimeout,
+				)
+				// History is a best-effort supplement to the live card; a
+				// failure keeps the previous curve and retries next minute.
+				if historyErr == nil {
+					state.History = historyResponse.History
+				}
+				state.historyAt = checked
+			}
 			states[index] = state
 		}(index)
 	}
@@ -984,6 +1002,14 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
 		gpuUtil, gpuMemoryUsed, gpuMemoryTotal, maxTemperature := hubGPUStats(snapshot.GPUs)
 		_, gpuStyle := gpuLoadStatus(gpuUtil)
+		loadVisual := bar(math.Max(snapshot.CPUPercent, gpuUtil), max(8, width-4))
+		if len(state.History) >= 2 {
+			history := make([]float64, 0, len(state.History))
+			for _, sample := range state.History {
+				history = append(history, sample.CPUPercent)
+			}
+			loadVisual = sparkline(history, max(8, width-4), 100, cpuTitleStyle)
+		}
 		content = []string{
 			fmt.Sprintf("%s %5.1f%%   %s %5.1f%%   %s %5.1f%%",
 				cpuTitleStyle.Render("CPU"), snapshot.CPUPercent,
@@ -995,7 +1021,7 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 				dimStyle.Render("VRAM"), bytes(gpuMemoryUsed), bytes(gpuMemoryTotal)),
 			gpuStyle.Render(fmt.Sprintf("MAX %3.0f%% · %d°C", gpuUtil, maxTemperature)) +
 				"  " + dimStyle.Render(fmt.Sprintf("↓%s/s ↑%s/s", bytes(snapshot.NetworkRX), bytes(snapshot.NetworkTX))),
-			bar(math.Max(snapshot.CPUPercent, gpuUtil), max(8, width-4)),
+			loadVisual,
 			dimStyle.Render("Enter or click to open live details"),
 		}
 		if state.Warning != "" {

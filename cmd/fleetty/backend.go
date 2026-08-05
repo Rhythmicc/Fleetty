@@ -15,6 +15,7 @@ import (
 // model with remoteMonitorBackend.
 type monitorBackend interface {
 	Collect() (monitorSnapshot, error)
+	History(minutes int) ([]historySample, error)
 	Authenticate(password string) (bool, error)
 	ProcessDetail(pid int, password string) (processDetail, error)
 	TerminateProcess(pid int, expectedStartTicks uint64, password string) error
@@ -23,6 +24,7 @@ type monitorBackend interface {
 
 type localMonitorBackend struct {
 	cache         *snapshotCache
+	history       *historyStore
 	admin         *adminController
 	privileged    *privilegedClient
 	runManagement func(context.Context, privilegedRequest) (string, error)
@@ -30,9 +32,15 @@ type localMonitorBackend struct {
 	remote        string
 }
 
-func newLocalMonitorBackend(admin *adminController, cache *snapshotCache, user, remote string) *localMonitorBackend {
+func newLocalMonitorBackend(
+	admin *adminController,
+	cache *snapshotCache,
+	history *historyStore,
+	user, remote string,
+) *localMonitorBackend {
 	return &localMonitorBackend{
 		cache:      cache,
+		history:    history,
 		admin:      admin,
 		privileged: newPrivilegedClient(privilegedSocketPath()),
 		user:       user,
@@ -42,6 +50,13 @@ func newLocalMonitorBackend(admin *adminController, cache *snapshotCache, user, 
 
 func (b *localMonitorBackend) Collect() (monitorSnapshot, error) {
 	return b.cache.Get(true)
+}
+
+func (b *localMonitorBackend) History(minutes int) ([]historySample, error) {
+	if b.history == nil {
+		return nil, errors.New("history persistence is disabled")
+	}
+	return b.history.Recent(minutes), nil
 }
 
 func (b *localMonitorBackend) Authenticate(password string) (bool, error) {
@@ -137,6 +152,16 @@ func (b *remoteMonitorBackend) Collect() (monitorSnapshot, error) {
 		return monitorSnapshot{}, err
 	}
 	return response.Snapshot, nil
+}
+
+func (b *remoteMonitorBackend) History(minutes int) ([]historySample, error) {
+	response, err := b.client.Call(nodeRPCRequest{
+		Operation: rpcHistory, HistoryMinutes: minutes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return response.History, nil
 }
 
 func (b *remoteMonitorBackend) Authenticate(password string) (bool, error) {

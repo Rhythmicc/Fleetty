@@ -23,6 +23,7 @@ type nodeRPCOperation string
 
 const (
 	rpcSnapshot         nodeRPCOperation = "snapshot"
+	rpcHistory          nodeRPCOperation = "history"
 	rpcAuthenticate     nodeRPCOperation = "authenticate"
 	rpcProcessDetail    nodeRPCOperation = "process_detail"
 	rpcTerminateProcess nodeRPCOperation = "terminate_process"
@@ -37,6 +38,7 @@ type nodeRPCRequest struct {
 	StartTimeTicks   uint64           `json:"start_time_ticks,omitempty"`
 	ActionID         int              `json:"action_id,omitempty"`
 	IncludeProcesses bool             `json:"include_processes,omitempty"`
+	HistoryMinutes   int              `json:"history_minutes,omitempty"`
 }
 
 type nodeRPCResponse struct {
@@ -47,19 +49,22 @@ type nodeRPCResponse struct {
 	Output        string          `json:"output,omitempty"`
 	Warning       string          `json:"warning,omitempty"`
 	Error         string          `json:"error,omitempty"`
+	History       []historySample `json:"history,omitempty"`
 }
 
 type nodeRPCService struct {
 	admin   *adminController
 	backend *localMonitorBackend
 	cache   *snapshotCache
+	history *historyStore
 }
 
-func newNodeRPCService(admin *adminController, cache *snapshotCache) *nodeRPCService {
+func newNodeRPCService(admin *adminController, cache *snapshotCache, history *historyStore) *nodeRPCService {
 	return &nodeRPCService{
 		admin:   admin,
-		backend: newLocalMonitorBackend(admin, cache, "hub", "node-rpc"),
+		backend: newLocalMonitorBackend(admin, cache, history, "hub", "node-rpc"),
 		cache:   cache,
+		history: history,
 	}
 }
 
@@ -76,6 +81,11 @@ func (s *nodeRPCService) Handle(request nodeRPCRequest) nodeRPCResponse {
 			response.Warning = err.Error()
 		}
 		return response
+	case rpcHistory:
+		if s.history == nil {
+			return nodeRPCResponse{Error: "history persistence is disabled"}
+		}
+		return nodeRPCResponse{History: s.history.Recent(request.HistoryMinutes)}
 	case rpcAuthenticate:
 		return nodeRPCResponse{Authorized: s.admin.authenticate(request.Password)}
 	case rpcProcessDetail:
