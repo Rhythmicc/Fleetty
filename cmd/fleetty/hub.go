@@ -577,6 +577,8 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.slurmView = false
 				m.status = "Server overview."
+			} else {
+				return m, tea.Quit
 			}
 		case "a", "A":
 			if m.slurmView {

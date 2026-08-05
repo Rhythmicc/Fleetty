@@ -523,11 +523,6 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	}
-	if key == "q" && m.screen == screenMonitor {
-		m.cancelStorageScan()
-		m.cancelStorageDuplicateScan()
-		return tea.Quit
-	}
 	themeKey := key == "T" || key == "t" &&
 		(m.screen == screenMonitor || m.screen == screenAdmin || m.screen == screenLayout)
 	if themeKey && m.screen != screenPassword && !(m.screen == screenAdmin && m.filtering) {
@@ -745,8 +740,20 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.monitorFocus = monitorFocusProcesses
 			m.filtering = true
 			m.status = "Type a process name, user, or PID."
-		case "backspace", "delete", "esc":
+		case "esc", "q":
 			if m.monitorPage == monitorPageStorage {
+				if m.storage != nil && m.storage.DuplicateMode {
+					return m.leaveStorageDuplicates()
+				}
+				if m.storage != nil && m.storage.Path != m.storage.Root {
+					return m.storageNavigateParent()
+				}
+			}
+			m.cancelStorageScan()
+			m.cancelStorageDuplicateScan()
+			return tea.Quit
+		case "backspace", "delete":
+			if m.monitorPage == monitorPageStorage && m.storage != nil {
 				if m.storage.DuplicateMode {
 					return m.leaveStorageDuplicates()
 				}
@@ -827,7 +834,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case screenConfirm:
 		switch key {
-		case "esc", "n":
+		case "esc", "q", "n":
 			m.screen, m.selectedAction, m.status = screenAdmin, nil, "Action cancelled."
 		case "y", "enter":
 			if m.selectedAction != nil && !m.busy {
@@ -856,7 +863,7 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case screenProcessTerminateConfirm:
 		switch key {
-		case "esc", "n":
+		case "esc", "q", "n":
 			m.screen, m.status = screenProcessDetail, "Process termination cancelled."
 		case "y", "enter":
 			if m.selectedProcess != nil && !m.busy {
