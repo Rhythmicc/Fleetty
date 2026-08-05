@@ -474,7 +474,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.detail != nil {
 		if key, ok := msg.(tea.KeyPressMsg); ok && m.detail.screen == screenMonitor {
-			if key.String() == "esc" || key.String() == "q" {
+			if key.String() == "esc" || key.String() == "q" || key.String() == "Q" {
 				m.colorMode = m.detail.colorMode
 				m.detail.adminCredential = ""
 				m.detail = nil
@@ -523,7 +523,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "q":
+		case "q", "Q":
 			if m.slurmView {
 				if m.slurmExplain {
 					m.slurmExplain = false
@@ -594,7 +594,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSlurmFilter(-1)
 				break
 			}
-			m.moveCursor(-1)
+			m.moveCursorHorizontal(-1)
 		case "right", "l":
 			if m.slurmView {
 				if m.slurmExplain {
@@ -603,19 +603,19 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSlurmFilter(1)
 				break
 			}
-			m.moveCursor(1)
+			m.moveCursorHorizontal(1)
 		case "up", "k":
 			if m.slurmView {
 				m.moveSlurmCursor(-1)
 				break
 			}
-			m.moveCursor(-m.columns())
+			m.moveCursorVertical(-1)
 		case "down", "j":
 			if m.slurmView {
 				m.moveSlurmCursor(1)
 				break
 			}
-			m.moveCursor(m.columns())
+			m.moveCursorVertical(1)
 		case "pgup":
 			if m.slurmView {
 				m.moveSlurmCursor(-max(1, m.height/2))
@@ -721,20 +721,118 @@ func (m *hubModel) nodeOrder() []int {
 	return order
 }
 
-func (m *hubModel) moveCursor(delta int) {
-	order := m.nodeOrder()
-	if len(order) == 0 {
-		return
-	}
-	position := 0
-	for index, nodeIndex := range order {
-		if nodeIndex == m.cursor {
-			position = index
-			break
+// pageNodeRows returns the node-bearing rows of one page, skipping group
+// titles, so cursor movement follows the visual card grid instead of the
+// flat grouped node list.
+func (m *hubModel) pageNodeRows(page hubPage) [][]int {
+	rows := make([][]int, 0, len(page.rows))
+	for _, row := range page.rows {
+		if len(row.nodes) > 0 {
+			rows = append(rows, row.nodes)
 		}
 	}
-	position = min(max(0, position+delta), len(order)-1)
-	m.cursor = order[position]
+	return rows
+}
+
+// cursorCell locates the cursor in the visual grid of the page that contains
+// it and returns that page index, row index, column index and node rows.
+func (m *hubModel) cursorCell() (int, int, int, [][]int) {
+	for pageIndex, page := range m.pages() {
+		rows := m.pageNodeRows(page)
+		for rowIndex, row := range rows {
+			for column, nodeIndex := range row {
+				if nodeIndex == m.cursor {
+					return pageIndex, rowIndex, column, rows
+				}
+			}
+		}
+	}
+	return 0, 0, 0, nil
+}
+
+func (m *hubModel) moveCursorVertical(delta int) {
+	pages := m.pages()
+	pageIndex, rowIndex, column, rows := m.cursorCell()
+	if len(rows) == 0 || len(pages) == 0 {
+		return
+	}
+	targetRow := rowIndex
+	targetColumn := column
+	if delta < 0 {
+		if rowIndex > 0 {
+			targetRow = rowIndex - 1
+		} else {
+			if pageIndex == 0 {
+				return
+			}
+			previousRows := m.pageNodeRows(pages[pageIndex-1])
+			if len(previousRows) == 0 {
+				return
+			}
+			rows, targetRow = previousRows, len(previousRows)-1
+		}
+	} else {
+		if rowIndex < len(rows)-1 {
+			targetRow = rowIndex + 1
+		} else {
+			if pageIndex == len(pages)-1 {
+				return
+			}
+			nextRows := m.pageNodeRows(pages[pageIndex+1])
+			if len(nextRows) == 0 {
+				return
+			}
+			rows, targetRow = nextRows, 0
+		}
+	}
+	if targetColumn >= len(rows[targetRow]) {
+		targetColumn = len(rows[targetRow]) - 1
+	}
+	m.cursor = rows[targetRow][targetColumn]
+	m.clampCursor()
+}
+
+func (m *hubModel) moveCursorHorizontal(delta int) {
+	pages := m.pages()
+	pageIndex, rowIndex, column, rows := m.cursorCell()
+	if len(rows) == 0 || len(pages) == 0 {
+		return
+	}
+	row := rows[rowIndex]
+	if delta < 0 {
+		switch {
+		case column > 0:
+			m.cursor = row[column-1]
+		case rowIndex > 0:
+			previous := rows[rowIndex-1]
+			m.cursor = previous[len(previous)-1]
+		case pageIndex > 0:
+			previousRows := m.pageNodeRows(pages[pageIndex-1])
+			if len(previousRows) == 0 {
+				return
+			}
+			last := previousRows[len(previousRows)-1]
+			m.cursor = last[len(last)-1]
+		default:
+			return
+		}
+	} else {
+		switch {
+		case column < len(row)-1:
+			m.cursor = row[column+1]
+		case rowIndex < len(rows)-1:
+			next := rows[rowIndex+1]
+			m.cursor = next[0]
+		case pageIndex < len(pages)-1:
+			nextRows := m.pageNodeRows(pages[pageIndex+1])
+			if len(nextRows) == 0 {
+				return
+			}
+			m.cursor = nextRows[0][0]
+		default:
+			return
+		}
+	}
 	m.clampCursor()
 }
 

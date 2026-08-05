@@ -297,11 +297,11 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	}
 
 	model.width, model.height, model.cursor = 140, 30, 0
-	model.moveCursor(1)
+	model.moveCursorHorizontal(1)
 	if model.cursor != 2 {
 		t.Fatalf("grouped right navigation selected config index %d, want 2", model.cursor)
 	}
-	model.moveCursor(1)
+	model.moveCursorHorizontal(1)
 	if model.cursor != 1 {
 		t.Fatalf("grouped navigation should enter NAS section at config index 1, got %d", model.cursor)
 	}
