@@ -212,6 +212,8 @@ type scriptedRemoteRunner struct {
 	home          string
 	architecture  string
 	relayOutput   string
+	doctorResult  string
+	metricsOutput string
 	commands      []string
 }
 
@@ -267,6 +269,12 @@ func (runner *scriptedRemoteRunner) Run(_ context.Context, name string, args []s
 		return []byte(runner.enabled + "\n"), errors.New("exit status 1")
 	case strings.Contains(remote, "'install' '--role'"):
 		return []byte(runner.installResult + "\n"), nil
+	case strings.Contains(remote, "'snapshot'"):
+		return []byte(runner.metricsOutput + "\n"), nil
+	case strings.Contains(remote, "'metrics' '--config'"):
+		return []byte(runner.metricsOutput + "\n"), nil
+	case strings.Contains(remote, "'doctor' '--role'"):
+		return []byte(runner.doctorResult + "\n"), nil
 	case strings.Contains(remote, "/fleettyctl'") && strings.Contains(remote, "'cascade'"):
 		if runner.relayOutput == "" {
 			return nil, errors.New("relay output is not configured")
@@ -293,4 +301,76 @@ func containsReason(reasons []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+func TestMetricsTargetsCollectsPrometheusText(t *testing.T) {
+	target := resolvedTarget{
+		Name: "gpu-1", SSH: "gpu-admin", Role: "node",
+		Become: "sudo", TimeoutSeconds: 5,
+	}
+	runner := &scriptedRemoteRunner{metricsOutput: "# HELP fleetty_cpu_percent CPU.\n" +
+		"# TYPE fleetty_cpu_percent gauge\n" +
+		"fleetty_cpu_percent{node=\"gpu-1\"} 42\n"}
+	results := metricsTargets(context.Background(), []resolvedTarget{target}, 1, runner, "")
+	if len(results) != 1 || results[0].Error != "" {
+		t.Fatalf("metricsTargets() = %#v", results)
+	}
+	if !strings.Contains(results[0].Message, "fleetty_cpu_percent{node=\"gpu-1\"} 42") {
+		t.Fatalf("metrics message = %q", results[0].Message)
+	}
+	commands := strings.Join(runner.Commands(), "\n")
+	if !strings.Contains(commands, "'sudo' '-n' '/opt/fleetty/fleetty' 'metrics' '--config' '/etc/fleetty/machine.json'") {
+		t.Fatalf("metrics command missing:\n%s", commands)
+	}
+}
+
+func TestStatusTargetsWithMetricsMergesSnapshot(t *testing.T) {
+	target := resolvedTarget{
+		Name: "gpu-1", SSH: "gpu-admin", Role: "node",
+		Become: "sudo", TimeoutSeconds: 5,
+	}
+	runner := &scriptedRemoteRunner{
+		doctorResult:  `{"role":"node","healthy":true}`,
+		metricsOutput: `{"node_name":"gpu-1","cpu_percent":12}`,
+	}
+	results := statusTargets(
+		context.Background(), []resolvedTarget{target}, 1, runner, true,
+	)
+	if len(results) != 1 || results[0].Error != "" {
+		t.Fatalf("statusTargets() = %#v", results)
+	}
+	var document struct {
+		Role    string `json:"role"`
+		Metrics struct {
+			NodeName   string  `json:"node_name"`
+			CPUPercent float64 `json:"cpu_percent"`
+		} `json:"metrics"`
+	}
+	if err := json.Unmarshal(results[0].Result, &document); err != nil {
+		t.Fatalf("merged status is not JSON: %v\n%s", err, results[0].Result)
+	}
+	if document.Role != "node" || document.Metrics.NodeName != "gpu-1" ||
+		document.Metrics.CPUPercent != 12 {
+		t.Fatalf("merged status = %#v", document)
+	}
+	commands := strings.Join(runner.Commands(), "\n")
+	if !strings.Contains(commands, "'/opt/fleetty/fleetty' 'snapshot' '--config' '/etc/fleetty/machine.json' '--json'") {
+		t.Fatalf("snapshot command missing:\n%s", commands)
+	}
+}
+
+func TestMetricsTargetsFilterSelectsOneTarget(t *testing.T) {
+	targets := []resolvedTarget{
+		{Name: "gpu-1", SSH: "gpu-admin", Role: "node", TimeoutSeconds: 5},
+		{Name: "storage-1", SSH: "storage-admin", Role: "node", TimeoutSeconds: 5},
+	}
+	runner := &scriptedRemoteRunner{metricsOutput: "# HELP x x\n# TYPE x gauge\nx 1\n"}
+	results := metricsTargets(context.Background(), targets, 1, runner, "storage-1")
+	if len(results) != 1 || results[0].Name != "storage-1" || results[0].Error != "" {
+		t.Fatalf("filtered metricsTargets() = %#v", results)
+	}
+	results = metricsTargets(context.Background(), targets, 1, runner, "missing")
+	if len(results) != 1 || results[0].Error == "" {
+		t.Fatalf("missing target should fail: %#v", results)
+	}
 }

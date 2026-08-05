@@ -258,6 +258,15 @@ fleettyctl apply --file fleet.json --yes
 fleettyctl status --file fleet.json
 ```
 
+`fleettyctl status --json` 除部署状态外，还会在每台目标上读取一次实时指标快照并合并到 `metrics` 字段，便于脚本和外部监控系统消费。需要完整 Prometheus 文本时使用：
+
+```bash
+fleettyctl metrics --file fleet.json
+fleettyctl metrics --file fleet.json --target gpu-1
+```
+
+`metrics` 复用 manifest 中每台目标的 SSH 通道在远端执行 `fleetty metrics`，不开放额外端口，也不需要节点 RPC 密钥。输出包含 CPU、内存、磁盘、网络、GPU、挂载点、服务健康以及 Docker/PM2 计数，`--json` 模式返回按目标划分的可机读结果。节点本机也可以直接调用 `fleetty snapshot --json`（可选 `--processes`）或 `fleetty metrics --config machine.json`，例如配合 node_exporter 的 textfile collector 使用。
+
 示例：
 
 ```json

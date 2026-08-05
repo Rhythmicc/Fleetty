@@ -137,6 +137,10 @@ func runOperations(args []string, stdout, stderr io.Writer) (bool, error) {
 		return true, runInstallCommand(args[1:], stdout, stderr)
 	case "doctor":
 		return true, runDoctorCommand(args[1:], stdout, stderr)
+	case "snapshot":
+		return true, runSnapshotCommand(args[1:], stdout, stderr)
+	case "metrics":
+		return true, runMetricsCommand(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		writeOperationsUsage(stdout)
 		return true, nil
@@ -156,6 +160,8 @@ Usage:
   fleetty privileged-helper [--socket PATH] [--group NAME] [--service fleetty.service]
   fleetty install --role node|hub|privileged-helper [--scope auto|user|system] [--config-dir PATH] [--json]
   fleetty doctor --role node|hub|privileged-helper [--scope auto|user|system] [--json]
+  fleetty snapshot [--config PATH] [--processes]
+  fleetty metrics [--config PATH]
   fleetty version [--json]`)
 }
 

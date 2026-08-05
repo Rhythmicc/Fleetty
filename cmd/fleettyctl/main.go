@@ -46,6 +46,7 @@ func run(args []string, stdout, stderr io.Writer, runner commandRunner) error {
 	manifestPath := flags.String("file", "fleet.json", "fleet manifest path")
 	asJSON := flags.Bool("json", false, "write machine-readable JSON")
 	yes := flags.Bool("yes", false, "confirm changes without prompting")
+	targetFilter := flags.String("target", "", "only operate on this target (metrics)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -202,9 +203,25 @@ func run(args []string, stdout, stderr io.Writer, runner commandRunner) error {
 		}
 		return nil
 	case "status":
-		results := statusTargets(context.Background(), targets, manifest.Parallel, runner)
+		results := statusTargets(context.Background(), targets, manifest.Parallel, runner, *asJSON)
 		if err := writeApplyResults(stdout, results, *asJSON); err != nil {
 			return err
+		}
+		if !appliesHealthy(results) {
+			return errOperationFailed
+		}
+		return nil
+	case "metrics":
+		results := metricsTargets(context.Background(), targets, manifest.Parallel, runner, *targetFilter)
+		if *asJSON {
+			return json.NewEncoder(stdout).Encode(results)
+		}
+		for _, result := range results {
+			if result.Error != "" {
+				fmt.Fprintf(stdout, "# ERROR %s: %s\n", result.Name, result.Error)
+				continue
+			}
+			fmt.Fprintf(stdout, "# fleetty target: %s\n%s", result.Name, result.Message)
 		}
 		if !appliesHealthy(results) {
 			return errOperationFailed
@@ -224,6 +241,7 @@ Usage:
   fleettyctl plan     --file fleet.json [--json]
   fleettyctl apply    --file fleet.json --yes [--json]
   fleettyctl status   --file fleet.json [--json]
+  fleettyctl metrics  --file fleet.json [--target NAME] [--json]
   fleettyctl update   --file fleet-update.json [--yes] [--json]
   fleettyctl cascade  --file cascade.json [--yes] [--json]
   fleettyctl version [--json]`)

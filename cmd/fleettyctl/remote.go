@@ -305,7 +305,13 @@ func applyTarget(parent context.Context, target resolvedTarget, runner commandRu
 	return result
 }
 
-func statusTargets(ctx context.Context, targets []resolvedTarget, parallel int, runner commandRunner) []targetApply {
+func statusTargets(
+	ctx context.Context,
+	targets []resolvedTarget,
+	parallel int,
+	runner commandRunner,
+	withMetrics bool,
+) []targetApply {
 	results := make([]targetApply, len(targets))
 	runParallel(len(targets), parallel, func(index int) {
 		target := targets[index]
@@ -329,7 +335,22 @@ func statusTargets(ctx context.Context, targets []resolvedTarget, parallel int, 
 		}
 		output, err := runSSH(targetCtx, runner, target, arguments...)
 		if json.Valid(output) {
-			result.Result = append(result.Result, output...)
+			if withMetrics && err == nil {
+				metricsOutput, metricsErr := runRemoteExportCommand(targetCtx, runner, target, layout, "snapshot", "--json")
+				if metricsErr == nil {
+					var document map[string]any
+					if json.Unmarshal(output, &document) == nil {
+						document["metrics"] = json.RawMessage(metricsOutput)
+						if merged, mergeErr := json.Marshal(document); mergeErr == nil {
+							result.Result = append(result.Result, merged...)
+							output = nil
+						}
+					}
+				}
+			}
+			if output != nil {
+				result.Result = append(result.Result, output...)
+			}
 		}
 		if err != nil {
 			result.Action = "error"
@@ -338,6 +359,71 @@ func statusTargets(ctx context.Context, targets []resolvedTarget, parallel int, 
 		results[index] = result
 	})
 	return results
+}
+
+func metricsTargets(
+	ctx context.Context,
+	targets []resolvedTarget,
+	parallel int,
+	runner commandRunner,
+	only string,
+) []targetApply {
+	selected := targets
+	if only != "" {
+		selected = nil
+		for _, target := range targets {
+			if target.Name == only {
+				selected = append(selected, target)
+			}
+		}
+		if len(selected) == 0 {
+			return []targetApply{{
+				Name: only, Action: "metrics",
+				Error: fmt.Sprintf("no target matches %q", only),
+			}}
+		}
+	}
+	results := make([]targetApply, len(selected))
+	runParallel(len(selected), parallel, func(index int) {
+		target := selected[index]
+		result := targetApply{Index: target.Index, Name: target.Name, Action: "metrics"}
+		operationTimeout := time.Duration(max(target.TimeoutSeconds*3, 30)) * time.Second
+		targetCtx, cancel := context.WithTimeout(ctx, operationTimeout)
+		defer cancel()
+		layout, layoutErr := resolveRemoteLayout(targetCtx, runner, target)
+		if layoutErr != nil {
+			result.Error = layoutErr.Error()
+			results[index] = result
+			return
+		}
+		output, err := runRemoteExportCommand(targetCtx, runner, target, layout, "metrics")
+		if err != nil {
+			result.Error = remoteFailure("run Fleetty metrics", output, err).Error()
+		} else {
+			result.Message = safeRemoteMetrics(string(output), 64*1024)
+		}
+		results[index] = result
+	})
+	return results
+}
+
+func runRemoteExportCommand(
+	ctx context.Context,
+	runner commandRunner,
+	target resolvedTarget,
+	layout remoteDeploymentLayout,
+	command string,
+	extra ...string,
+) ([]byte, error) {
+	arguments := []string{
+		layout.BinaryPath, command,
+		"--config", filepath.Join(layout.ConfigPath, "machine.json"),
+	}
+	arguments = append(arguments, extra...)
+	if target.Become == "sudo" {
+		arguments = append([]string{"sudo", "-n"}, arguments...)
+	}
+	return runSSH(ctx, runner, target, arguments...)
 }
 
 func runParallel(count, parallel int, operation func(int)) {
@@ -509,6 +595,25 @@ func safeRemoteText(value string, maximum int) string {
 	runes := []rune(value)
 	if maximum > 0 && len(runes) > maximum {
 		return string(runes[:maximum-1]) + "…"
+	}
+	return value
+}
+
+// safeRemoteMetrics sanitizes Prometheus text output without collapsing the
+// newlines that separate metric families.
+func safeRemoteMetrics(value string, maximum int) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	value = strings.Map(func(character rune) rune {
+		if character == '\n' || character == '\t' ||
+			character >= 0x20 && character < 0x7f ||
+			character >= 0xa0 {
+			return character
+		}
+		return ' '
+	}, value)
+	if maximum > 0 && len(value) > maximum {
+		value = value[:maximum]
 	}
 	return value
 }
