@@ -52,13 +52,14 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 	panelLayout, layoutErr := loadPanelLayout(layoutPath)
 
 	admin := newAdminController()
+	cache := newSnapshotCache(newMetricsCollector(machine))
 	account, _ := user.Current()
 	userName := "local"
 	if account != nil && account.Username != "" {
 		userName = account.Username
 	}
 	model := &monitorModel{
-		backend:     newLocalMonitorBackend(admin, machine, userName, "local-terminal"),
+		backend:     newLocalMonitorBackend(admin, cache, userName, "local-terminal"),
 		admin:       admin,
 		user:        userName,
 		remote:      "local-terminal",

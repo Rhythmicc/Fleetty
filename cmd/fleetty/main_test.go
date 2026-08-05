@@ -153,7 +153,9 @@ func TestNodeRPCAuthenticatesEveryManagementRequest(t *testing.T) {
 			{ID: 0, label: "Safe test action", operation: managementRestartService, target: "fleetty.service"},
 		},
 	}
-	service := newNodeRPCService(admin, machineConfig{Profile: machineProfileGPU})
+	service := newNodeRPCService(
+		admin, newSnapshotCache(newMetricsCollector(machineConfig{Profile: machineProfileGPU})),
+	)
 	service.backend.runManagement = func(context.Context, privilegedRequest) (string, error) {
 		return "ok", nil
 	}
@@ -2357,7 +2359,7 @@ func TestDashboardPanelOrderAndCollapseAffectRendering(t *testing.T) {
 
 func TestRPCProcessDetailsAreReadOnlyWithoutAuthentication(t *testing.T) {
 	admin := &adminController{password: "secret"}
-	service := newNodeRPCService(admin, machineConfig{})
+	service := newNodeRPCService(admin, newSnapshotCache(newMetricsCollector(machineConfig{})))
 	detail := service.Handle(nodeRPCRequest{
 		Version: nodeRPCVersion, Operation: rpcProcessDetail, PID: -1,
 	})

@@ -54,7 +54,8 @@ func runServer() {
 		log.Fatal("Could not load machine configuration", "error", err)
 	}
 	admin := newAdminController()
-	rpc := newNodeRPCService(admin, machine)
+	cache := newSnapshotCache(newMetricsCollector(machine))
+	rpc := newNodeRPCService(admin, cache)
 	hub, err := loadHubConfig(os.Getenv("HUB_NODES_FILE"))
 	if err != nil {
 		log.Fatal("Could not load hub configuration", "error", err)
@@ -83,7 +84,7 @@ func runServer() {
 				if hubRuntime != nil {
 					return newHubModel(hubRuntime, sess, pty.Window.Width, pty.Window.Height), nil
 				}
-				return newMonitorModel(admin, machine, sess, pty.Window.Width, pty.Window.Height), nil
+				return newMonitorModel(admin, cache, machine, sess, pty.Window.Width, pty.Window.Height), nil
 			}),
 			activeterm.Middleware(),
 			nodeRPCMiddleware(rpc),
@@ -217,13 +218,13 @@ const (
 	screenLayout
 )
 
-func newMonitorModel(admin *adminController, machine machineConfig, sess ssh.Session, width, height int) *monitorModel {
+func newMonitorModel(admin *adminController, cache *snapshotCache, machine machineConfig, sess ssh.Session, width, height int) *monitorModel {
 	remote := "local"
 	if addr := sess.RemoteAddr(); addr != nil {
 		remote = addr.String()
 	}
 	return &monitorModel{
-		backend:   newLocalMonitorBackend(admin, machine, sess.User(), remote),
+		backend:   newLocalMonitorBackend(admin, cache, sess.User(), remote),
 		admin:     admin,
 		user:      sess.User(),
 		remote:    remote,
@@ -2291,22 +2292,30 @@ type processDetail struct {
 type cpuCounters struct{ total, idle uint64 }
 
 type metricsCollector struct {
-	config             machineConfig
-	identity           systemIdentity
-	previousCPU        cpuCounters
-	previousNet        netCounters
-	previousInterfaces map[string]networkDeviceCounters
-	previousProcessNet map[int]processNetworkCounters
-	haveCPU            bool
-	haveNet            bool
-	lastNetAt          time.Time
-	lastProcessNetAt   time.Time
-	lastServiceAt      time.Time
-	cachedServices     []serviceHealth
-	cachedContainers   []containerInfo
-	cachedDockerError  string
-	cachedPM2Processes []pm2ProcessInfo
-	cachedPM2Error     string
+	config                     machineConfig
+	identity                   systemIdentity
+	previousCPU                cpuCounters
+	previousNet                netCounters
+	previousInterfaces         map[string]networkDeviceCounters
+	previousProcessNet         map[int]processNetworkCounters
+	haveCPU                    bool
+	haveNet                    bool
+	lastNetAt                  time.Time
+	lastProcessNetAt           time.Time
+	lastServiceAt              time.Time
+	cachedServices             []serviceHealth
+	cachedContainers           []containerInfo
+	cachedDockerError          string
+	cachedPM2Processes         []pm2ProcessInfo
+	cachedPM2Error             string
+	processRefreshInterval     time.Duration
+	gpuWorkloadRefreshInterval time.Duration
+	processNetRefreshInterval  time.Duration
+	lastProcessesAt            time.Time
+	cachedProcesses            []processInfo
+	lastGPUWorkloadsAt         time.Time
+	cachedGPUWorkloads         map[string][]gpuWorkloadInfo
+	cachedNetworkProcesses     []processNetworkInfo
 }
 
 type netCounters struct{ rx, tx uint64 }
@@ -2320,11 +2329,18 @@ func counterDelta(current, previous uint64) uint64 {
 
 func newMetricsCollector(config machineConfig) *metricsCollector {
 	return &metricsCollector{
-		config:             config,
-		identity:           readSystemIdentity(),
-		previousInterfaces: make(map[string]networkDeviceCounters),
-		previousProcessNet: make(map[int]processNetworkCounters),
+		config:                     config,
+		identity:                   readSystemIdentity(),
+		previousInterfaces:         make(map[string]networkDeviceCounters),
+		previousProcessNet:         make(map[int]processNetworkCounters),
+		processRefreshInterval:     3 * time.Second,
+		gpuWorkloadRefreshInterval: 5 * time.Second,
+		processNetRefreshInterval:  5 * time.Second,
 	}
+}
+
+func (c *metricsCollector) needsWarmup() bool {
+	return !c.haveCPU || !c.haveNet
 }
 
 func (c *metricsCollector) collect() (monitorSnapshot, error) {
@@ -2385,16 +2401,12 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 		s.Battery, _ = readDarwinBattery()
 		s.GPUs, _ = readDarwinAppleGPU()
 	} else if c.config.Profile == machineProfileGPU {
-		s.GPUs, s.GPUError = readGPUs()
+		s.GPUs, s.GPUError = c.collectGPUs()
 	}
 	c.collectMachineDetails(&s)
 	if includeProcesses {
-		if processes, err := readProcesses(); err != nil {
-			errs = append(errs, "processes: "+err.Error())
-		} else {
-			s.Processes = processes
-			attachGPUWorkloadUsers(s.GPUs, processes)
-		}
+		c.collectProcesses(&s, &errs)
+		attachGPUWorkloadUsers(s.GPUs, s.Processes)
 	}
 	if len(errs) > 0 {
 		return s, errors.New(strings.Join(errs, "; "))
@@ -2505,7 +2517,9 @@ func readLoadAverage() string {
 	return "load " + strings.Join(fields[:3], " · ")
 }
 
-func readGPUs() ([]gpuInfo, string) {
+// collectGPUs refreshes the per-GPU summary on every cycle and reuses the
+// heavier compute-apps attribution until gpuWorkloadRefreshInterval elapses.
+func (c *metricsCollector) collectGPUs() ([]gpuInfo, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw,power.limit,driver_version", "--format=csv,noheader,nounits").Output()
@@ -2513,19 +2527,54 @@ func readGPUs() ([]gpuInfo, string) {
 		return nil, compactCommandError(err)
 	}
 	gpus := parseGPUs(output)
+	c.attachGPUWorkloads(gpus)
+	return gpus, ""
+}
+
+func (c *metricsCollector) attachGPUWorkloads(gpus []gpuInfo) {
+	due := c.lastGPUWorkloadsAt.IsZero() ||
+		time.Since(c.lastGPUWorkloadsAt) >= c.gpuWorkloadRefreshInterval
+	if !due {
+		for index := range gpus {
+			gpus[index].Workloads = append(
+				[]gpuWorkloadInfo(nil), c.cachedGPUWorkloads[gpus[index].UUID]...,
+			)
+		}
+		return
+	}
 	workloadCtx, workloadCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer workloadCancel()
-	if workloadOutput, workloadErr := exec.CommandContext(
+	workloadOutput, workloadErr := exec.CommandContext(
 		workloadCtx, "nvidia-smi",
 		"--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
 		"--format=csv,noheader,nounits",
-	).Output(); workloadErr == nil {
+	).Output()
+	if workloadErr == nil {
 		workloads := parseGPUWorkloads(workloadOutput)
-		for index := range gpus {
-			gpus[index].Workloads = workloads[gpus[index].UUID]
+		c.cachedGPUWorkloads = workloads
+	}
+	c.lastGPUWorkloadsAt = time.Now()
+	for index := range gpus {
+		gpus[index].Workloads = append(
+			[]gpuWorkloadInfo(nil), c.cachedGPUWorkloads[gpus[index].UUID]...,
+		)
+	}
+}
+
+// collectProcesses refreshes the full process table at a lower cadence than
+// the host metrics and reuses the last successful table in between.
+func (c *metricsCollector) collectProcesses(snapshot *monitorSnapshot, errs *[]string) {
+	if c.lastProcessesAt.IsZero() ||
+		time.Since(c.lastProcessesAt) >= c.processRefreshInterval {
+		processes, err := readProcesses()
+		if err != nil {
+			*errs = append(*errs, "processes: "+err.Error())
+		} else {
+			c.cachedProcesses = processes
+			c.lastProcessesAt = time.Now()
 		}
 	}
-	return gpus, ""
+	snapshot.Processes = append([]processInfo(nil), c.cachedProcesses...)
 }
 
 func parseGPUs(output []byte) []gpuInfo {

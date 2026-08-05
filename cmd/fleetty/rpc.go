@@ -1,15 +1,12 @@
 package main
 
 import (
-	bytebuf "bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"charm.land/wish/v2"
@@ -53,15 +50,16 @@ type nodeRPCResponse struct {
 }
 
 type nodeRPCService struct {
-	admin     *adminController
-	backend   *localMonitorBackend
-	collectMu sync.Mutex
+	admin   *adminController
+	backend *localMonitorBackend
+	cache   *snapshotCache
 }
 
-func newNodeRPCService(admin *adminController, machine machineConfig) *nodeRPCService {
+func newNodeRPCService(admin *adminController, cache *snapshotCache) *nodeRPCService {
 	return &nodeRPCService{
 		admin:   admin,
-		backend: newLocalMonitorBackend(admin, machine, "hub", "node-rpc"),
+		backend: newLocalMonitorBackend(admin, cache, "hub", "node-rpc"),
+		cache:   cache,
 	}
 }
 
@@ -71,21 +69,8 @@ func (s *nodeRPCService) Handle(request nodeRPCRequest) nodeRPCResponse {
 	}
 	switch request.Operation {
 	case rpcSnapshot:
-		s.collectMu.Lock()
-		needsWarmup := !s.backend.collector.haveCPU || !s.backend.collector.haveNet
-		collect := s.backend.collector.collectSummary
-		if request.IncludeProcesses {
-			collect = s.backend.collector.collect
-		}
-		snapshot, err := collect()
-		// The first CPU/network sample establishes counters. Take a second
-		// sample so the first Hub card does not misleadingly report zero.
-		if needsWarmup {
-			time.Sleep(120 * time.Millisecond)
-			snapshot, err = collect()
-		}
+		snapshot, err := s.cache.Get(request.IncludeProcesses)
 		snapshot.ManagementActions = s.admin.actionInfo()
-		s.collectMu.Unlock()
 		response := nodeRPCResponse{Snapshot: snapshot}
 		if err != nil {
 			response.Warning = err.Error()
@@ -154,10 +139,11 @@ func nodeRPCMiddleware(service *nodeRPCService) wish.Middleware {
 
 type nodeRPCClient struct {
 	node hubNodeConfig
+	pool *rpcClientPool
 }
 
 func newNodeRPCClient(node hubNodeConfig) *nodeRPCClient {
-	return &nodeRPCClient{node: node}
+	return &nodeRPCClient{node: node, pool: newRPCPool(node)}
 }
 
 func (c *nodeRPCClient) Call(request nodeRPCRequest) (nodeRPCResponse, error) {
@@ -168,87 +154,7 @@ func (c *nodeRPCClient) CallWithTimeout(request nodeRPCRequest, timeout time.Dur
 	request.Version = nodeRPCVersion
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return c.call(ctx, request)
-}
-
-func (c *nodeRPCClient) call(ctx context.Context, request nodeRPCRequest) (nodeRPCResponse, error) {
-	address := normalizeNodeAddress(c.node.Address)
-	hostKeyCallback, err := c.hostKeyCallback()
-	if err != nil {
-		return nodeRPCResponse{}, err
-	}
-	auth, err := c.authMethods()
-	if err != nil {
-		return nodeRPCResponse{}, err
-	}
-	config := &gossh.ClientConfig{
-		User:            nodeRPCUser,
-		Auth:            auth,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         5 * time.Second,
-	}
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	connection, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return nodeRPCResponse{}, fmt.Errorf("connect %s: %w", c.node.Name, err)
-	}
-	defer connection.Close()
-	deadline := time.Now().Add(20 * time.Second)
-	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
-		deadline = contextDeadline
-	}
-	_ = connection.SetDeadline(deadline)
-
-	clientConnection, channels, requests, err := gossh.NewClientConn(connection, address, config)
-	if err != nil {
-		return nodeRPCResponse{}, fmt.Errorf("SSH handshake %s: %w", c.node.Name, err)
-	}
-	client := gossh.NewClient(clientConnection, channels, requests)
-	defer client.Close()
-	session, err := client.NewSession()
-	if err != nil {
-		return nodeRPCResponse{}, fmt.Errorf("open RPC session %s: %w", c.node.Name, err)
-	}
-	defer session.Close()
-
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return nodeRPCResponse{}, err
-	}
-	session.Stdin = bytebuf.NewReader(payload)
-	output, err := session.Output(nodeRPCCommand)
-	if err != nil {
-		return nodeRPCResponse{}, fmt.Errorf("RPC %s: %w", c.node.Name, err)
-	}
-	var response nodeRPCResponse
-	if err := json.Unmarshal(output, &response); err != nil {
-		return nodeRPCResponse{}, fmt.Errorf("decode RPC response from %s: %w", c.node.Name, err)
-	}
-	if response.Version != nodeRPCVersion {
-		return nodeRPCResponse{}, fmt.Errorf("node %s uses incompatible RPC version %d", c.node.Name, response.Version)
-	}
-	if response.Error != "" {
-		return response, errors.New(response.Error)
-	}
-	return response, nil
-}
-
-func (c *nodeRPCClient) hostKeyCallback() (gossh.HostKeyCallback, error) {
-	return fixedHostKeyCallback(c.node.Name, c.node.HostKey, c.node.InsecureSkipHostKey)
-}
-
-func (c *nodeRPCClient) authMethods() ([]gossh.AuthMethod, error) {
-	if c.node.IdentityFile == "" {
-		if c.node.AllowUnauthenticated {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("node %s has no RPC identity_file", c.node.Name)
-	}
-	signer, err := loadPrivateKeySigner(c.node.IdentityFile)
-	if err != nil {
-		return nil, fmt.Errorf("load RPC identity for %s: %w", c.node.Name, err)
-	}
-	return []gossh.AuthMethod{gossh.PublicKeys(signer)}, nil
+	return c.pool.call(ctx, request)
 }
 
 func fixedHostKeyCallback(name, fingerprint string, insecure bool) (gossh.HostKeyCallback, error) {

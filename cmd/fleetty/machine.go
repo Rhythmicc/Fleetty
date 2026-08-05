@@ -170,6 +170,13 @@ func (c *metricsCollector) collectProcessNetwork(snapshot *monitorSnapshot) {
 		snapshot.NetworkProcessError = "Per-process traffic attribution is not available from the host OS."
 		return
 	}
+	if !c.lastProcessNetAt.IsZero() &&
+		time.Since(c.lastProcessNetAt) < c.processNetRefreshInterval {
+		snapshot.NetworkProcesses = append(
+			[]processNetworkInfo(nil), c.cachedNetworkProcesses...,
+		)
+		return
+	}
 	current, err := readDarwinProcessNetwork()
 	if err != nil {
 		snapshot.NetworkProcessError = err.Error()
@@ -210,6 +217,7 @@ func (c *metricsCollector) collectProcessNetwork(snapshot *monitorSnapshot) {
 		processes = processes[:snapshotLimit]
 	}
 	snapshot.NetworkProcesses = processes
+	c.cachedNetworkProcesses = append([]processNetworkInfo(nil), processes...)
 	c.previousProcessNet = current
 	c.lastProcessNetAt = now
 }

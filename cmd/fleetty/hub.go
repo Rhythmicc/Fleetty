@@ -277,7 +277,7 @@ func collectHubNodeStatesWithPrevious(nodes []hubNodeConfig, previous []hubNodeS
 		go func(index int) {
 			defer wait.Done()
 			started := time.Now()
-			response, err := newNodeRPCClient(nodes[index]).CallWithTimeout(
+			response, err := sharedRPCClientRegistry.clientFor(nodes[index]).CallWithTimeout(
 				nodeRPCRequest{Operation: rpcSnapshot},
 				hubOverviewRPCTimeout,
 			)

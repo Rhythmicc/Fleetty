@@ -22,7 +22,7 @@ type monitorBackend interface {
 }
 
 type localMonitorBackend struct {
-	collector     *metricsCollector
+	cache         *snapshotCache
 	admin         *adminController
 	privileged    *privilegedClient
 	runManagement func(context.Context, privilegedRequest) (string, error)
@@ -30,9 +30,9 @@ type localMonitorBackend struct {
 	remote        string
 }
 
-func newLocalMonitorBackend(admin *adminController, machine machineConfig, user, remote string) *localMonitorBackend {
+func newLocalMonitorBackend(admin *adminController, cache *snapshotCache, user, remote string) *localMonitorBackend {
 	return &localMonitorBackend{
-		collector:  newMetricsCollector(machine),
+		cache:      cache,
 		admin:      admin,
 		privileged: newPrivilegedClient(privilegedSocketPath()),
 		user:       user,
@@ -41,7 +41,7 @@ func newLocalMonitorBackend(admin *adminController, machine machineConfig, user,
 }
 
 func (b *localMonitorBackend) Collect() (monitorSnapshot, error) {
-	return b.collector.collect()
+	return b.cache.Get(true)
 }
 
 func (b *localMonitorBackend) Authenticate(password string) (bool, error) {
@@ -128,7 +128,7 @@ type remoteMonitorBackend struct {
 }
 
 func newRemoteMonitorBackend(node hubNodeConfig) *remoteMonitorBackend {
-	return &remoteMonitorBackend{client: newNodeRPCClient(node)}
+	return &remoteMonitorBackend{client: sharedRPCClientRegistry.clientFor(node)}
 }
 
 func (b *remoteMonitorBackend) Collect() (monitorSnapshot, error) {
