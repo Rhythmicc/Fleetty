@@ -109,7 +109,33 @@ func resolveDeploymentLayout(scope string) (deploymentLayout, error) {
 }
 
 func runOperations(args []string, stdout, stderr io.Writer) (bool, error) {
-	if len(args) == 0 || args[0] == "serve" {
+	return runOperationsWithInput(args, os.Stdin, stdout, stderr)
+}
+
+func runOperationsWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) (bool, error) {
+	if len(args) == 0 {
+		result, err := runLauncher(stdin, stdout)
+		if err != nil {
+			return true, err
+		}
+		switch result.Action {
+		case launcherActionTop:
+			return true, runTopCommand(nil, stdin, stdout, stderr)
+		case launcherActionServe:
+			if result.AuthorizedKeysPath != "" {
+				if err := os.Setenv("SSH_AUTHORIZED_KEYS_FILE", result.AuthorizedKeysPath); err != nil {
+					return true, fmt.Errorf("configure SSH authorized keys for this session: %w", err)
+				}
+				if err := os.Unsetenv("SSH_ALLOW_ANONYMOUS"); err != nil {
+					return true, fmt.Errorf("disable anonymous SSH access: %w", err)
+				}
+			}
+			return false, nil
+		default:
+			return true, nil
+		}
+	}
+	if args[0] == "serve" {
 		if len(args) > 1 {
 			return true, errors.New("serve does not accept arguments")
 		}
@@ -117,7 +143,7 @@ func runOperations(args []string, stdout, stderr io.Writer) (bool, error) {
 	}
 	switch args[0] {
 	case "top":
-		return true, runTopCommand(args[1:], os.Stdin, stdout, stderr)
+		return true, runTopCommand(args[1:], stdin, stdout, stderr)
 	case "dedupe-link":
 		return true, runStorageDedupeLinkCommand(args[1:], stdout, stderr)
 	case "privileged-helper":
@@ -126,11 +152,16 @@ func runOperations(args []string, stdout, stderr io.Writer) (bool, error) {
 		flags := flag.NewFlagSet("version", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		asJSON := flags.Bool("json", false, "write machine-readable JSON")
+		var requiredCapabilities stringListFlag
+		flags.Var(&requiredCapabilities, "require-capability", "require a binary capability; may be repeated")
 		if err := flags.Parse(args[1:]); err != nil {
 			return true, err
 		}
 		if flags.NArg() != 0 {
 			return true, errors.New("version does not accept positional arguments")
+		}
+		if missing := buildinfo.MissingCapabilities(requiredCapabilities); len(missing) > 0 {
+			return true, fmt.Errorf("Fleetty binary is missing required capabilities: %s", strings.Join(missing, ", "))
 		}
 		return true, buildinfo.Write(stdout, *asJSON)
 	case "install":
@@ -154,6 +185,7 @@ func writeOperationsUsage(writer io.Writer) {
 	fmt.Fprintln(writer, `Fleetty
 
 Usage:
+  fleetty
   fleetty top [--config PATH] [--theme dark|light] [--layout PATH]
   fleetty dedupe-link --keep PATH --replace PATH --sha256 HEX
   fleetty serve
@@ -162,7 +194,22 @@ Usage:
   fleetty doctor --role node|hub|privileged-helper [--scope auto|user|system] [--json]
   fleetty snapshot [--config PATH] [--processes]
   fleetty metrics [--config PATH]
-  fleetty version [--json]`)
+	  fleetty version [--json] [--require-capability NAME]`)
+}
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *stringListFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("capability name cannot be empty")
+	}
+	*values = append(*values, value)
+	return nil
 }
 
 func runInstallCommand(args []string, stdout, stderr io.Writer) error {
@@ -238,6 +285,10 @@ func installFleetty(options installOptions) (commandResult, error) {
 	if err != nil {
 		return commandResult{}, err
 	}
+	compatibilityDropIn, compatibilityName, err := deployassets.CompatibilityDropIn(options.Role, options.Scope)
+	if err != nil {
+		return commandResult{}, err
+	}
 	if options.Run == nil {
 		options.Run = runSystemCommand
 	}
@@ -278,6 +329,18 @@ func installFleetty(options installOptions) (commandResult, error) {
 	if err := replace(unitDestination, unit, 0o644, unitDestination); err != nil {
 		transaction.Rollback()
 		return commandResult{}, err
+	}
+	if len(compatibilityDropIn) > 0 {
+		dropInDirectory := filepath.Join(options.UnitPath, service+".d")
+		if err := ensureManagedDirectory(dropInDirectory, 0o755, options.OwnerUID, options.OwnerGID); err != nil {
+			transaction.Rollback()
+			return commandResult{}, err
+		}
+		dropInDestination := filepath.Join(dropInDirectory, compatibilityName)
+		if err := replace(dropInDestination, compatibilityDropIn, 0o644, dropInDestination); err != nil {
+			transaction.Rollback()
+			return commandResult{}, err
+		}
 	}
 	for _, config := range configFiles {
 		destination := filepath.Join(options.ConfigPath, config.Name)

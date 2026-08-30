@@ -263,6 +263,14 @@ func applyTarget(parent context.Context, target resolvedTarget, runner commandRu
 		result.Error = remoteFailure("make staged binary executable", output, err).Error()
 		return result
 	}
+	capabilityArgs := []string{staging + "/fleetty", "version"}
+	for _, capability := range requiredTargetCapabilities(target.Role) {
+		capabilityArgs = append(capabilityArgs, "--require-capability", capability)
+	}
+	if output, err = runSSH(ctx, runner, target, capabilityArgs...); err != nil {
+		result.Error = remoteFailure("verify staged Fleetty capabilities", output, err).Error()
+		return result
+	}
 	installArgs := []string{
 		staging + "/fleetty", "install",
 		"--role", target.Role, "--scope", targetScope(target), "--json",
@@ -303,6 +311,14 @@ func applyTarget(parent context.Context, target resolvedTarget, runner commandRu
 	result.Result = raw
 	result.Action = "applied"
 	return result
+}
+
+func requiredTargetCapabilities(role string) []string {
+	capabilities := []string{"process-table-v2", "terminal-footer-v1"}
+	if role == "hub" {
+		capabilities = append(capabilities, "hub-groups-v1")
+	}
+	return capabilities
 }
 
 func statusTargets(

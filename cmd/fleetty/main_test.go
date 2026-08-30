@@ -218,13 +218,18 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 
 	configPath := t.TempDir() + "/nodes.json"
 	configJSON := `{
+		"version": 1,
 		"name": "Test Machine Hub",
 		"refresh_seconds": 3,
+		"groups": [
+			{"id":"compute","title":"GPU COMPUTE","style":"gpu"},
+			{"id":"services","title":"CLUSTER SERVICES","style":"network"}
+		],
 		"nodes": [
-			{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:first","identity_file":"/etc/hub_key"},
-			{"name":"node-2","address":"192.0.2.2:23234","profile":"nas","host_key":"SHA256:second","identity_file":"/etc/hub_key"},
-			{"name":"node-3","address":"192.0.2.3:23234","host_key":"SHA256:third","identity_file":"/etc/hub_key"},
-			{"name":"node-4","address":"192.0.2.4:23234","profile":"nas","host_key":"SHA256:fourth","identity_file":"/etc/hub_key"}
+			{"name":"node-1","group":"compute","address":"192.0.2.1:23234","host_key":"SHA256:first","identity_file":"/etc/hub_key"},
+			{"name":"node-2","group":"services","address":"192.0.2.2:23234","profile":"nas","host_key":"SHA256:second","identity_file":"/etc/hub_key"},
+			{"name":"node-3","group":"compute","address":"192.0.2.3:23234","host_key":"SHA256:third","identity_file":"/etc/hub_key"},
+			{"name":"node-4","group":"services","address":"192.0.2.4:23234","profile":"nas","host_key":"SHA256:fourth","identity_file":"/etc/hub_key"}
 		]
 	}`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -271,7 +276,7 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 		model.clampCursor()
 		rendered := model.hubView()
 		if size.width == 140 {
-			for _, section := range []string{"GPU COMPUTE", "NAS & STORAGE"} {
+			for _, section := range []string{"GPU COMPUTE", "CLUSTER SERVICES"} {
 				if !strings.Contains(rendered, section) {
 					t.Fatalf("%dx%d Hub missing section %q\n%s", size.width, size.height, section, rendered)
 				}
@@ -318,8 +323,10 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 func TestHubConfigRequiresNodeRPCIdentity(t *testing.T) {
 	path := t.TempDir() + "/nodes.json"
 	withoutIdentity := `{
+		"version":1,
 		"name":"Secure Hub",
-		"nodes":[{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:test"}]
+		"groups":[{"id":"compute","title":"COMPUTE","style":"gpu"}],
+		"nodes":[{"name":"node-1","group":"compute","address":"192.0.2.1:23234","host_key":"SHA256:test"}]
 	}`
 	if err := os.WriteFile(path, []byte(withoutIdentity), 0o600); err != nil {
 		t.Fatal(err)
@@ -328,9 +335,11 @@ func TestHubConfigRequiresNodeRPCIdentity(t *testing.T) {
 		t.Fatalf("missing node RPC identity should be rejected, got %v", err)
 	}
 	migration := `{
+		"version":1,
 		"name":"Migration Hub",
 		"insecure_allow_unauthenticated_nodes":true,
-		"nodes":[{"name":"node-1","address":"192.0.2.1:23234","host_key":"SHA256:test"}]
+		"groups":[{"id":"compute","title":"COMPUTE","style":"gpu"}],
+		"nodes":[{"name":"node-1","group":"compute","address":"192.0.2.1:23234","host_key":"SHA256:test"}]
 	}`
 	if err := os.WriteFile(path, []byte(migration), 0o600); err != nil {
 		t.Fatal(err)
@@ -344,9 +353,56 @@ func TestHubConfigRequiresNodeRPCIdentity(t *testing.T) {
 	}
 }
 
+func TestHubConfigRejectsAmbiguousLayout(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  string
+		message string
+	}{
+		{
+			name:    "missing schema version",
+			config:  `{"groups":[{"id":"compute","title":"COMPUTE","style":"gpu"}],"nodes":[{"name":"node","group":"compute","address":"host:1"}]}`,
+			message: "configuration version",
+		},
+		{
+			name:    "missing groups",
+			config:  `{"version":1,"nodes":[{"name":"node","group":"compute","address":"host:1"}]}`,
+			message: "requires groups",
+		},
+		{
+			name:    "unknown node group",
+			config:  `{"version":1,"groups":[{"id":"compute","title":"COMPUTE","style":"gpu"}],"nodes":[{"name":"node","group":"services","address":"host:1"}]}`,
+			message: "unknown group",
+		},
+		{
+			name:    "duplicate group",
+			config:  `{"version":1,"groups":[{"id":"compute","title":"COMPUTE","style":"gpu"},{"id":"compute","title":"OTHER","style":"cpu"}],"nodes":[{"name":"node","group":"compute","address":"host:1"}]}`,
+			message: "duplicate hub group",
+		},
+		{
+			name:    "unknown field",
+			config:  `{"version":1,"groups":[{"id":"compute","title":"COMPUTE","style":"gpu"}],"nodes":[{"name":"node","group":"compute","address":"host:1"}],"layout":"legacy"}`,
+			message: "unknown field",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := t.TempDir() + "/nodes.json"
+			if err := os.WriteFile(path, []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadHubConfig(path)
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("loadHubConfig error = %v, want %q", err, test.message)
+			}
+		})
+	}
+}
+
 func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	configPath := t.TempDir() + "/nodes.json"
 	configJSON := `{
+		"version": 1,
 		"name": "Test Lab Hub",
 		"nodes": [],
 		"slurm_clusters": [
@@ -2787,17 +2843,24 @@ func TestProcessColumnsAreAligned(t *testing.T) {
 	if strings.Contains(header, "STAT") || strings.Contains(row, "R+") {
 		t.Fatalf("process state should not occupy a table column\nheader: %q\nrow:    %q", header, row)
 	}
+	column := func(line, value string) int {
+		index := strings.Index(line, value)
+		if index < 0 {
+			t.Fatalf("missing %q in %q", value, line)
+		}
+		return lipgloss.Width(line[:index])
+	}
 	for _, field := range []string{"RSS", "ELAPSED", "COMMAND"} {
-		if strings.Index(header, field) != strings.Index(row, map[string]string{
+		if column(header, field) != column(row, map[string]string{
 			"RSS": "280.0 MiB", "ELAPSED": "1m05s", "COMMAND": "trainer",
 		}[field]) {
 			t.Fatalf("%s is not aligned\nheader: %q\nrow:    %q", field, header, row)
 		}
 	}
-	if strings.Index(header, "CPU")+len("CPU") != strings.Index(row, "12.3%")+len("12.3%") {
+	if column(header, "CPU")+len("CPU") != column(row, "12.3%")+len("12.3%") {
 		t.Fatalf("CPU is not right-aligned\nheader: %q\nrow:    %q", header, row)
 	}
-	if strings.Index(header, "MEM")+len("MEM") != strings.Index(row, "4.5%")+len("4.5%") {
+	if column(header, "MEM")+len("MEM") != column(row, "4.5%")+len("4.5%") {
 		t.Fatalf("MEM is not right-aligned\nheader: %q\nrow:    %q", header, row)
 	}
 }

@@ -16,7 +16,7 @@ Environment=SSH_MAX_TIMEOUT=24h
 Environment=DEFAULT_THEME=dark
 EnvironmentFile=-%h/.config/fleetty/machine.env
 EnvironmentFile=-%h/.config/fleetty/admin.env
-ExecStart=%h/.local/bin/fleetty
+ExecStart=%h/.local/bin/fleetty serve
 Restart=always
 RestartSec=2
 UMask=0077

@@ -403,7 +403,8 @@ func (m *monitorModel) layoutView() string {
 
 	m.layoutButtonY = lipgloss.Height(header)
 	m.layoutFirstRowY = m.layoutButtonY + lipgloss.Height(actionLine) + 1
-	return strings.Join([]string{header, actionLine, panel, footer}, "\n")
+	body := strings.Join([]string{header, actionLine, panel}, "\n")
+	return terminalFrame(body, footer, width, m.height)
 }
 
 func renderWidgetSizeLabel(size widgetSize) string {

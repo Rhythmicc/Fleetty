@@ -20,13 +20,14 @@ func (m *monitorModel) nasView() string {
 		nodeName = m.snapshot.NodeName
 	}
 	header := dashboardHeaderNamed("FLEETTY NAS", width, m.snapshot.CollectedAt, m.colorMode, nodeName)
+	footer := renderFooter(width, m.status)
 	if m.snapshot.CollectedAt.IsZero() {
-		return strings.Join([]string{header, "", panelStyle(width).Render("Collecting NAS metrics…")}, "\n")
+		body := strings.Join([]string{header, "", panelStyle(width).Render("Collecting NAS metrics…")}, "\n")
+		return terminalFrame(body, footer, width, height)
 	}
 
 	system := m.nasSystemPanel(width)
 	network := m.nasNetworkPanel(width)
-	footer := renderFooter(width, m.status)
 	if m.loadErr != nil {
 		footer = warningStyle.Render("Metric warning: " + m.loadErr.Error())
 	}
@@ -50,8 +51,7 @@ func (m *monitorModel) nasView() string {
 	if serviceHeight >= 3 {
 		sections = append(sections, m.nasServicesDashboard(width, serviceHeight))
 	}
-	sections = append(sections, footer)
-	return strings.Join(sections, "\n")
+	return terminalFrame(strings.Join(sections, "\n"), footer, width, height)
 }
 
 func (m *monitorModel) nasSystemPanel(width int) string {

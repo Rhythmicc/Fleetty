@@ -29,6 +29,24 @@ func TestServiceUnitsMatchScope(t *testing.T) {
 			if test.scope == "user" && strings.Contains(string(unit), "User=root") {
 				t.Fatal("user unit must not request root")
 			}
+			if (test.role == "node" || test.role == "hub") &&
+				!strings.Contains(string(unit), "fleetty serve") {
+				t.Fatal("node and Hub services must start the explicit serve command")
+			}
+			if test.role == "hub" {
+				dropIn, name, dropInErr := CompatibilityDropIn(test.role, test.scope)
+				if dropInErr != nil || name != "10-fleetty-capabilities.conf" {
+					t.Fatalf("Hub compatibility drop-in = %q, %v", name, dropInErr)
+				}
+				for _, capability := range []string{"hub-groups-v1", "process-table-v2", "terminal-footer-v1"} {
+					if !strings.Contains(string(dropIn), "--require-capability "+capability) {
+						t.Fatalf("Hub unit must reject binaries missing %s", capability)
+					}
+				}
+				if !strings.Contains(string(dropIn), "ExecStartPre=\n") {
+					t.Fatal("compatibility drop-in must replace stale preflight commands")
+				}
+			}
 			if test.role == "node" && test.scope == "system" &&
 				!strings.Contains(string(unit), "AmbientCapabilities=CAP_SETUID CAP_SETGID") {
 				t.Fatal("system node unit must retain capabilities required to query a user's PM2 daemon")

@@ -1,9 +1,12 @@
 package main
 
 import (
+	stdbytes "bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strings"
@@ -17,6 +20,11 @@ import (
 )
 
 const (
+	hubConfigVersion          = 1
+	hubGroupStyleGPU          = "gpu"
+	hubGroupStyleCPU          = "cpu"
+	hubGroupStyleNetwork      = "network"
+	hubGroupStyleProcess      = "process"
 	defaultHubRefreshInterval = time.Second
 	hubCardHeight             = 7
 	hubOverviewRPCTimeout     = 900 * time.Millisecond
@@ -27,16 +35,25 @@ const (
 )
 
 type hubConfig struct {
+	Version                           int                  `json:"version"`
 	Name                              string               `json:"name,omitempty"`
 	RefreshSeconds                    int                  `json:"refresh_seconds,omitempty"`
 	InsecureSkipHostKey               bool                 `json:"insecure_skip_host_key,omitempty"`
 	InsecureAllowUnauthenticatedNodes bool                 `json:"insecure_allow_unauthenticated_nodes,omitempty"`
+	Groups                            []hubGroupConfig     `json:"groups,omitempty"`
 	Nodes                             []hubNodeConfig      `json:"nodes"`
 	SlurmClusters                     []slurmClusterConfig `json:"slurm_clusters,omitempty"`
 }
 
+type hubGroupConfig struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Style string `json:"style"`
+}
+
 type hubNodeConfig struct {
 	Name                 string `json:"name"`
+	Group                string `json:"group"`
 	Address              string `json:"address"`
 	Description          string `json:"description,omitempty"`
 	Profile              string `json:"profile,omitempty"`
@@ -58,8 +75,17 @@ func loadHubConfig(path string) (*hubConfig, error) {
 		return nil, err
 	}
 	var config hubConfig
-	if err := json.Unmarshal(data, &config); err != nil {
+	decoder := json.NewDecoder(stdbytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse %s: trailing JSON value", path)
+	}
+	if config.Version != hubConfigVersion {
+		return nil, fmt.Errorf("unsupported hub configuration version %d; expected %d", config.Version, hubConfigVersion)
 	}
 	if len(config.Nodes) == 0 && len(config.SlurmClusters) == 0 {
 		return nil, errors.New("hub configuration has no nodes or Slurm clusters")
@@ -68,10 +94,34 @@ func loadHubConfig(path string) (*hubConfig, error) {
 	if config.Name == "" {
 		config.Name = "Fleetty Hub"
 	}
+	groupIDs := make(map[string]struct{}, len(config.Groups))
+	for index := range config.Groups {
+		group := &config.Groups[index]
+		group.ID = strings.TrimSpace(group.ID)
+		group.Title = sanitizeTerminalText(group.Title)
+		group.Style = strings.ToLower(strings.TrimSpace(group.Style))
+		if !validHubGroupID(group.ID) {
+			return nil, fmt.Errorf("hub group %d has invalid id %q; use lowercase letters, digits, hyphens, or underscores", index+1, group.ID)
+		}
+		if group.Title == "" {
+			return nil, fmt.Errorf("hub group %q requires title", group.ID)
+		}
+		if !validHubGroupStyle(group.Style) {
+			return nil, fmt.Errorf("hub group %q has invalid style %q", group.ID, group.Style)
+		}
+		if _, exists := groupIDs[group.ID]; exists {
+			return nil, fmt.Errorf("duplicate hub group id %q", group.ID)
+		}
+		groupIDs[group.ID] = struct{}{}
+	}
+	if len(config.Nodes) > 0 && len(config.Groups) == 0 {
+		return nil, errors.New("hub configuration with nodes requires groups")
+	}
 	seen := make(map[string]struct{}, len(config.Nodes))
 	for index := range config.Nodes {
 		node := &config.Nodes[index]
 		node.Name = sanitizeTerminalText(node.Name)
+		node.Group = strings.TrimSpace(node.Group)
 		node.Description = sanitizeTerminalText(node.Description)
 		node.SlurmCluster = sanitizeTerminalText(node.SlurmCluster)
 		node.SlurmNode = sanitizeTerminalText(node.SlurmNode)
@@ -87,6 +137,9 @@ func loadHubConfig(path string) (*hubConfig, error) {
 		node.AllowUnauthenticated = config.InsecureAllowUnauthenticatedNodes
 		if node.Name == "" || node.Address == "" {
 			return nil, fmt.Errorf("hub node %d requires name and address", index+1)
+		}
+		if _, exists := groupIDs[node.Group]; !exists {
+			return nil, fmt.Errorf("hub node %q references unknown group %q", node.Name, node.Group)
 		}
 		if _, exists := seen[node.Name]; exists {
 			return nil, fmt.Errorf("duplicate hub node name %q", node.Name)
@@ -158,6 +211,30 @@ func loadHubConfig(path string) (*hubConfig, error) {
 	return &config, nil
 }
 
+func validHubGroupID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, r := range value {
+		isLowerLetter := r >= 'a' && r <= 'z'
+		isSuffixCharacter := index > 0 && ((r >= '0' && r <= '9') || r == '-' || r == '_')
+		if isLowerLetter || isSuffixCharacter {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validHubGroupStyle(value string) bool {
+	switch value {
+	case hubGroupStyleGPU, hubGroupStyleCPU, hubGroupStyleNetwork, hubGroupStyleProcess:
+		return true
+	default:
+		return false
+	}
+}
+
 func uniqueTerminalValues(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
@@ -209,6 +286,9 @@ type hubService struct {
 	mu             sync.RWMutex
 	collectMu      sync.Mutex
 	slurmCollectMu sync.Mutex
+	startOnce      sync.Once
+	nodeWake       chan struct{}
+	slurmWake      chan struct{}
 	slurmRunners   []slurmCommandRunner
 	states         []hubNodeState
 	slurmStates    []slurmClusterState
@@ -220,6 +300,88 @@ func newHubService(config hubConfig) *hubService {
 		config: config, states: make([]hubNodeState, len(config.Nodes)),
 		slurmStates:  make([]slurmClusterState, len(config.SlurmClusters)),
 		slurmRunners: make([]slurmCommandRunner, len(config.SlurmClusters)),
+		nodeWake:     make(chan struct{}, 1),
+		slurmWake:    make(chan struct{}, 1),
+	}
+}
+
+// start owns the one polling loop for the whole Hub process. Connected users
+// only read its cached snapshots, so adding users never multiplies node RPCs.
+func (s *hubService) start(ctx context.Context) {
+	s.startOnce.Do(func() {
+		go s.runNodes(ctx)
+		go s.runSlurm(ctx)
+	})
+}
+
+func (s *hubService) runNodes(ctx context.Context) {
+	ticker := time.NewTicker(s.config.refreshInterval())
+	defer ticker.Stop()
+	for {
+		s.collect()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-s.nodeWake:
+		}
+	}
+}
+
+func (s *hubService) runSlurm(ctx context.Context) {
+	if len(s.config.SlurmClusters) == 0 {
+		return
+	}
+	ticker := time.NewTicker(s.slurmRefreshInterval())
+	defer ticker.Stop()
+	defer s.closeSlurmRunners()
+	for {
+		s.collectSlurm()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-s.slurmWake:
+		}
+	}
+}
+
+func (s *hubService) slurmRefreshInterval() time.Duration {
+	interval := s.config.SlurmClusters[0].refreshInterval()
+	for _, cluster := range s.config.SlurmClusters[1:] {
+		if candidate := cluster.refreshInterval(); candidate < interval {
+			interval = candidate
+		}
+	}
+	return interval
+}
+
+func (s *hubService) snapshot() ([]hubNodeState, []slurmClusterState) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]hubNodeState(nil), s.states...),
+		append([]slurmClusterState(nil), s.slurmStates...)
+}
+
+func (s *hubService) requestCollect() {
+	select {
+	case s.nodeWake <- struct{}{}:
+	default:
+	}
+	select {
+	case s.slurmWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *hubService) closeSlurmRunners() {
+	s.slurmCollectMu.Lock()
+	defer s.slurmCollectMu.Unlock()
+	for index, runner := range s.slurmRunners {
+		if runner != nil {
+			_ = runner.Close()
+			s.slurmRunners[index] = nil
+		}
 	}
 }
 
@@ -337,7 +499,6 @@ func hubOfflineRetryDelay(failures int) time.Duration {
 
 func (s *hubService) retryOfflineNow() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index := range s.states {
 		if s.states[index].Error != "" {
 			s.states[index].NextRetry = time.Time{}
@@ -349,6 +510,8 @@ func (s *hubService) retryOfflineNow() {
 		}
 	}
 	s.collectedAt = time.Time{}
+	s.mu.Unlock()
+	s.requestCollect()
 }
 
 type hubSnapshotsMsg struct {
@@ -381,16 +544,16 @@ type hubModel struct {
 }
 
 type hubNodeGroup struct {
-	title   string
-	profile string
-	nodes   []int
+	title string
+	style string
+	nodes []int
 }
 
 type hubDisplayRow struct {
-	title   string
-	profile string
-	count   int
-	nodes   []int
+	title string
+	style string
+	count int
+	nodes []int
 }
 
 type hubPage struct {
@@ -398,11 +561,12 @@ type hubPage struct {
 }
 
 func newHubModel(service *hubService, _ ssh.Session, width, height int) *hubModel {
+	states, slurmStates := service.snapshot()
 	return &hubModel{
 		service:     service,
 		config:      service.config,
-		states:      make([]hubNodeState, len(service.config.Nodes)),
-		slurmStates: make([]slurmClusterState, len(service.config.SlurmClusters)),
+		states:      states,
+		slurmStates: slurmStates,
 		slurmFilter: -1,
 		slurmView:   len(service.config.Nodes) == 0 && len(service.config.SlurmClusters) > 0,
 		width:       width,
@@ -430,19 +594,7 @@ func (m *hubModel) startCollect() tea.Cmd {
 	service := m.service
 	return func() tea.Msg {
 		if service != nil {
-			var states []hubNodeState
-			var slurmStates []slurmClusterState
-			var wait sync.WaitGroup
-			wait.Add(2)
-			go func() {
-				defer wait.Done()
-				states = service.collect()
-			}()
-			go func() {
-				defer wait.Done()
-				slurmStates = service.collectSlurm()
-			}()
-			wait.Wait()
+			states, slurmStates := service.snapshot()
 			return hubSnapshotsMsg{States: states, SlurmStates: slurmStates}
 		}
 		return hubSnapshotsMsg{
@@ -692,18 +844,15 @@ func (m *hubModel) columns() int {
 }
 
 func (m *hubModel) nodeGroups() []hubNodeGroup {
-	groups := []hubNodeGroup{
-		{title: "GPU COMPUTE", profile: machineProfileGPU},
-		{title: "NAS & STORAGE", profile: machineProfileNAS},
-		{title: "GENERAL SERVERS", profile: machineProfileGeneral},
+	groups := make([]hubNodeGroup, len(m.config.Groups))
+	groupIndexes := make(map[string]int, len(m.config.Groups))
+	for index, configured := range m.config.Groups {
+		groups[index] = hubNodeGroup{title: configured.Title, style: configured.Style}
+		groupIndexes[configured.ID] = index
 	}
 	for index, node := range m.config.Nodes {
-		profile := normalizeMachineProfile(node.Profile)
-		for groupIndex := range groups {
-			if groups[groupIndex].profile == profile {
-				groups[groupIndex].nodes = append(groups[groupIndex].nodes, index)
-				break
-			}
+		if groupIndex, exists := groupIndexes[node.Group]; exists {
+			groups[groupIndex].nodes = append(groups[groupIndex].nodes, index)
 		}
 	}
 	filtered := groups[:0]
@@ -864,7 +1013,7 @@ func (m *hubModel) pages() []hubPage {
 				flush()
 			}
 			current.rows = append(current.rows, hubDisplayRow{
-				title: group.title, profile: group.profile, count: len(group.nodes),
+				title: group.title, style: group.style, count: len(group.nodes),
 			})
 			usedHeight++
 			for len(nodeRows) > 0 && heightBudget-usedHeight >= hubCardHeight {
@@ -989,7 +1138,7 @@ func (m *hubModel) hubView() string {
 	var rows []string
 	for _, row := range pages[pageIndex].rows {
 		if row.title != "" {
-			rows = append(rows, renderHubSectionTitle(row.title, row.profile, row.count, width))
+			rows = append(rows, renderHubSectionTitle(row.title, row.style, row.count, width))
 			continue
 		}
 		var cards []string
@@ -1026,14 +1175,17 @@ func (m *hubModel) hubView() string {
 		footer += "  " + dimStyle.Render(truncate(m.status+rangeText, statusWidth))
 	}
 	footer = ansi.Truncate(footer, width, "")
-	return strings.Join([]string{header, strings.Join(rows, "\n"), footer}, "\n")
+	body := strings.Join([]string{header, strings.Join(rows, "\n")}, "\n")
+	return terminalFrame(body, footer, width, m.height)
 }
 
-func renderHubSectionTitle(title, profile string, count, width int) string {
+func renderHubSectionTitle(title, styleName string, count, width int) string {
 	style := gpuTitleStyle
-	if profile == machineProfileNAS {
+	if styleName == hubGroupStyleCPU {
+		style = cpuTitleStyle
+	} else if styleName == hubGroupStyleNetwork {
 		style = networkRXStyle
-	} else if profile == machineProfileGeneral {
+	} else if styleName == hubGroupStyleProcess {
 		style = processTitleStyle
 	}
 	label := style.Render(" " + title + " ")
@@ -1087,12 +1239,19 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 	} else if !state.Snapshot.CollectedAt.IsZero() {
 		meta = fmt.Sprintf("%dms", state.Latency.Milliseconds())
 		snapshot := state.Snapshot
-		profile := snapshot.Profile
-		if profile == "" {
-			profile = node.Profile
+		profile := normalizeMachineProfile(node.Profile)
+		if strings.TrimSpace(node.Profile) == "" && snapshot.Profile != "" {
+			profile = normalizeMachineProfile(snapshot.Profile)
 		}
 		if profile == machineProfileNAS {
 			content = renderNASHubCard(snapshot)
+			if state.Warning != "" {
+				content[4] = warningStyle.Render(truncate(state.Warning, width-4))
+			}
+			return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+		}
+		if profile == machineProfileCPU {
+			content = renderCPUHubCard(snapshot, width)
 			if state.Warning != "" {
 				content[4] = warningStyle.Render(truncate(state.Warning, width-4))
 			}
@@ -1102,14 +1261,12 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
 		gpuUtil, gpuMemoryUsed, gpuMemoryTotal, maxTemperature := hubGPUStats(snapshot.GPUs)
 		_, gpuStyle := gpuLoadStatus(gpuUtil)
+		// Hub cards are status summaries. Their layout must not depend on whether
+		// a node happens to have history persistence enabled or reachable: that
+		// produced a sparkline for some nodes and a load bar for others. Keep the
+		// current peak load as the one consistent visual here; trends remain in
+		// the live node detail view.
 		loadVisual := bar(math.Max(snapshot.CPUPercent, gpuUtil), max(8, width-4))
-		if len(state.History) >= 2 {
-			history := make([]float64, 0, len(state.History))
-			for _, sample := range state.History {
-				history = append(history, sample.CPUPercent)
-			}
-			loadVisual = sparkline(history, max(8, width-4), 100, cpuTitleStyle)
-		}
 		content = []string{
 			fmt.Sprintf("%s %5.1f%%   %s %5.1f%%   %s %5.1f%%",
 				cpuTitleStyle.Render("CPU"), snapshot.CPUPercent,
@@ -1134,6 +1291,29 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		content[0] = strings.TrimSpace(content[0])
 	}
 	return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+}
+
+func renderCPUHubCard(snapshot monitorSnapshot, width int) []string {
+	memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
+	disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
+	load := strings.TrimSpace(strings.TrimPrefix(snapshot.LoadAverage, "load"))
+	if load == "" {
+		load = "--"
+	}
+	return []string{
+		fmt.Sprintf("%s %5.1f%%   %s %5.1f%%   %s %5.1f%%",
+			cpuTitleStyle.Render("CPU"), snapshot.CPUPercent,
+			memoryTitleStyle.Render("MEM"), memory,
+			diskTitleStyle.Render("DSK"), disk),
+		fmt.Sprintf("%s %d  %s %s",
+			cpuTitleStyle.Render("CORES"), snapshot.CPUCores,
+			dimStyle.Render("LOAD"), dimStyle.Render(load)),
+		fmt.Sprintf("%s %s/s   %s %s/s",
+			networkRXStyle.Render("↓"), bytes(snapshot.NetworkRX),
+			networkTXStyle.Render("↑"), bytes(snapshot.NetworkTX)),
+		bar(snapshot.CPUPercent, max(8, width-4)),
+		dimStyle.Render("Enter or click to open live details"),
+	}
 }
 
 func renderNASHubCard(snapshot monitorSnapshot) []string {

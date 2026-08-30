@@ -1482,7 +1482,8 @@ func (m *hubModel) slurmQueueView() string {
 	jobMeta := fmt.Sprintf("%s  ·  %d RUN  ·  %d NEXT  ·  %d WAIT  ·  %d JOBS",
 		filter, running, next, max(0, pending-next), len(jobs))
 	jobPanel := btopPanel(width, "JOBS", jobMeta, strings.Join(lines, "\n"), processTitleStyle, colorProcessBorder)
-	return strings.Join([]string{header, cards, jobPanel, footer}, "\n")
+	body := strings.Join([]string{header, cards, jobPanel}, "\n")
+	return terminalFrame(body, footer, width, m.height)
 }
 
 func (m *hubModel) slurmExplanationView(header string, width int) string {
@@ -1560,7 +1561,8 @@ func (m *hubModel) slurmExplanationView(header string, width int) string {
 		keyHint("enter", "queue"),
 		keyHint("t", "theme"),
 	}, "  "), width, "")
-	return strings.Join([]string{header, panel, footer}, "\n")
+	body := strings.Join([]string{header, panel}, "\n")
+	return terminalFrame(body, footer, width, m.height)
 }
 
 func wrapSlurmExplanation(value string, width int) []string {

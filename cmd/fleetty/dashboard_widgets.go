@@ -31,11 +31,12 @@ func (m *monitorModel) widgetDashboardView() string {
 	m.ensurePanelLayout()
 	width := usableWidth(m.width)
 	header := dashboardHeader(width, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
+	footer := m.renderMonitorFooter(width)
 	if m.snapshot.CollectedAt.IsZero() {
-		return strings.Join([]string{header, "", panelStyle(width).Render("Collecting system metrics…")}, "\n")
+		body := strings.Join([]string{header, "", panelStyle(width).Render("Collecting system metrics…")}, "\n")
+		return terminalFrame(body, footer, width, m.height)
 	}
 
-	footer := m.renderMonitorFooter(width)
 	if m.loadErr != nil {
 		footer = ansi.Truncate(warningStyle.Render("Metric warning: "+m.loadErr.Error()), width, "")
 	}
@@ -68,8 +69,7 @@ func (m *monitorModel) widgetDashboardView() string {
 	if len(visible) > 0 {
 		sections = append(sections, strings.Join(visible, "\n"))
 	}
-	sections = append(sections, footer)
-	return strings.Join(sections, "\n")
+	return terminalFrame(strings.Join(sections, "\n"), footer, width, m.height)
 }
 
 func (m *monitorModel) renderWidgetGrid(width int) (string, []widgetPlacement) {

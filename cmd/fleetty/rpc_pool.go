@@ -17,8 +17,11 @@ import (
 )
 
 const (
-	rpcDialTimeout  = 5 * time.Second
-	rpcPoolIdleTime = 2 * time.Minute
+	rpcDialTimeout         = 5 * time.Second
+	rpcPoolIdleTime        = 2 * time.Minute
+	rpcTCPKeepAliveIdle    = 15 * time.Second
+	rpcTCPKeepAlivePeriod  = 5 * time.Second
+	rpcTCPKeepAliveFailure = 3
 )
 
 // rpcSSHClient is the small surface of an SSH client that the RPC pool needs;
@@ -37,7 +40,7 @@ type rpcClientPool struct {
 	address string
 	dial    func(context.Context) (rpcSSHClient, error)
 
-	mu       sync.Mutex
+	gate     chan struct{}
 	client   rpcSSHClient
 	lastUsed time.Time
 }
@@ -46,14 +49,26 @@ func newRPCPool(node hubNodeConfig) *rpcClientPool {
 	pool := &rpcClientPool{
 		node:    node,
 		address: normalizeNodeAddress(node.Address),
+		gate:    make(chan struct{}, 1),
 	}
+	pool.gate <- struct{}{}
 	pool.dial = pool.dialLocked
 	return pool
 }
 
 func (p *rpcClientPool) call(ctx context.Context, request nodeRPCRequest) (nodeRPCResponse, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nodeRPCResponse{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return nodeRPCResponse{}, ctx.Err()
+	case <-p.gate:
+	}
+	defer func() { p.gate <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return nodeRPCResponse{}, err
+	}
 	if p.client != nil && time.Since(p.lastUsed) > rpcPoolIdleTime {
 		_ = p.client.Close()
 		p.client = nil
@@ -107,7 +122,7 @@ func (p *rpcClientPool) callWithClient(
 	client rpcSSHClient,
 	request nodeRPCRequest,
 ) (nodeRPCResponse, error, bool) {
-	session, err := client.NewSession()
+	session, err := newRPCSession(ctx, client)
 	if err != nil {
 		return nodeRPCResponse{}, err, true
 	}
@@ -158,6 +173,43 @@ func (p *rpcClientPool) callWithClient(
 	return response, nil, false
 }
 
+func newRPCSession(ctx context.Context, client rpcSSHClient) (*gossh.Session, error) {
+	type sessionResult struct {
+		session *gossh.Session
+		err     error
+	}
+	ready := make(chan sessionResult, 1)
+	go func() {
+		session, err := client.NewSession()
+		result := sessionResult{session: session, err: err}
+		select {
+		case ready <- result:
+		case <-ctx.Done():
+			if session != nil {
+				_ = session.Close()
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// NewSession can block forever on a half-open SSH transport. Closing the
+		// client wakes it and forces the pool to establish a clean connection on
+		// the next request.
+		_ = client.Close()
+		return nil, ctx.Err()
+	case result := <-ready:
+		if err := ctx.Err(); err != nil {
+			if result.session != nil {
+				_ = result.session.Close()
+			}
+			_ = client.Close()
+			return nil, err
+		}
+		return result.session, result.err
+	}
+}
+
 func (p *rpcClientPool) dialLocked(ctx context.Context) (rpcSSHClient, error) {
 	hostKeyCallback, err := fixedHostKeyCallback(
 		p.node.Name, p.node.HostKey, p.node.InsecureSkipHostKey,
@@ -175,7 +227,16 @@ func (p *rpcClientPool) dialLocked(ctx context.Context) (rpcSSHClient, error) {
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         rpcDialTimeout,
 	}
-	dialer := net.Dialer{Timeout: rpcDialTimeout}
+	dialer := net.Dialer{
+		Timeout:   rpcDialTimeout,
+		KeepAlive: rpcTCPKeepAlivePeriod,
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     rpcTCPKeepAliveIdle,
+			Interval: rpcTCPKeepAlivePeriod,
+			Count:    rpcTCPKeepAliveFailure,
+		},
+	}
 	connection, err := dialer.DialContext(ctx, "tcp", p.address)
 	if err != nil {
 		return nil, fmt.Errorf("connect %s: %w", p.node.Name, err)

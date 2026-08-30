@@ -24,6 +24,7 @@ import (
 
 const (
 	machineProfileGPU     = "gpu"
+	machineProfileCPU     = "cpu"
 	machineProfileNAS     = "nas"
 	machineProfileGeneral = "general"
 
@@ -64,7 +65,7 @@ func loadMachineConfig(path string) (machineConfig, error) {
 	config.Name = sanitizeTerminalText(config.Name)
 	config.Profile = normalizeMachineProfile(config.Profile)
 	if config.Profile == "" {
-		return config, errors.New("machine profile must be gpu, nas, or general")
+		return config, errors.New("machine profile must be gpu, cpu, nas, or general")
 	}
 	config.NetworkInterfaces = cleanUniqueValues(config.NetworkInterfaces, false)
 	config.Mounts = cleanUniqueValues(config.Mounts, true)
@@ -107,6 +108,8 @@ func normalizeMachineProfile(profile string) string {
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "", machineProfileGPU:
 		return machineProfileGPU
+	case machineProfileCPU:
+		return machineProfileCPU
 	case machineProfileNAS, "storage":
 		return machineProfileNAS
 	case machineProfileGeneral, "server":

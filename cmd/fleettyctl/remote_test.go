@@ -87,6 +87,7 @@ func TestApplyTargetUsesBatchSSHAndPasswordlessSudo(t *testing.T) {
 	for _, expected := range []string{
 		"ssh -o BatchMode=yes",
 		"scp -q -o BatchMode=yes",
+		"'/tmp/fleettyctl.Abc123/fleetty' 'version' '--require-capability' 'process-table-v2' '--require-capability' 'terminal-footer-v1'",
 		"'sudo' '-n' '/tmp/fleettyctl.Abc123/fleetty' 'install'",
 		"'find' '/tmp/fleettyctl.Abc123' '-xdev' '-depth' '-delete'",
 	} {
@@ -267,6 +268,8 @@ func (runner *scriptedRemoteRunner) Run(_ context.Context, name string, args []s
 			return []byte("enabled\n"), nil
 		}
 		return []byte(runner.enabled + "\n"), errors.New("exit status 1")
+	case strings.Contains(remote, "'version' '--require-capability'"):
+		return []byte("Fleetty test\n"), nil
 	case strings.Contains(remote, "'install' '--role'"):
 		return []byte(runner.installResult + "\n"), nil
 	case strings.Contains(remote, "'snapshot'"):

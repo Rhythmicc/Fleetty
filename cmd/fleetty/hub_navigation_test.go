@@ -4,23 +4,37 @@ import (
 	"testing"
 )
 
+func productionHubGroups() []hubGroupConfig {
+	return []hubGroupConfig{
+		{ID: "gpu", Title: "GPU COMPUTE", Style: hubGroupStyleGPU},
+		{ID: "cpu", Title: "CPU COMPUTE", Style: hubGroupStyleCPU},
+		{ID: "services", Title: "CLUSTER SERVICES", Style: hubGroupStyleNetwork},
+	}
+}
+
 func productionHubNodes() []hubNodeConfig {
 	names := []string{"A100", "4090", "5090", "n1", "n2", "n3", "n4", "NAS", "intel9462"}
 	profiles := []string{
 		machineProfileGPU, machineProfileGPU, machineProfileGPU,
 		machineProfileGPU, machineProfileGPU, machineProfileGPU, machineProfileGPU,
-		machineProfileNAS, machineProfileGeneral,
+		machineProfileNAS, machineProfileCPU,
 	}
 	nodes := make([]hubNodeConfig, len(names))
 	for index := range names {
-		nodes[index] = hubNodeConfig{Name: names[index], Profile: profiles[index]}
+		group := "gpu"
+		if profiles[index] == machineProfileCPU {
+			group = "cpu"
+		} else if profiles[index] == machineProfileNAS || profiles[index] == machineProfileGeneral {
+			group = "services"
+		}
+		nodes[index] = hubNodeConfig{Name: names[index], Profile: profiles[index], Group: group}
 	}
 	return nodes
 }
 
 func newTestHubModel(width, height int, cursor int) *hubModel {
 	model := &hubModel{
-		config: hubConfig{Nodes: productionHubNodes()},
+		config: hubConfig{Groups: productionHubGroups(), Nodes: productionHubNodes()},
 		width:  width, height: height,
 	}
 	model.cursor = cursor
@@ -28,22 +42,35 @@ func newTestHubModel(width, height int, cursor int) *hubModel {
 	return model
 }
 
-func TestHubUpFromLastGeneralNodeFollowsVisualGrid(t *testing.T) {
+func TestHubUpFromCPUNodeFollowsVisualGrid(t *testing.T) {
 	// 132 columns renders three card columns; the flat grouped list is not
-	// aligned with the visual grid, so the old stride-based navigation jumped
-	// from intel9462 to n3 (position 8-3=5).
+	// aligned with the visual grid, so navigation must follow the visible
+	// grouped rows rather than subtracting a fixed card stride.
 	model := newTestHubModel(132, 24, 8)
 	model.moveCursorVertical(-1)
-	if model.cursor != 7 {
-		t.Fatalf("up from intel9462 selected index %d, want NAS (7)", model.cursor)
-	}
-	model.moveCursorVertical(-1)
 	if model.cursor != 6 {
-		t.Fatalf("up from NAS selected index %d, want n4 (6)", model.cursor)
+		t.Fatalf("up from intel9462 selected index %d, want n4 (6)", model.cursor)
 	}
 	model.moveCursorVertical(-1)
 	if model.cursor != 3 {
 		t.Fatalf("up from n4 selected index %d, want n1 (3)", model.cursor)
+	}
+}
+
+func TestHubUsesDeclarativeGroupMembership(t *testing.T) {
+	model := &hubModel{config: hubConfig{
+		Groups: []hubGroupConfig{{ID: "services", Title: "CLUSTER SERVICES", Style: hubGroupStyleNetwork}},
+		Nodes: []hubNodeConfig{
+			{Name: "NAS", Profile: machineProfileNAS, Group: "services"},
+			{Name: "login", Profile: machineProfileGeneral, Group: "services"},
+		},
+	}}
+	groups := model.nodeGroups()
+	if len(groups) != 1 || groups[0].title != "CLUSTER SERVICES" {
+		t.Fatalf("service groups = %#v", groups)
+	}
+	if len(groups[0].nodes) != 2 || groups[0].nodes[0] != 0 || groups[0].nodes[1] != 1 {
+		t.Fatalf("service nodes = %v, want [0 1]", groups[0].nodes)
 	}
 }
 

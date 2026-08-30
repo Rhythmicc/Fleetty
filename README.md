@@ -111,15 +111,21 @@ mkdir -p "$HOME/.local/bin"
 install -m 0755 "/tmp/${fleetty_asset}" "$HOME/.local/bin/fleetty"
 ```
 
-直接启动本地仪表盘：
+直接运行 `fleetty` 会进入交互式启动窗口，可以打开本地监控、检查配置与 SSH 认证状态，或查看各个命令的用途。裸命令不会启动监听端口。也可以跳过启动窗口，直接打开本地仪表盘：
 
 ```bash
 "$HOME/.local/bin/fleetty" top
 ```
 
+只有明确执行 `fleetty serve`，或从启动窗口选择 SSH Server 后，Fleetty 才会启动远程仪表盘服务。SSH Server 页面会显示监听地址和 authorized-keys 状态；如果发现有效的 `~/.config/fleetty/authorized_keys` 或 `~/.ssh/authorized_keys`，可以仅在当前进程中使用它并启动服务，不会静默写入配置或开启匿名访问。
+
 `fleetty top --theme light` 使用浅色主题。Apple Silicon Mac 会通过 IOKit 显示 GPU 总负载、渲染器与 Tiler 利用率、核心数和已使用/已分配的统一内存，无需 root。MacBook 的电量、充放电状态、剩余时间和电源来源显示在顶部状态栏中；没有电池的桌面 Mac 会自动省略这些信息。该模式不启动后台服务、不开放网络端口，也不需要 root。
 
 默认界面提供 Overview、Compute、Network 和 Storage 四个页面，可按 `1`–`4` 直接切换，也可以使用 `Tab` / `Shift+Tab` 顺序浏览。Overview 集中展示主机系统与运行时长、CPU/内存/磁盘健康度、GPU 工作负载、60 秒网络历史、应用流量、Slurm 节点队列和有限条进程摘要；Compute 页面在硬件与队列信息之后使用全部剩余高度展示进程；Network 页面展示实时速率、累计流量、60 秒峰值、应用流量以及各接口的实时和累计计数器。Fleetty 只显示当前平台能够提供的数据：没有 GPU 或 Slurm 的主机会自动隐藏对应区域，周围面板随终端宽高重新排布并利用空出的空间。方向键、回车和鼠标可以选择并查看进程详情，`/` 过滤进程，`t` 切换主题，`q` 退出。
+
+进程表支持点击表头按 CPU、内存比例、RSS、运行时长、PID、用户或命令排序；再次点击同一表头切换升降序。也可按 `o` 切换排序字段、`O` 反转顺序，无需进入管理模式。行号和面板右上角显示当前范围与进程总数，过滤后会标明匹配数量；每个连接的排序独立，刷新和排序时保留选中的 PID。
+
+CPU、内存和 RSS 数值由低到高使用灰、青、绿、黄、红色，进程名不再随运行状态整行变色。CPU 的 `100%` 表示占用一个逻辑核心；内存比例和 RSS 颜色以整机内存为基准。PID 前的 `▶`、`·`、`!`、`■`、`×`、`○` 分别表示运行、休眠、等待、停止、僵尸/退出和空闲，表格内附有图例。
 
 Storage 页面将目录内容显示为二维面积图，块的面积代表实际分配的磁盘空间。为了避免大量小文件挤成无法辨认的碎块，项目会按照容量层级自动分页，每页最多显示 16 个可点击的真实条目；使用 `PgUp` / `PgDn` 或点击面积图上方的翻页控件，可以继续查看更小的目录和文件。扫描会根据可用 CPU 在当前目录的一级子项之间启用最多 8 个并行 worker；扫描过程中，已发现的容量、文件数和面积块会持续更新，无需等待整个目录扫描完成。扫描尚未结束时也可以直接点击已出现的目录块，Fleetty 会取消当前工作并立即进入所选目录，避免继续进行无关扫描；方向键与回车提供相同操作，`Backspace` 或左方向键返回上级，`Home` 回到扫描根。最近访问的目录会保存在当前会话的有界缓存中：返回上级时，完整且新鲜的面积图会立即恢复；过期或尚未完成的结果会先显示，再在后台重新扫描。按 `r` 可以强制刷新当前目录。
 
@@ -463,7 +469,7 @@ sudo systemctl restart fleetty.service
 
 ## 多服务器 Hub
 
-Hub 使用同一个 Go 可执行文件运行，并通过各节点现有的 23234 SSH 端口读取状态。连接 Hub 后会先看到所有服务器的简报，节点会根据 `profile` 自动分到 GPU 计算、NAS 与存储等区域；选择服务器即可进入该节点的完整监控和管理界面。Hub 名称由配置文件中的 `name` 决定，可以为不同实验室或集群分别命名。
+Hub 使用同一个 Go 可执行文件运行，并通过各节点现有的 23234 SSH 端口读取状态。连接 Hub 后会先看到所有服务器的简报；首页分区、顺序和节点归属由 `nodes.json` 的 `groups` 与 `group` 字段明确决定，选择服务器即可进入该节点的完整监控和管理界面。Hub 名称由配置文件中的 `name` 决定，可以为不同实验室或集群分别命名。
 
 Hub 不需要系统 SSH 账户，也不会在磁盘中保存节点管理密码。进入某个节点的管理模式时，密码会通过加密的 SSH 连接发送给该节点即时校验，并且只保留在当前 Hub 会话的内存中。
 
@@ -515,11 +521,25 @@ sudo editor /etc/fleetty/nodes.json
 
 ```json
 {
+  "version": 1,
   "name": "Fleetty Hub",
   "refresh_seconds": 1,
+  "groups": [
+    {
+      "id": "gpu-compute",
+      "title": "GPU COMPUTE",
+      "style": "gpu"
+    },
+    {
+      "id": "cluster-services",
+      "title": "CLUSTER SERVICES",
+      "style": "network"
+    }
+  ],
   "nodes": [
     {
       "name": "training-1",
+      "group": "gpu-compute",
       "profile": "gpu",
       "description": "Training node",
       "address": "192.0.2.10:23234",
@@ -530,6 +550,7 @@ sudo editor /etc/fleetty/nodes.json
     },
     {
       "name": "storage-1",
+      "group": "cluster-services",
       "profile": "nas",
       "description": "Storage and services",
       "address": "192.0.2.20:23234",
@@ -561,6 +582,10 @@ sudo editor /etc/fleetty/nodes.json
   ]
 }
 ```
+
+`version` 是 Hub 配置格式的版本，当前必须为 `1`。`groups` 完整定义 Hub 首页的分区：数组顺序就是显示顺序，`title` 是用户可见标题，`style` 可取 `gpu`、`cpu`、`network` 或 `process`，只负责分区的视觉语义。每个节点必须通过 `group` 明确加入一个已声明分区；引用不存在的分区、重复分区、未知字段或旧版本配置都会在服务启动时直接报错，避免默默回退到另一种布局。
+
+节点的 `profile` 与布局分组相互独立：`profile` 决定节点详情页启用 GPU、NAS 等哪类监控能力，`group` 只决定该节点在 Hub 首页出现的位置。因此 NAS、登录节点或其他服务节点可以放在同一个 `CLUSTER SERVICES` 分区，而不会改变各自的详情页。
 
 `identity_file` 用于证明 Hub 身份，私钥必须由 root 所有且权限不超过 `0600`。`host_key` 用于防止 Hub 连接到被冒充的节点。节点重新生成 SSH host key 后，需要同步更新这里的指纹。
 
@@ -601,6 +626,7 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
 ```json
 {
   "name": "training-1",
+  "group": "gpu-compute",
   "profile": "gpu",
   "address": "192.0.2.10:23234",
   "identity_file": "/etc/fleetty/node_rpc_ed25519",
@@ -637,6 +663,8 @@ Hub 默认监听 23235，可以和本机的 23234 节点监控服务共存：
 ```
 
 `hub-config` 至少应包含 `authorized_keys` 和 `nodes.json`，以及配置引用的 RPC/Slurm 私钥。system scope 在安装命令前使用 `sudo` 并指定 `--scope system`。
+
+安装器会同时写入独立的 systemd 能力契约。Hub 启动前会验证二进制具备当前配置分组、进程表和固定底栏能力；旧包或不完整构建会在替换服务前被 `fleettyctl` 拒绝，即使手工覆盖了主 unit，持久化的 drop-in 也会阻止不兼容二进制启动。`fleetty version --json` 可以查看版本、提交、源码是否修改以及完整能力列表。
 
 连接 Hub：
 
@@ -750,6 +778,7 @@ user scope 的配置位于 `~/.config/fleetty`，systemd unit 位于 `~/.config/
 | `SSH_AUTHORIZED_KEYS_FILE` | systemd 服务中为 `/etc/fleetty/authorized_keys` | 允许连接交互 TUI 的客户端公钥 |
 | `NODE_RPC_AUTHORIZED_KEYS_FILE` | 空 | 允许以内部 Hub 身份连接节点的公钥 |
 | `SSH_ALLOW_ANONYMOUS` | `false` | 仅用于隔离网络迁移；显式设为 `true` 才允许匿名连接 |
+| `SSH_ALLOW_LOCAL_ANONYMOUS` | `false` | 允许通过本机回环地址免密查看 TUI；远程连接仍须使用授权公钥，内部 Hub 身份始终须验公钥。仍需设置 `SSH_AUTHORIZED_KEYS_FILE`，不能与全局匿名模式同时启用 |
 | `SSH_MAX_CONNECTIONS` | `64` | 同时接受的 SSH 连接上限 |
 | `SSH_IDLE_TIMEOUT` | `30m` | SSH 空闲连接超时 |
 | `SSH_MAX_TIMEOUT` | `24h` | 单个 SSH 连接的最长持续时间 |

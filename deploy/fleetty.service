@@ -21,7 +21,7 @@ Environment=DEFAULT_THEME=dark
 EnvironmentFile=-/etc/fleetty/machine.env
 # Optional management-password and command overrides, owned by root (0600).
 EnvironmentFile=-/etc/fleetty/admin.env
-ExecStart=/opt/fleetty/fleetty
+ExecStart=/opt/fleetty/fleetty serve
 Restart=always
 RestartSec=2
 UMask=0077

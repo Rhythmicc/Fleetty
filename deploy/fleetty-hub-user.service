@@ -15,7 +15,8 @@ Environment=SSH_IDLE_TIMEOUT=30m
 Environment=SSH_MAX_TIMEOUT=24h
 Environment=DEFAULT_THEME=dark
 Environment=HUB_NODES_FILE=%h/.config/fleetty/nodes.json
-ExecStart=%h/.local/bin/fleetty
+ExecStartPre=%h/.local/bin/fleetty version --require-capability hub-groups-v1 --require-capability process-table-v2 --require-capability terminal-footer-v1
+ExecStart=%h/.local/bin/fleetty serve
 Restart=always
 RestartSec=2
 UMask=0077

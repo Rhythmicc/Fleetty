@@ -123,7 +123,7 @@ func TestHourHistoryCmdRefreshesOncePerMinute(t *testing.T) {
 	}
 }
 
-func TestHubCardRendersHistorySparkline(t *testing.T) {
+func TestHubCardKeepsLoadBarWhenHistoryExists(t *testing.T) {
 	model := &hubModel{
 		config: hubConfig{Nodes: []hubNodeConfig{{
 			Name: "gpu-1", Profile: machineProfileGPU, Description: "Training node",
@@ -144,8 +144,42 @@ func TestHubCardRendersHistorySparkline(t *testing.T) {
 		width:  80, height: 30,
 	}
 	rendered := model.renderNodeCard(0, 40)
-	if !strings.Contains(rendered, "▁") && !strings.Contains(rendered, "▂") {
-		t.Fatalf("hub card should render a history sparkline:\n%s", rendered)
+	if strings.Contains(rendered, "▁") || strings.Contains(rendered, "▂") {
+		t.Fatalf("hub card should not switch to a history sparkline:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "█") {
+		t.Fatalf("hub card should render a load bar:\n%s", rendered)
+	}
+}
+
+func TestHubCPUProfileRendersDedicatedSectionAndCard(t *testing.T) {
+	model := &hubModel{
+		config: hubConfig{
+			Groups: []hubGroupConfig{{ID: "cpu", Title: "CPU COMPUTE", Style: hubGroupStyleCPU}},
+			Nodes: []hubNodeConfig{{
+				Name: "login", Profile: machineProfileCPU, Group: "cpu",
+			}},
+		},
+		states: []hubNodeState{{Snapshot: monitorSnapshot{
+			CollectedAt: time.Now(), Profile: machineProfileCPU,
+			CPUPercent: 12.5, CPUCores: 64, LoadAverage: "load 0.07 · 0.02 · 0.18",
+			MemoryUsed: 32, MemoryTotal: 100, DiskUsed: 8, DiskTotal: 100,
+			NetworkRX: 1024, NetworkTX: 2048,
+		}}},
+		width: 100, height: 30,
+	}
+	groups := model.nodeGroups()
+	if len(groups) != 1 || groups[0].style != hubGroupStyleCPU || groups[0].title != "CPU COMPUTE" {
+		t.Fatalf("CPU node groups = %#v", groups)
+	}
+	rendered := model.renderNodeCard(0, 48)
+	for _, expected := range []string{"CPU", "CORES", "64", "LOAD", "0.07", "↓", "↑"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("CPU Hub card missing %q:\n%s", expected, rendered)
+		}
+	}
+	if strings.Contains(rendered, "VRAM") {
+		t.Fatalf("CPU Hub card should not render GPU metrics:\n%s", rendered)
 	}
 }
 

@@ -61,11 +61,11 @@ func (m *monitorModel) monitorPagesView() string {
 	header := m.renderMonitorPageHeader(width)
 	footer := m.renderMonitorPageFooter(width)
 	if m.snapshot.CollectedAt.IsZero() {
-		return strings.Join([]string{
+		body := strings.Join([]string{
 			header,
 			panelStyle(width).Render("Collecting system metrics…"),
-			footer,
 		}, "\n")
+		return terminalFrame(body, footer, width, m.height)
 	}
 
 	body, placements := m.renderMonitorPage(width)
@@ -98,8 +98,7 @@ func (m *monitorModel) monitorPagesView() string {
 	if len(visible) > 0 {
 		sections = append(sections, strings.Join(visible, "\n"))
 	}
-	sections = append(sections, footer)
-	return strings.Join(sections, "\n")
+	return terminalFrame(strings.Join(sections, "\n"), footer, width, m.height)
 }
 
 func (m *monitorModel) renderMonitorPageHeader(width int) string {
@@ -260,6 +259,7 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 		m.monitorPage == monitorPageCompute {
 		hints = append(hints,
 			keyHint("↑↓", "select"),
+			keyHint("o/O", "sort/reverse"),
 			keyHint("enter", "details"),
 			keyHint("/", "filter"),
 		)
@@ -365,7 +365,7 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 
 	headerHeight := 2
 	footerHeight := 1
-	processOverhead := 3
+	processOverhead := 4 // Borders, header and the state-marker legend.
 	availableRows := m.height - headerHeight - footerHeight - y - processOverhead
 	// Taller terminals grow the summary/detail regions first. Every row left in
 	// the process panel then becomes a real process row, keeping the component's
@@ -1100,7 +1100,7 @@ func padPagePanelSpec(spec pagePanelSpec, lineCount int) pagePanelSpec {
 func (m *monitorModel) renderOverviewProcesses(width, panelRows, visibleRows int) string {
 	return m.renderProcessPreviewRows(
 		width, panelRows, visibleRows, "TOP PROCESSES",
-		fmt.Sprintf("TOP %d · FULL LIST [2 COMPUTE]", min(visibleRows, len(m.filteredProcesses()))),
+		"FULL LIST [2 COMPUTE]",
 	)
 }
 
@@ -1114,15 +1114,11 @@ func (m *monitorModel) renderProcessPreviewRows(width, panelRows, visibleRows in
 	visibleRows = min(max(1, visibleRows), panelRows)
 	m.clampMonitorProcessCursor(visibleRows)
 	format := newProcessFormat(width)
-	lines := []string{processTableHeader(format.header(), width-4)}
+	lines := []string{format.renderHeader(m.processSort)}
 	end := min(len(processes), m.monitorOffset+visibleRows)
 	for index := m.monitorOffset; index < end; index++ {
-		row := format.row(processes[index])
-		if index == m.monitorCursor {
-			row = selectedProcessStyle(m.colorMode).Render(row)
-		} else {
-			row = processStateStyle(processes[index].State).Render(row)
-		}
+		row := format.renderRow(processes[index], index+1, index == m.monitorCursor,
+			m.colorMode, m.snapshot.MemoryTotal)
 		lines = append(lines, row)
 	}
 	if len(processes) == 0 {
@@ -1131,10 +1127,12 @@ func (m *monitorModel) renderProcessPreviewRows(width, panelRows, visibleRows in
 	for len(lines) < panelRows+1 {
 		lines = append(lines, "")
 	}
-	if m.filter != "" {
-		meta += " · FILTER " + truncate(m.filter, 16)
+	lines = append(lines, processLegend(width-4))
+	counts := m.processTableMeta(m.monitorOffset, visibleRows, width, title)
+	if meta != "" && lipgloss.Width(title)+lipgloss.Width(counts)+lipgloss.Width(meta)+10 < width {
+		counts += " · " + meta
 	}
-	return btopPanel(width, title, meta, strings.Join(lines, "\n"),
+	return btopPanel(width, title, counts, strings.Join(lines, "\n"),
 		processTitleStyle, colorProcessBorder)
 }
 
@@ -1182,13 +1180,13 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 	const (
 		headerHeight    = 2
 		footerHeight    = 1
-		processOverhead = 3
+		processOverhead = 4
 	)
 	processRows := max(4, m.height-headerHeight-footerHeight-y-processOverhead)
 	processY := y
 	workloads := m.renderProcessPreview(
 		width, processRows, "COMPUTE WORKLOADS",
-		fmt.Sprintf("TOP %d BY CPU · ENTER DETAILS · / FILTER", min(processRows, len(m.filteredProcesses()))),
+		"CLICK HEADER TO SORT",
 	)
 	appendSection(workloads)
 	return strings.Join(sections, "\n"), []widgetPlacement{{

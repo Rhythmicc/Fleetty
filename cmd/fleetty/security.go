@@ -28,23 +28,28 @@ const (
 )
 
 type sshAccessConfig struct {
-	interactiveKeys map[string]struct{}
-	rpcKeys         map[string]struct{}
-	allowAnonymous  bool
-	connectionLimit int
-	idleTimeout     time.Duration
-	maxTimeout      time.Duration
+	interactiveKeys     map[string]struct{}
+	rpcKeys             map[string]struct{}
+	allowAnonymous      bool
+	allowLocalAnonymous bool
+	connectionLimit     int
+	idleTimeout         time.Duration
+	maxTimeout          time.Duration
 }
 
 func loadSSHAccessConfig() (sshAccessConfig, error) {
 	config := sshAccessConfig{
-		allowAnonymous:  envBool("SSH_ALLOW_ANONYMOUS", false),
-		connectionLimit: envInt("SSH_MAX_CONNECTIONS", defaultSSHConnectionLimit, 1, 10_000),
-		idleTimeout:     envDuration("SSH_IDLE_TIMEOUT", defaultSSHIdleTimeout),
-		maxTimeout:      envDuration("SSH_MAX_TIMEOUT", defaultSSHMaxTimeout),
+		allowAnonymous:      envBool("SSH_ALLOW_ANONYMOUS", false),
+		allowLocalAnonymous: envBool("SSH_ALLOW_LOCAL_ANONYMOUS", false),
+		connectionLimit:     envInt("SSH_MAX_CONNECTIONS", defaultSSHConnectionLimit, 1, 10_000),
+		idleTimeout:         envDuration("SSH_IDLE_TIMEOUT", defaultSSHIdleTimeout),
+		maxTimeout:          envDuration("SSH_MAX_TIMEOUT", defaultSSHMaxTimeout),
 	}
 	interactivePath := strings.TrimSpace(os.Getenv("SSH_AUTHORIZED_KEYS_FILE"))
 	rpcPath := strings.TrimSpace(os.Getenv("NODE_RPC_AUTHORIZED_KEYS_FILE"))
+	if config.allowAnonymous && config.allowLocalAnonymous {
+		return sshAccessConfig{}, errors.New("SSH_ALLOW_ANONYMOUS cannot be combined with SSH_ALLOW_LOCAL_ANONYMOUS")
+	}
 	if config.allowAnonymous && (interactivePath != "" || rpcPath != "") {
 		return sshAccessConfig{}, errors.New("SSH_ALLOW_ANONYMOUS cannot be combined with authorized-key files")
 	}
@@ -144,6 +149,24 @@ func (c sshAccessConfig) options() []ssh.Option {
 	if c.allowAnonymous {
 		return options
 	}
+	if c.allowLocalAnonymous {
+		options = append(options, func(server *ssh.Server) error {
+			server.ServerConfigCallback = func(_ ssh.Context) *gossh.ServerConfig {
+				return &gossh.ServerConfig{
+					NoClientAuth: true,
+					NoClientAuthCallback: func(conn gossh.ConnMetadata) (*gossh.Permissions, error) {
+						// Trust only a connection entirely on the loopback interface.
+						// The reserved machine-to-machine identity always needs a key.
+						if conn.User() != nodeRPCUser && isLoopbackTCPAddress(conn.RemoteAddr()) && isLoopbackTCPAddress(conn.LocalAddr()) {
+							return nil, nil
+						}
+						return nil, errors.New("SSH public-key authentication is required")
+					},
+				}
+			}
+			return nil
+		})
+	}
 	options = append(options, ssh.PublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 		allowed := c.interactiveKeys
 		if ctx.User() == nodeRPCUser {
@@ -160,6 +183,11 @@ func (c sshAccessConfig) options() []ssh.Option {
 		return ok
 	}))
 	return options
+}
+
+func isLoopbackTCPAddress(address net.Addr) bool {
+	tcp, ok := address.(*net.TCPAddr)
+	return ok && tcp != nil && tcp.IP.IsLoopback()
 }
 
 type connectionLimiter struct {

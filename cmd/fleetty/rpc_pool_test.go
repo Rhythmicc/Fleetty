@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,6 +104,89 @@ func TestRPCClientRegistrySharesPoolsByNodeIdentity(t *testing.T) {
 	if third := registry.clientFor(otherAuth); third == first {
 		t.Fatal("different authentication modes should not share a client pool")
 	}
+}
+
+func TestRPCPoolTimesOutWhileOpeningSession(t *testing.T) {
+	client := newBlockingRPCSSHClient()
+	pool := newRPCPool(hubNodeConfig{Name: "stalled-node"})
+	pool.client = client
+	pool.lastUsed = time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := pool.call(ctx, nodeRPCRequest{Operation: rpcSnapshot})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stalled NewSession error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("stalled NewSession ignored deadline for %s", elapsed)
+	}
+	if pool.client != nil {
+		t.Fatal("stalled SSH client should be discarded")
+	}
+}
+
+func TestRPCPoolWaitForBusyConnectionHonorsContext(t *testing.T) {
+	client := newBlockingRPCSSHClient()
+	pool := newRPCPool(hubNodeConfig{Name: "busy-node"})
+	pool.client = client
+	pool.lastUsed = time.Now()
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := pool.call(firstCtx, nodeRPCRequest{Operation: rpcSnapshot})
+		firstDone <- err
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first RPC did not enter NewSession")
+	}
+
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancelSecond()
+	started := time.Now()
+	_, err := pool.call(secondCtx, nodeRPCRequest{Operation: rpcSnapshot})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued RPC error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("queued RPC ignored deadline for %s", elapsed)
+	}
+
+	cancelFirst()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first RPC did not stop after cancellation")
+	}
+}
+
+type blockingRPCSSHClient struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	closeOnce   sync.Once
+}
+
+func newBlockingRPCSSHClient() *blockingRPCSSHClient {
+	return &blockingRPCSSHClient{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (c *blockingRPCSSHClient) NewSession() (*gossh.Session, error) {
+	c.enteredOnce.Do(func() { close(c.entered) })
+	<-c.release
+	return nil, errors.New("connection closed")
+}
+
+func (c *blockingRPCSSHClient) Close() error {
+	c.closeOnce.Do(func() { close(c.release) })
+	return nil
 }
 
 func newTestRPCPool(address string) *rpcClientPool {

@@ -661,14 +661,19 @@ func (m *monitorModel) storageConfirmView() string {
 		dialogWidth, actionTitle, meta, strings.Join(lines, "\n"),
 		actionStyle, colorDiskBorder,
 	)
-	if m.width <= 0 || m.height <= 0 {
-		return "\n" + dialog
+	footer := helpStyle.Render("[enter] execute  [esc] cancel") + "  " +
+		dimStyle.Render(m.status)
+	if m.busy {
+		footer = dimStyle.Render("Operation in progress. Keep Fleetty open until it finishes.")
+		if request.Kind == storageActionArchiveDelete {
+			footer = helpStyle.Render("[esc] request cancellation") + "  " +
+				dimStyle.Render(m.status)
+		}
 	}
-	return lipgloss.Place(
-		screenWidth, max(1, m.height),
-		lipgloss.Center, lipgloss.Center,
-		dialog,
-	)
+	if m.width <= 0 || m.height <= 0 {
+		return terminalFrame("\n"+dialog, footer, screenWidth, m.height)
+	}
+	return centeredTerminalFrame(dialog, footer, screenWidth, m.height)
 }
 
 func storageActionAlignedLine(left, right string, width int) string {

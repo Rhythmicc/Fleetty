@@ -63,8 +63,12 @@ func runServer() {
 		log.Fatal("Could not load hub configuration", "error", err)
 	}
 	var hubRuntime *hubService
+	stopHub := func() {}
 	if hub != nil {
 		hubRuntime = newHubService(*hub)
+		hubContext, cancelHub := context.WithCancel(context.Background())
+		stopHub = cancelHub
+		hubRuntime.start(hubContext)
 	}
 	access, err := loadSSHAccessConfig()
 	if err != nil {
@@ -111,6 +115,7 @@ func runServer() {
 
 	<-done
 	log.Info("Stopping Fleetty")
+	stopHub()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
@@ -137,6 +142,8 @@ type monitorModel struct {
 	password          string
 	filter            string
 	filtering         bool
+	processSort       processSortKey
+	processSortAsc    bool
 	cursor            int
 	processOffset     int
 	monitorCursor     int
@@ -376,6 +383,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case snapshotMsg:
 		m.collecting = false
+		monitorPID, adminPID := m.selectedProcessIDs()
 		m.snapshot = msg.snapshot
 		if msg.snapshot.Profile != "" {
 			m.profile = msg.snapshot.Profile
@@ -387,8 +395,7 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.snapshot.ManagementActions) > 0 && m.admin != nil {
 			m.admin.actions = actionsFromInfo(msg.snapshot.ManagementActions)
 		}
-		m.clampProcessCursor()
-		m.clampMonitorProcessCursor(m.monitorRows)
+		m.restoreProcessSelection(monitorPID, adminPID)
 	case historyMsg:
 		if msg.err == nil && len(msg.history) > 0 {
 			m.hourCPUHistory = hourCPUValues(msg.history)
@@ -533,6 +540,14 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	switch m.screen {
 	case screenMonitor:
 		switch key {
+		case "o", "O":
+			if m.monitorPage == monitorPageOverview || m.monitorPage == monitorPageCompute || m.monitorPage == monitorPageCustom {
+				if key == "O" {
+					m.setProcessSort(m.processSort)
+				} else {
+					m.setProcessSort((m.processSort + 1) % processSortCount)
+				}
+			}
 		case "1":
 			return m.switchMonitorPage(monitorPageOverview)
 		case "2":
@@ -808,6 +823,10 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		switch key {
 		case "esc", "q", "m":
 			m.screen, m.status, m.adminCredential = screenMonitor, "Returned to read-only monitor.", ""
+		case "o":
+			m.setProcessSort((m.processSort + 1) % processSortCount)
+		case "O":
+			m.setProcessSort(m.processSort)
 		case "/":
 			m.filtering = true
 			m.status = "Type a process name, user, or PID."
@@ -1004,6 +1023,10 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 				processRowStart = 3
 			}
 			processRowY := screenY + processRowStart
+			if y == processRowY-1 {
+				m.sortProcessHeaderAt(x-placement.X-2, placement.Width)
+				return nil
+			}
 			if y >= processRowY && y < processRowY+placement.ProcessRows {
 				return m.openReadOnlyProcess(m.monitorOffset + y - processRowY)
 			}
@@ -1025,6 +1048,8 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 		} else if y == 3 {
 			m.filtering = true
 			m.status = "Type a process name, user, or PID."
+		} else if y == adminProcessRowStart-1 && !m.filtering {
+			m.sortProcessHeaderAt(x-2, usableWidth(m.width))
 		} else if y >= adminProcessRowStart && y < adminProcessRowStart+m.visibleAdminProcessCount() {
 			return m.openProcess(m.processOffset + y - adminProcessRowStart)
 		}
@@ -1078,21 +1103,6 @@ func (m *monitorModel) selectAction(index int) {
 	m.selectedAction = &action
 	m.screen = screenConfirm
 	m.status = "Review the confirmation before running this action."
-}
-
-func (m *monitorModel) filteredProcesses() []processInfo {
-	query := strings.ToLower(strings.TrimSpace(m.filter))
-	if query == "" {
-		return m.snapshot.Processes
-	}
-	filtered := make([]processInfo, 0, len(m.snapshot.Processes))
-	for _, process := range m.snapshot.Processes {
-		searchable := strings.ToLower(fmt.Sprintf("%d %s %s", process.PID, process.User, process.Command))
-		if strings.Contains(searchable, query) {
-			filtered = append(filtered, process)
-		}
-	}
-	return filtered
 }
 
 func (m *monitorModel) clampProcessCursor() {
@@ -1647,17 +1657,14 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	format := newProcessFormat(w)
 	processes := m.filteredProcesses()
 	lines := []string{
-		processLegend(w),
-		processTableHeader(format.header(), w-4),
+		processLegend(w - 4),
+		format.renderHeader(m.processSort),
 	}
 	end := min(len(processes), m.monitorOffset+layout.processRows)
 	for i := m.monitorOffset; i < end; i++ {
-		row := format.row(processes[i])
-		if m.effectiveMonitorFocus() == monitorFocusProcesses && i == m.monitorCursor {
-			row = selectedProcessStyle(m.colorMode).Render(row)
-		} else {
-			row = processStateStyle(processes[i].State).Render(row)
-		}
+		row := format.renderRow(processes[i], i+1,
+			m.effectiveMonitorFocus() == monitorFocusProcesses && i == m.monitorCursor,
+			m.colorMode, m.snapshot.MemoryTotal)
 		lines = append(lines, row)
 	}
 	if len(processes) == 0 {
@@ -1673,10 +1680,7 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 		titleForPanel = accentStyle
 		border = lipgloss.Color("#B9A4FF")
 	}
-	meta := fmt.Sprintf("CPU ↓  ·  READ ONLY  ·  %d/%d", len(processes), len(m.snapshot.Processes))
-	if m.filter != "" {
-		meta += "  ·  FILTER " + truncate(m.filter, 18)
-	}
+	meta := m.processTableMeta(m.monitorOffset, layout.processRows, w, "PROCESSES")
 	return btopPanel(w, "PROCESSES", meta, strings.Join(lines, "\n"), titleForPanel, border)
 }
 
@@ -1692,10 +1696,11 @@ func (m *monitorModel) passwordView() string {
 		"",
 		"Password: " + inputStyle.Render(masked+" "),
 		"",
-		dimStyle.Render("Type or paste password  ·  [enter] continue  [esc] return"),
 		warningStyle.Render(m.status),
 	}, "\n")
-	return centeredPanel(w, content)
+	footer := helpStyle.Render("[enter] continue  [esc] return") + "  " +
+		dimStyle.Render("Type or paste the management password.")
+	return centeredTerminalFrame(centeredPanel(w, content), footer, w, m.height)
 }
 
 func (m *monitorModel) adminView() string {
@@ -1708,16 +1713,11 @@ func (m *monitorModel) adminView() string {
 	}
 	format := newProcessFormat(w)
 	table := []string{
-		processLegend(w),
-		processTableHeader(format.header(), w-4),
+		processLegend(w - 4),
+		format.renderHeader(m.processSort),
 	}
 	for i := m.processOffset; i < end; i++ {
-		row := format.row(processes[i])
-		if i == m.cursor && !m.filtering {
-			row = selectedProcessStyle(m.colorMode).Render(row)
-		} else {
-			row = processStateStyle(processes[i].State).Render(row)
-		}
+		row := format.renderRow(processes[i], i+1, i == m.cursor && !m.filtering, m.colorMode, m.snapshot.MemoryTotal)
 		table = append(table, row)
 	}
 	if len(processes) == 0 {
@@ -1741,14 +1741,15 @@ func (m *monitorModel) adminView() string {
 			compactButton(strconv.Itoa(index+1), m.adminActionLabel(index), action.dangerous))
 	}
 	actions := lipgloss.JoinHorizontal(lipgloss.Top, actionButtons...)
-	return strings.Join([]string{
+	body := strings.Join([]string{
 		titleStyle.Render("MANAGEMENT MODE") + "  " + accentStyle.Render("AUTHORIZED"),
 		dimStyle.Render(truncate("Available actions reflect the service account permissions and require confirmation.", w)),
 		actions,
 		filterLine,
-		btopPanel(w, "PROCESS MANAGER", fmt.Sprintf("%d/%d  ·  ROWS %d-%d", len(processes), len(m.snapshot.Processes), min(len(processes), m.processOffset+1), end), strings.Join(table, "\n"), processTitleStyle, colorProcessBorder),
-		helpStyle.Render("[/] filter  [↑/↓] select  [enter/click] details  [c] clear  [esc] monitor") + "  " + dimStyle.Render(m.status),
+		btopPanel(w, "PROCESS MANAGER", m.processTableMeta(m.processOffset, rows, w, "PROCESS MANAGER"), strings.Join(table, "\n"), processTitleStyle, colorProcessBorder),
 	}, "\n")
+	footer := helpStyle.Render("[o/O] sort/reverse  [/] filter  [↑/↓] select  [enter/click] details  [c] clear  [esc] monitor") + "  " + dimStyle.Render(m.status)
+	return terminalFrame(body, footer, w, m.height)
 }
 
 func (m *monitorModel) confirmView() string {
@@ -1761,7 +1762,7 @@ func (m *monitorModel) confirmView() string {
 	if m.busy {
 		confirmLabel = "Running…"
 	}
-	return strings.Join([]string{
+	body := strings.Join([]string{
 		titleStyle.Render("CONFIRM MANAGEMENT ACTION"),
 		warningStyle.Render("This runs on the host immediately: " + m.selectedAction.label),
 		"",
@@ -1770,9 +1771,9 @@ func (m *monitorModel) confirmView() string {
 		actionCard(w, "Y", confirmLabel, "Click to execute", true),
 		"",
 		actionCard(w, "N", "Cancel", "Return without making a change", false),
-		"",
-		helpStyle.Render("[y/enter] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status),
 	}, "\n")
+	footer := helpStyle.Render("[y/enter] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status)
+	return terminalFrame(body, footer, w, m.height)
 }
 
 func (m *monitorModel) processDetailView() string {
@@ -1818,13 +1819,14 @@ func (m *monitorModel) processDetailView() string {
 		}
 		body = strings.Join(lines, "\n")
 	}
-	return strings.Join([]string{
+	pageBody := strings.Join([]string{
 		titleStyle.Render("PROCESS DETAILS") + "  " + accentStyle.Render(fmt.Sprintf("PID %d", pid)),
 		dimStyle.Render(description),
 		action,
 		panelStyle(w).Render(body),
-		helpStyle.Render(help) + "  " + dimStyle.Render(m.status),
 	}, "\n")
+	footer := helpStyle.Render(help) + "  " + dimStyle.Render(m.status)
+	return terminalFrame(pageBody, footer, w, m.height)
 }
 
 func (m *monitorModel) processTerminateConfirmView() string {
@@ -1838,7 +1840,7 @@ func (m *monitorModel) processTerminateConfirmView() string {
 	if m.busy {
 		confirm = compactButton("…", "Sending SIGTERM", true)
 	}
-	return strings.Join([]string{
+	body := strings.Join([]string{
 		titleStyle.Render("CONFIRM PROCESS TERMINATION"),
 		warningStyle.Render(fmt.Sprintf("PID %d (%s) will receive SIGTERM.", p.PID, p.Command)),
 		confirm + "  " + compactButton("N", "Cancel", false),
@@ -1848,8 +1850,9 @@ func (m *monitorModel) processTerminateConfirmView() string {
 			fmt.Sprintf("%s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("CPU"), p.CPU, dimStyle.Render("MEM"), p.Memory, dimStyle.Render("RSS"), bytes(p.RSS)),
 			dimStyle.Render("COMMAND") + "  " + truncate(p.Command, max(12, w-14)),
 		}, "\n")),
-		helpStyle.Render("[y/enter/click] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status),
 	}, "\n")
+	footer := helpStyle.Render("[y/enter/click] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status)
+	return terminalFrame(body, footer, w, m.height)
 }
 
 type metricVisual int
@@ -1982,83 +1985,6 @@ func renderMetricVisual(card metricCard, width int) string {
 	}
 }
 
-type processFormat struct {
-	mode         int
-	commandWidth int
-}
-
-const (
-	processFull = iota
-	processMedium
-	processCompact
-)
-
-const (
-	processPIDWidth     = 9
-	processUserWidth    = 13
-	processCPUWidth     = 6
-	processMemoryWidth  = 6
-	processRSSWidth     = 10
-	processElapsedWidth = 9
-)
-
-func newProcessFormat(width int) processFormat {
-	if width >= 112 {
-		return processFormat{mode: processFull, commandWidth: max(16, width-69)}
-	}
-	if width >= 78 {
-		return processFormat{mode: processMedium, commandWidth: max(14, width-58)}
-	}
-	return processFormat{mode: processCompact, commandWidth: max(10, width-32)}
-}
-
-func (f processFormat) header() string {
-	switch f.mode {
-	case processFull:
-		return fixedCell("PID", processPIDWidth, false) + " " +
-			fixedCell("USER", processUserWidth, false) + " " +
-			fixedCell("CPU", processCPUWidth, true) + "  " +
-			fixedCell("MEM", processMemoryWidth, true) + "  " +
-			fixedCell("RSS", processRSSWidth, false) + "  " +
-			fixedCell("ELAPSED", processElapsedWidth, false) + "  COMMAND"
-	case processMedium:
-		return fixedCell("PID", processPIDWidth, false) + " " +
-			fixedCell("USER", processUserWidth, false) + " " +
-			fixedCell("CPU", processCPUWidth, true) + "  " +
-			fixedCell("MEM", processMemoryWidth, true) + "  " +
-			fixedCell("RSS", processRSSWidth, false) + "  COMMAND"
-	default:
-		return fixedCell("PID", processPIDWidth, false) + " " +
-			fixedCell("CPU", processCPUWidth, true) + "  " +
-			fixedCell("MEM", processMemoryWidth, true) + "  COMMAND"
-	}
-}
-
-func (f processFormat) row(p processInfo) string {
-	switch f.mode {
-	case processFull:
-		return fixedCell(strconv.Itoa(p.PID), processPIDWidth, false) + " " +
-			fixedCell(p.User, processUserWidth, false) + " " +
-			fixedCell(fmt.Sprintf("%.1f%%", p.CPU), processCPUWidth, true) + "  " +
-			fixedCell(fmt.Sprintf("%.1f%%", p.Memory), processMemoryWidth, true) + "  " +
-			fixedCell(bytes(p.RSS), processRSSWidth, false) + "  " +
-			fixedCell(elapsed(p.Elapsed), processElapsedWidth, false) + "  " +
-			fixedCell(p.Command, f.commandWidth, false)
-	case processMedium:
-		return fixedCell(strconv.Itoa(p.PID), processPIDWidth, false) + " " +
-			fixedCell(p.User, processUserWidth, false) + " " +
-			fixedCell(fmt.Sprintf("%.1f%%", p.CPU), processCPUWidth, true) + "  " +
-			fixedCell(fmt.Sprintf("%.1f%%", p.Memory), processMemoryWidth, true) + "  " +
-			fixedCell(bytes(p.RSS), processRSSWidth, false) + "  " +
-			fixedCell(p.Command, f.commandWidth, false)
-	default:
-		return fixedCell(strconv.Itoa(p.PID), processPIDWidth, false) + " " +
-			fixedCell(fmt.Sprintf("%.1f%%", p.CPU), processCPUWidth, true) + "  " +
-			fixedCell(fmt.Sprintf("%.1f%%", p.Memory), processMemoryWidth, true) + "  " +
-			fixedCell(p.Command, f.commandWidth, false)
-	}
-}
-
 func processLegend(width int) string {
 	items := []struct {
 		state string
@@ -2074,16 +2000,24 @@ func processLegend(width int) string {
 	}
 	parts := []string{dimStyle.Render("STATE")}
 	for _, item := range items {
-		label := item.state
+		label := processStateMarker(item.state)
 		switch {
 		case width >= 108:
 			label += " " + item.full
 		case width >= 78:
 			label += " " + item.short
+		default:
+			label += item.state
 		}
 		parts = append(parts, processStateStyle(item.state).Render(label))
 	}
-	return strings.Join(parts, dimStyle.Render(" · "))
+	legend := strings.Join(parts, "  ")
+	load := dimStyle.Render("   LOAD ") + gpuLightStyle.Render("LOW") + " " +
+		gpuActiveStyle.Render("MID") + " " + gpuBusyStyle.Render("HIGH") + " " + gpuMaxStyle.Render("HOT")
+	if lipgloss.Width(legend)+lipgloss.Width(load) <= width {
+		legend += load
+	}
+	return ansi.Truncate(legend, width, "")
 }
 
 func processStateStyle(state string) lipgloss.Style {
@@ -2113,8 +2047,8 @@ func processStateStyle(state string) lipgloss.Style {
 // selectedProcessStyle uses colors that are explicit members of the xterm
 // palette. That keeps SSH terminals which only advertise 256 colors from
 // approximating the selection background as saturated blue. Selection also
-// deliberately overrides the process-state foreground; state colors remain
-// visible on every unselected row and in the legend.
+// uses a neutral background. Process-table cells retain their load colors
+// on top of this background, including in the selected row.
 func selectedProcessStyle(mode colorMode) lipgloss.Style {
 	foreground := lipgloss.Color("153") // soft blue
 	background := lipgloss.Color("236") // neutral charcoal
@@ -2938,6 +2872,43 @@ func renderFooter(width int, status string) string {
 	return hints + "  " + dimStyle.Render(truncate(status, remaining))
 }
 
+// terminalFrame reserves the final terminal row for the page's operation bar.
+// Page renderers own their body layout, while this function owns the one
+// invariant shared by every interactive Fleetty screen: controls never move
+// when content grows, shrinks, or refreshes.
+func terminalFrame(body, footer string, width, height int) string {
+	width = max(1, width)
+	footer = ansi.Truncate(footer, width, "")
+	if height <= 0 {
+		if body == "" {
+			return footer
+		}
+		return body + "\n" + footer
+	}
+
+	bodyRows := max(0, height-lipgloss.Height(footer))
+	lines := []string(nil)
+	if body != "" {
+		lines = strings.Split(body, "\n")
+	}
+	if len(lines) > bodyRows {
+		lines = lines[:bodyRows]
+	}
+	for len(lines) < bodyRows {
+		lines = append(lines, "")
+	}
+	lines = append(lines, footer)
+	return strings.Join(lines, "\n")
+}
+
+func centeredTerminalFrame(content, footer string, width, height int) string {
+	footerHeight := lipgloss.Height(footer)
+	bodyHeight := max(1, height-footerHeight)
+	body := lipgloss.Place(max(1, width), bodyHeight,
+		lipgloss.Center, lipgloss.Center, content)
+	return terminalFrame(body, footer, width, height)
+}
+
 func (m *monitorModel) renderMonitorFooter(width int) string {
 	if m.filtering {
 		value := m.filter
@@ -2960,6 +2931,7 @@ func (m *monitorModel) renderMonitorFooter(width int) string {
 		keyHint("↑↓", "select"),
 		keyHint("enter", "details"),
 		keyHint("/", "filter"),
+		keyHint("o/O", "sort/reverse"),
 		keyHint("t", "theme"),
 		keyHint("r", "refresh"),
 		keyHint("q", "quit"),
