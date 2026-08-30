@@ -1,6 +1,6 @@
 module github.com/Rhythmicc/fleetty
 
-go 1.25.12
+go 1.25.13
 
 require (
 	charm.land/bubbletea/v2 v2.0.2
@@ -9,8 +9,8 @@ require (
 	charm.land/wish/v2 v2.0.1
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/x/ansi v0.11.6
-	golang.org/x/crypto v0.52.0
-	golang.org/x/sys v0.45.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
