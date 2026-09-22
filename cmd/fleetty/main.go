@@ -2185,6 +2185,7 @@ type monitorSnapshot struct {
 	CPUCores                int
 	Uptime                  uint64
 	CPUPercent              float64
+	CPUCoreUsage            []cpuCoreUsage
 	LoadAverage             string
 	MemoryUsed, MemoryTotal uint64
 	DiskUsed, DiskTotal     uint64
@@ -2272,12 +2273,10 @@ type processDetail struct {
 	CanTerminate            bool
 }
 
-type cpuCounters struct{ total, idle uint64 }
-
 type metricsCollector struct {
 	config                     machineConfig
 	identity                   systemIdentity
-	previousCPU                cpuCounters
+	previousCPU                map[string]cpuCounters
 	previousNet                netCounters
 	previousInterfaces         map[string]networkDeviceCounters
 	previousProcessNet         map[int]processNetworkCounters
@@ -2341,27 +2340,8 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 	s.CPUCores = c.identity.CPUCores
 	s.Uptime = uptimeSeconds(c.identity, s.CollectedAt)
 	var errs []string
-	if runtime.GOOS == "darwin" {
-		value, err := readDarwinCPUPercent()
-		if err != nil {
-			errs = append(errs, "cpu: "+err.Error())
-		} else {
-			s.CPUPercent = value
-			c.haveCPU = true
-		}
-	} else {
-		if counters, err := readCPUCounters(); err != nil {
-			errs = append(errs, "cpu: "+err.Error())
-		} else {
-			if c.haveCPU {
-				totalDelta := counters.total - c.previousCPU.total
-				idleDelta := counters.idle - c.previousCPU.idle
-				if totalDelta > 0 {
-					s.CPUPercent = 100 * float64(totalDelta-idleDelta) / float64(totalDelta)
-				}
-			}
-			c.previousCPU, c.haveCPU = counters, true
-		}
+	if err := c.collectCPU(&s); err != nil {
+		errs = append(errs, "cpu: "+err.Error())
 	}
 	if used, total, err := readMemory(); err != nil {
 		errs = append(errs, "memory: "+err.Error())
@@ -2395,32 +2375,6 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 		return s, errors.New(strings.Join(errs, "; "))
 	}
 	return s, nil
-}
-
-func readCPUCounters() (cpuCounters, error) {
-	b, err := os.ReadFile("/proc/stat")
-	if err != nil {
-		return cpuCounters{}, err
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 5 || fields[0] != "cpu" {
-			continue
-		}
-		var c cpuCounters
-		for _, field := range fields[1:] {
-			value, _ := strconv.ParseUint(field, 10, 64)
-			c.total += value
-		}
-		idle, _ := strconv.ParseUint(fields[4], 10, 64)
-		if len(fields) > 5 {
-			iowait, _ := strconv.ParseUint(fields[5], 10, 64)
-			idle += iowait
-		}
-		c.idle = idle
-		return c, nil
-	}
-	return cpuCounters{}, errors.New("cpu line missing")
 }
 
 func readMemory() (used, total uint64, err error) {

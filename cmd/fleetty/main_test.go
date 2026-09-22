@@ -649,6 +649,51 @@ func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
 	}
 }
 
+func TestSlurmQueuesMarkNextPerPartition(t *testing.T) {
+	jobs := []slurmJob{
+		{ID: "run", Partition: "gpu-a", State: "RUNNING", NodeList: "node1"},
+		{ID: "dependency", Partition: "gpu-a", State: "PENDING", Priority: 900, Reason: "(Dependency)"},
+		{ID: "next-a", Partition: "gpu-a", State: "PENDING", Priority: 800, Reason: "(Priority)"},
+		{ID: "next-b", Partition: "gpu-b", State: "PENDING", Priority: 700, Reason: "(Resources)"},
+		{ID: "later-a", Partition: "gpu-a", State: "PENDING", Priority: 600, Reason: "(Resources)"},
+		{ID: "later-b", Partition: "gpu-b", State: "PENDING", Priority: 500, Reason: "(Priority)"},
+	}
+	snapshot := slurmSnapshot{
+		Name: "cluster", CollectedAt: time.Now(), Jobs: jobs,
+		Nodes: []slurmNode{{Name: "node1", Partitions: []string{"gpu-a", "gpu-b"}}},
+	}
+	model := &hubModel{
+		config: hubConfig{
+			Nodes:         []hubNodeConfig{{Name: "node1", SlurmCluster: "cluster", SlurmNode: "node1"}},
+			SlurmClusters: []slurmClusterConfig{{Name: "cluster"}},
+		},
+		slurmFilter: -1,
+		slurmStates: []slurmClusterState{{Snapshot: snapshot}},
+	}
+
+	assertNext := func(label string, display []slurmDisplayJob) {
+		t.Helper()
+		var next []string
+		for _, job := range display {
+			if job.Next {
+				next = append(next, job.Job.ID)
+			}
+		}
+		if strings.Join(next, ",") != "next-a,next-b" {
+			t.Fatalf("%s NEXT jobs = %v, want one candidate for each partition", label, next)
+		}
+	}
+	assertNext("cluster queue", model.selectedSlurmJobs())
+	queue := model.nodeSlurmQueue(0)
+	if queue == nil {
+		t.Fatal("node queue is nil")
+	}
+	assertNext("node queue", queue.Jobs)
+	if summary := ansi.Strip(slurmClusterQueueSummaryLine(snapshot)); !strings.Contains(summary, "NEXT 2") {
+		t.Fatalf("cluster summary = %q, want NEXT 2", summary)
+	}
+}
+
 func TestNodeSlurmQueueFiltersPendingJobsByGPUType(t *testing.T) {
 	nodes := []slurmNode{
 		{

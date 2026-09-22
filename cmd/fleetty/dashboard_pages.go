@@ -257,6 +257,9 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 		}
 	} else if m.monitorPage == monitorPageOverview ||
 		m.monitorPage == monitorPageCompute {
+		if m.monitorPage == monitorPageCompute {
+			hints = append(hints, keyHint("pg↑↓", "scroll"))
+		}
 		hints = append(hints,
 			keyHint("↑↓", "select"),
 			keyHint("o/O", "sort/reverse"),
@@ -332,7 +335,13 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	if rich {
 		queueRows = 7 + detailGrowth
 	}
-	queue := m.nodeQueuePanelSpec(queueRows, detailWidth)
+	queueWidth := width
+	// Only GPU overviews put the queue beside Network. CPU-only nodes
+	// move Network into the summary row and give the queue a full row.
+	if columns && capabilities.GPU && capabilities.Slurm {
+		queueWidth = (width - 1) / 2
+	}
+	queue := m.nodeQueuePanelSpec(queueRows, queueWidth)
 	networkRendered := false
 	summaryTarget := max(pagePanelLineHeight(host), pagePanelLineHeight(compute))
 	detailTarget := max(pagePanelLineHeight(network), pagePanelLineHeight(queue))
@@ -1030,7 +1039,7 @@ func (m *monitorModel) nodeQueuePanelSpec(rowLimit, width int) pagePanelSpec {
 	}
 	return pagePanelSpec{
 		title: "NODE QUEUE / SLURM", meta: meta,
-		lines: lines, titleStyle: processTitleStyle, borderColor: colorProcessBorder,
+		lines: appendSlurmQOSLegend(lines, queue.Jobs, width-4), titleStyle: processTitleStyle, borderColor: colorProcessBorder,
 	}
 }
 
@@ -1148,32 +1157,14 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 		sections = append(sections, section)
 		y += lipgloss.Height(section)
 	}
+	cpuCard, _ := m.metricWidgetCard(dashboardPanelCPU)
+	appendSection(m.renderCPUWidget(cpuCard, width, widgetSizeMedium))
 	if m.capabilities().GPU {
 		layout := dashboardLayout{width: width, height: m.height, compactGPU: width < 112}
 		appendSection(m.gpuPanel(layout))
-	} else {
-		appendSection(renderPagePanel(width, pagePanelSpec{
-			title: "COMPUTE", meta: "CPU",
-			lines: []string{
-				valueStyle.Render(fmt.Sprintf("CPU %.1f%%", m.snapshot.CPUPercent)),
-				dimStyle.Render(m.snapshot.LoadAverage),
-				sparkline(m.cpuHistory, max(12, width-4), 100, cpuTitleStyle),
-			},
-			titleStyle: cpuTitleStyle, borderColor: colorCPUBorder,
-		}))
 	}
-	cpuCard, _ := m.metricWidgetCard(dashboardPanelCPU)
 	memoryCard, _ := m.metricWidgetCard(dashboardPanelMemory)
-	if width >= 96 {
-		appendSection(lipgloss.JoinHorizontal(lipgloss.Top,
-			renderMetricWidget(cpuCard, (width-1)/2, widgetSizeSmall),
-			" ",
-			renderMetricWidget(memoryCard, width-(width-1)/2-1, widgetSizeSmall),
-		))
-	} else {
-		appendSection(renderMetricWidget(cpuCard, width, widgetSizeSmall))
-		appendSection(renderMetricWidget(memoryCard, width, widgetSizeSmall))
-	}
+	appendSection(renderMetricWidget(memoryCard, width, widgetSizeSmall))
 	if m.slurmQueue != nil {
 		appendSection(m.slurmNodePanel(width, min(6, max(3, m.height/5))))
 	}

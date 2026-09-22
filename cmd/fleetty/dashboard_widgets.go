@@ -213,7 +213,10 @@ func (m *monitorModel) renderDashboardWidget(preference dashboardPanelPreference
 			return m.renderLargeNetworkWidget(card, width), 0
 		}
 		return renderMetricWidget(card, width, preference.Size), 0
-	case dashboardPanelCPU, dashboardPanelMemory, dashboardPanelDisk, dashboardPanelBattery:
+	case dashboardPanelCPU:
+		card, _ := m.metricWidgetCard(preference.ID)
+		return m.renderCPUWidget(card, width, preference.Size), 0
+	case dashboardPanelMemory, dashboardPanelDisk, dashboardPanelBattery:
 		card, ok := m.metricWidgetCard(preference.ID)
 		if !ok {
 			return "", 0
@@ -359,10 +362,11 @@ func (m *monitorModel) renderLargeProcessMetricWidget(card metricCard, width int
 		valueStyle.Render(truncate(card.value, contentWidth)),
 		dimStyle.Render(truncate(card.detail, contentWidth)),
 		renderMetricVisual(card, contentWidth),
-		"",
-		card.titleStyle.Render(section),
-		metricProcessHeader(contentWidth),
 	}
+	if !byMemory {
+		lines = m.cpuMetricLines(card, width)
+	}
+	lines = append(lines, "", card.titleStyle.Render(section), metricProcessHeader(contentWidth))
 	if len(processes) == 0 {
 		lines = append(lines, dimStyle.Render("Process attribution is unavailable for this sample."))
 	} else {

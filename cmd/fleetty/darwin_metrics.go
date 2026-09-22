@@ -14,33 +14,6 @@ import (
 	"time"
 )
 
-func readDarwinCPUPercent() (float64, error) {
-	output, err := commandOutput(2*time.Second, "top", "-l", "1", "-n", "0", "-s", "0")
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "CPU usage:") {
-			continue
-		}
-		for _, field := range strings.Split(line, ",") {
-			if !strings.Contains(field, "idle") {
-				continue
-			}
-			parts := strings.Fields(strings.TrimSpace(field))
-			if len(parts) < 2 {
-				break
-			}
-			idle, parseErr := strconv.ParseFloat(strings.TrimSuffix(parts[0], "%"), 64)
-			if parseErr == nil {
-				return 100 - idle, nil
-			}
-			break
-		}
-	}
-	return 0, errors.New("top CPU usage line missing")
-}
-
 func readDarwinMemory() (used, total uint64, err error) {
 	totalOutput, err := commandOutput(2*time.Second, "sysctl", "-n", "hw.memsize")
 	if err != nil {

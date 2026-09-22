@@ -713,6 +713,18 @@ func slurmEligibleForNext(job slurmJob) bool {
 	}
 }
 
+func markSlurmNext(job slurmJob, markedPartitions map[string]struct{}) bool {
+	if !slurmEligibleForNext(job) {
+		return false
+	}
+	partition := strings.ToLower(strings.TrimSpace(job.Partition))
+	if _, marked := markedPartitions[partition]; marked {
+		return false
+	}
+	markedPartitions[partition] = struct{}{}
+	return true
+}
+
 type slurmDisplayJob struct {
 	Cluster  string
 	Job      slurmJob
@@ -769,7 +781,7 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 			break
 		}
 	}
-	nextMarked := false
+	nextPartitions := make(map[string]struct{})
 	for order, job := range state.Snapshot.Jobs {
 		if isSlurmRunning(job.State) {
 			if slurmNodeListContains(job.NodeList, nodeConfig.SlurmNode) {
@@ -788,8 +800,7 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 		if !slurmPendingJobMatchesNode(job, nodeConfig.SlurmNode, state.Snapshot.Nodes) {
 			continue
 		}
-		next := !nextMarked && slurmEligibleForNext(job)
-		nextMarked = nextMarked || next
+		next := markSlurmNext(job, nextPartitions)
 		queue.Jobs = append(queue.Jobs, slurmDisplayJob{
 			Cluster: state.Snapshot.Name, Job: job, Next: next, Order: order, Snapshot: &queueSnapshot,
 		})
@@ -1397,7 +1408,8 @@ func (m *hubModel) slurmJobAt(x, y int) (int, bool) {
 	}
 	cardsHeight := lipgloss.Height(m.renderSlurmClusterCards(usableWidth(m.width)))
 	firstRow := 1 + cardsHeight + 2
-	if y < firstRow {
+	contentLines := max(1, max(3, m.height-1-cardsHeight-1)-2)
+	if y < firstRow || y >= firstRow+slurmTableRows(usableWidth(m.width)-4, contentLines) {
 		return 0, false
 	}
 	index := m.slurmOffset + y - firstRow
@@ -1453,7 +1465,7 @@ func (m *hubModel) slurmQueueView() string {
 	footer = ansi.Truncate(footer, width, "")
 	jobPanelHeight := max(3, m.height-lipgloss.Height(header)-lipgloss.Height(cards)-lipgloss.Height(footer))
 	jobContentLines := max(1, jobPanelHeight-2)
-	tableRows := max(0, jobContentLines-1)
+	tableRows := slurmTableRows(width-4, jobContentLines)
 	m.clampSlurmCursor()
 	if m.slurmCursor < m.slurmOffset {
 		m.slurmOffset = m.slurmCursor
@@ -1468,15 +1480,19 @@ func (m *hubModel) slurmQueueView() string {
 		lines = append(lines, dimStyle.Render("No jobs in the selected queue."))
 	} else {
 		for index, job := range jobs[m.slurmOffset:end] {
-			row := renderSlurmJobRow(job, width-4)
+			base := lipgloss.NewStyle()
 			if m.slurmOffset+index == m.slurmCursor {
-				row = selectedProcessStyle(m.colorMode).Width(width - 4).Render(row)
+				base = selectedProcessStyle(m.colorMode)
 			}
+			row := renderSlurmJobRowWithStyle(job, width-4, base)
 			lines = append(lines, row)
 		}
 	}
-	for len(lines) < jobContentLines {
+	for len(lines) < tableRows+1 {
 		lines = append(lines, "")
+	}
+	if width-4 < slurmCompactWidth && jobContentLines >= 3 {
+		lines = append(lines, slurmQOSLegend(jobs, width-4))
 	}
 	lines = lines[:jobContentLines]
 	jobMeta := fmt.Sprintf("%s  ·  %d RUN  ·  %d NEXT  ·  %d WAIT  ·  %d JOBS",
@@ -1522,14 +1538,15 @@ func (m *hubModel) slurmExplanationView(header string, width int) string {
 	lines = append(lines,
 		"",
 		gpuTitleStyle.Render("REQUEST"),
+		fmt.Sprintf("QOS %s  ·  PRIORITY %d", slurmQOSLabel(job.QOS), job.Priority),
 		fmt.Sprintf(
-			"CPU %s  ·  MEMORY %s  ·  GPU %s  ·  NODES %d  ·  QOS %s",
+			"CPU %s  ·  MEMORY %s  ·  GPU %s  ·  NODES %d",
 			valueOrDash(job.CPUs), slurmMemoryLabel(job.MemoryBytes),
-			slurmGPUCountLabel(slurmGPUCounts(job.GRES)), job.Nodes, slurmQOSLabel(job.QOS),
+			slurmGPUCountLabel(slurmGPUCounts(job.GRES)), job.Nodes,
 		),
 		fmt.Sprintf(
-			"PARTITION %s  ·  CONSTRAINT %s  ·  PRIORITY %d",
-			valueOrUnknown(job.Partition), slurmOptional(job.Constraints), job.Priority,
+			"PARTITION %s  ·  CONSTRAINT %s",
+			valueOrUnknown(job.Partition), slurmOptional(job.Constraints),
 		),
 	)
 	if explanation.ReasonCode == "Resources" {
@@ -1738,10 +1755,10 @@ func fitSlurmClusterCardLines(lines []string, count int) []string {
 func slurmClusterQueueSummaryLine(snapshot slurmSnapshot) string {
 	running, pending, other := slurmStateCounts(snapshot.Jobs)
 	next := 0
+	markedPartitions := make(map[string]struct{})
 	for _, job := range snapshot.Jobs {
-		if slurmEligibleForNext(job) {
-			next = 1
-			break
+		if markSlurmNext(job, markedPartitions) {
+			next++
 		}
 	}
 	line := fmt.Sprintf("%s %d  ·  %s %d  ·  %s %d",
@@ -1860,10 +1877,9 @@ func (m *hubModel) selectedSlurmJobs() []slurmDisplayJob {
 		if state.Error != "" || state.Snapshot.CollectedAt.IsZero() {
 			continue
 		}
-		nextMarked := false
+		nextPartitions := make(map[string]struct{})
 		for order, job := range state.Snapshot.Jobs {
-			next := !nextMarked && slurmEligibleForNext(job)
-			nextMarked = nextMarked || next
+			next := markSlurmNext(job, nextPartitions)
 			jobs = append(jobs, slurmDisplayJob{
 				Cluster: state.Snapshot.Name, Job: job, Next: next, Order: order,
 				Snapshot: &state.Snapshot,
@@ -1901,16 +1917,17 @@ func slurmJobTableHeader(width int) string {
 		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-10s %-8s %5s %-18s %-*s",
 			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "NODES", "NAME",
 			reasonWidth, "NODE / BLOCKER")
-	case width >= 80:
-		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-10s %-8s",
-			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED")
 	default:
-		header = fmt.Sprintf("%-13s %-9s %10s %-10s %s", "JOB ID", "STATE", "WEIGHT", "QOS", "USER")
+		return newCompactSlurmFormat(width, true).render(slurmDisplayJob{}, true, lipgloss.NewStyle())
 	}
 	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 }
 
 func renderSlurmJobRow(display slurmDisplayJob, width int) string {
+	return renderSlurmJobRowWithStyle(display, width, lipgloss.NewStyle())
+}
+
+func renderSlurmJobRowWithStyle(display slurmDisplayJob, width int, base lipgloss.Style) string {
 	job := display.Job
 	stateLabel, stateStyle := slurmDisplayState(display)
 	reason := slurmDisplayReason(display)
@@ -1920,53 +1937,45 @@ func renderSlurmJobRow(display slurmDisplayJob, width int) string {
 	} else if isSlurmPending(job.State) {
 		reasonStyle = gpuTitleStyle
 	}
+	// Apply the selection to individual cells and separators. Wrapping an
+	// already-colored row lets embedded ANSI resets interrupt its background.
+	value := valueStyle.Inherit(base)
+	qos := gpuTitleStyle.Inherit(base)
+	stateStyle = stateStyle.Inherit(base)
+	reasonStyle = reasonStyle.Inherit(base)
 	switch {
 	case width >= 152:
 		reasonWidth := max(8, width-144)
 		return strings.Join([]string{
-			fixedCell(display.Cluster, 14, false),
-			valueStyle.Render(fixedCell(job.ID, 15, false)),
-			fixedCell(job.User, 10, false),
+			base.Render(fixedCell(display.Cluster, 14, false)),
+			value.Render(fixedCell(job.ID, 15, false)),
+			base.Render(fixedCell(job.User, 10, false)),
 			stateStyle.Render(fixedCell(stateLabel, 11, false)),
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 12, false)),
-			fixedCell(job.Elapsed, 9, true),
-			fixedCell(job.TimeLimit, 9, true),
-			fixedCell(strconv.Itoa(job.Nodes), 5, true),
-			fixedCell(job.Partition, 16, false),
-			fixedCell(job.Name, 22, false),
+			value.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
+			qos.Render(fixedCell(slurmQOSLabel(job.QOS), 12, false)),
+			base.Render(fixedCell(job.Elapsed, 9, true)),
+			base.Render(fixedCell(job.TimeLimit, 9, true)),
+			base.Render(fixedCell(strconv.Itoa(job.Nodes), 5, true)),
+			base.Render(fixedCell(job.Partition, 16, false)),
+			base.Render(fixedCell(job.Name, 22, false)),
 			reasonStyle.Render(fixedCell(reason, reasonWidth, false)),
-		}, " ")
+		}, base.Render(" "))
 	case width >= 112:
 		reasonWidth := max(8, width-104)
 		return strings.Join([]string{
-			fixedCell(display.Cluster, 12, false),
-			valueStyle.Render(fixedCell(job.ID, 13, false)),
-			fixedCell(job.User, 9, false),
+			base.Render(fixedCell(display.Cluster, 12, false)),
+			value.Render(fixedCell(job.ID, 13, false)),
+			base.Render(fixedCell(job.User, 9, false)),
 			stateStyle.Render(fixedCell(stateLabel, 10, false)),
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 10, false)),
-			fixedCell(job.Elapsed, 8, true),
-			fixedCell(strconv.Itoa(job.Nodes), 5, true),
-			fixedCell(job.Name, 18, false),
+			value.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
+			qos.Render(fixedCell(slurmQOSLabel(job.QOS), 10, false)),
+			base.Render(fixedCell(job.Elapsed, 8, true)),
+			base.Render(fixedCell(strconv.Itoa(job.Nodes), 5, true)),
+			base.Render(fixedCell(job.Name, 18, false)),
 			reasonStyle.Render(fixedCell(reason, reasonWidth, false)),
-		}, " ")
-	case width >= 80:
-		return strings.Join([]string{
-			fixedCell(display.Cluster, 12, false),
-			valueStyle.Render(fixedCell(job.ID, 13, false)),
-			fixedCell(job.User, 9, false),
-			stateStyle.Render(fixedCell(stateLabel, 10, false)),
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 10, false)),
-			fixedCell(job.Elapsed, 8, true),
-		}, " ")
+		}, base.Render(" "))
 	default:
-		return valueStyle.Render(fixedCell(job.ID, 13, false)) + " " +
-			stateStyle.Render(fixedCell(stateLabel, 9, false)) + " " +
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)) + " " +
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 10, false)) + " " +
-			fixedCell(job.User, max(6, width-46), false)
+		return newCompactSlurmFormat(width, true).render(display, false, base)
 	}
 }
 
@@ -2045,6 +2054,9 @@ func (m *monitorModel) slurmNodePanel(width, rowLimit int) string {
 		}
 	}
 	titleForPanel := processTitleStyle
+	if width-4 < slurmCompactWidth {
+		lines = append(lines, slurmQOSLegend(queue.Jobs, width-4))
+	}
 	border := colorProcessBorder
 	if m.monitorFocus == monitorFocusQueue {
 		titleForPanel = accentStyle
@@ -2054,67 +2066,34 @@ func (m *monitorModel) slurmNodePanel(width, rowLimit int) string {
 }
 
 func slurmNodeJobHeader(width int) string {
-	var header string
-	switch {
-	case width >= 108:
-		header = fmt.Sprintf("%-15s %-10s %-9s %10s %-12s %-9s %-9s %-16s %s",
-			"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "LIMIT", "PARTITION", "NAME / BLOCKER")
-	case width >= 76:
-		header = fmt.Sprintf("%-14s %-9s %-9s %10s %-10s %-8s %s",
-			"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "NAME / BLOCKER")
-	case width >= 54:
-		header = fmt.Sprintf("%-13s %-9s %10s %-10s %s", "JOB ID", "STATE", "WEIGHT", "QOS", "NAME")
-	default:
-		header = fmt.Sprintf("%-10s %-7s %8s %-8s", "JOB ID", "STATE", "WEIGHT", "QOS")
+	if width < slurmCompactWidth {
+		return newCompactSlurmFormat(width, false).render(slurmDisplayJob{}, true, lipgloss.NewStyle())
 	}
+	header := fmt.Sprintf("%-15s %-10s %-9s %10s %-12s %-9s %-9s %-16s %s",
+		"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "LIMIT", "PARTITION", "NAME / BLOCKER")
 	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 }
 
 func renderSlurmNodeJobRow(display slurmDisplayJob, width int) string {
+	if width < slurmCompactWidth {
+		return newCompactSlurmFormat(width, false).render(display, false, lipgloss.NewStyle())
+	}
 	job := display.Job
 	state, style := slurmDisplayState(display)
 	detail := job.Name
 	if isSlurmPending(job.State) && job.Reason != "" {
 		detail += "  [" + slurmDisplayReason(display) + "]"
 	}
-	switch {
-	case width >= 108:
-		fixed := 15 + 1 + 10 + 1 + 9 + 1 + 10 + 1 + 12 + 1 + 9 + 1 + 9 + 1 + 16 + 1
-		return strings.Join([]string{
-			valueStyle.Render(fixedCell(job.ID, 15, false)),
-			fixedCell(job.User, 10, false),
-			style.Render(fixedCell(state, 9, false)),
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 12, false)),
-			fixedCell(job.Elapsed, 9, true),
-			fixedCell(job.TimeLimit, 9, true),
-			fixedCell(job.Partition, 16, false),
-			fixedCell(detail, max(8, width-fixed), false),
-		}, " ")
-	case width >= 76:
-		fixed := 14 + 1 + 9 + 1 + 9 + 1 + 10 + 1 + 10 + 1 + 8 + 1
-		return strings.Join([]string{
-			valueStyle.Render(fixedCell(job.ID, 14, false)),
-			fixedCell(job.User, 9, false),
-			style.Render(fixedCell(state, 9, false)),
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 10, false)),
-			fixedCell(job.Elapsed, 8, true),
-			fixedCell(detail, max(8, width-fixed), false),
-		}, " ")
-	case width >= 54:
-		fixed := 13 + 1 + 9 + 1 + 10 + 1 + 10 + 1
-		return valueStyle.Render(fixedCell(job.ID, 13, false)) + " " +
-			style.Render(fixedCell(state, 9, false)) + " " +
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)) + " " +
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 10, false)) + " " +
-			fixedCell(detail, max(6, width-fixed), false)
-	default:
-		return strings.Join([]string{
-			valueStyle.Render(fixedCell(job.ID, 10, false)),
-			style.Render(fixedCell(state, 7, false)),
-			valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 8, true)),
-			gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 8, false)),
-		}, " ")
-	}
+	fixed := 15 + 1 + 10 + 1 + 9 + 1 + 10 + 1 + 12 + 1 + 9 + 1 + 9 + 1 + 16 + 1
+	return strings.Join([]string{
+		valueStyle.Render(fixedCell(job.ID, 15, false)),
+		fixedCell(job.User, 10, false),
+		style.Render(fixedCell(state, 9, false)),
+		valueStyle.Render(fixedCell(strconv.FormatUint(job.Priority, 10), 10, true)),
+		gpuTitleStyle.Render(fixedCell(slurmQOSLabel(job.QOS), 12, false)),
+		fixedCell(job.Elapsed, 9, true),
+		fixedCell(job.TimeLimit, 9, true),
+		fixedCell(job.Partition, 16, false),
+		fixedCell(detail, max(8, width-fixed), false),
+	}, " ")
 }

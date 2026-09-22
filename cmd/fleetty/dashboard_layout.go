@@ -50,7 +50,7 @@ type dashboardPanelDescriptor struct {
 var dashboardPanelRegistry = []dashboardPanelDescriptor{
 	{
 		ID: dashboardPanelCPU, Label: "CPU",
-		Description: "Processor utilization, load, and recent history",
+		Description: "CPU summary (S), per-core load (M), and top processes (L)",
 		DefaultSize: widgetSizeSmall, Available: func(*monitorModel) bool { return true },
 	},
 	{

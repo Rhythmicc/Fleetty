@@ -98,6 +98,7 @@ type snapshotExport struct {
 	CPUCores            int                `json:"cpu_cores,omitempty"`
 	Uptime              uint64             `json:"uptime_seconds"`
 	CPUPercent          float64            `json:"cpu_percent"`
+	CPUCoreUsage        []cpuCoreUsage     `json:"cpu_core_usage,omitempty"`
 	LoadAverage         string             `json:"load_average,omitempty"`
 	MemoryUsed          uint64             `json:"memory_used_bytes"`
 	MemoryTotal         uint64             `json:"memory_total_bytes"`
@@ -223,6 +224,7 @@ func exportSnapshot(snapshot monitorSnapshot) snapshotExport {
 		CPUCores:            snapshot.CPUCores,
 		Uptime:              snapshot.Uptime,
 		CPUPercent:          snapshot.CPUPercent,
+		CPUCoreUsage:        snapshot.CPUCoreUsage,
 		LoadAverage:         snapshot.LoadAverage,
 		MemoryUsed:          snapshot.MemoryUsed,
 		MemoryTotal:         snapshot.MemoryTotal,
@@ -306,6 +308,18 @@ func renderPrometheusMetrics(snapshot monitorSnapshot) string {
 	var builder strings.Builder
 	writePrometheusGauge(&builder, "fleetty_uptime_seconds", "Node uptime in seconds.", labels, strconv.FormatUint(snapshot.Uptime, 10))
 	writePrometheusGauge(&builder, "fleetty_cpu_percent", "CPU utilization percentage.", labels, strconv.FormatFloat(snapshot.CPUPercent, 'g', -1, 64))
+	wroteCoreHeader := false
+	for _, core := range snapshot.CPUCoreUsage {
+		if !core.Available {
+			continue
+		}
+		if !wroteCoreHeader {
+			builder.WriteString("# HELP fleetty_cpu_core_percent Logical CPU utilization percentage.\n# TYPE fleetty_cpu_core_percent gauge\n")
+			wroteCoreHeader = true
+		}
+		fmt.Fprintf(&builder, "fleetty_cpu_core_percent{%s,cpu=\"%s\"} %s\n", labels,
+			prometheusLabelValue(core.CPU), strconv.FormatFloat(core.Percent, 'g', -1, 64))
+	}
 	writePrometheusGauge(&builder, "fleetty_memory_used_bytes", "Used physical memory in bytes.", labels, strconv.FormatUint(snapshot.MemoryUsed, 10))
 	writePrometheusGauge(&builder, "fleetty_memory_total_bytes", "Total physical memory in bytes.", labels, strconv.FormatUint(snapshot.MemoryTotal, 10))
 	writePrometheusGauge(&builder, "fleetty_disk_used_bytes", "Used root filesystem bytes.", labels, strconv.FormatUint(snapshot.DiskUsed, 10))
