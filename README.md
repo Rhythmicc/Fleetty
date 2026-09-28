@@ -80,6 +80,22 @@ Fleetty 是一个面向个人电脑、计算服务器、存储节点和 Slurm �
 
 ## 安装
 
+### 命令行自更新
+
+从 v0.1.4 起，可直接更新当前执行的 Fleetty：
+
+```bash
+fleetty update --check             # 仅检查，不下载二进制或修改文件
+fleetty update                     # 更新到最新正式 Release
+fleetty update --version v0.1.4     # 安装指定版本，也可显式降级
+```
+
+支持 Linux/macOS 的 amd64 和 arm64。更新器从官方 GitHub Release 获取安装包，校验 `checksums.txt` 中的 SHA-256，并执行新版的版本检查；验证通过后才在同一文件系统原子替换当前程序。下载、校验或启动检查失败不会覆盖原程序。符号链接会解析到实际安装文件，文件权限和 root 更新时的原属主保持不变；并发更新会被拒绝。旧版保留在输出提示的 `Backup` 路径，可由安装者恢复。
+
+普通用户安装（例如 `~/.local/bin/fleetty`）不需要 sudo；系统安装需由安装目录的所有者执行，例如 `sudo /opt/fleetty/fleetty update`。更新不会修改配置、密钥或自动重启服务，已打开的监控会话继续使用旧版，重新启动后生效。Hub 管理员更新后应自行执行 `sudo systemctl restart fleetty-hub.service`。
+
+旧版没有 `update` 命令，需要先按下方安装方式手动替换一次。`update` 获取的是已发布的 Release，不是 GitHub `main` 分支；批量更新多节点仍使用 `fleettyctl update`。
+
 ### macOS 本地监控
 
 根据 Mac 的处理器下载二进制并校验：

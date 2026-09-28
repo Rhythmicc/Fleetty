@@ -29,6 +29,7 @@ type Info struct {
 }
 
 var capabilities = []string{
+	"self-update-v1",
 	"hub-groups-v1",
 	"process-table-v2",
 	"terminal-footer-v1",

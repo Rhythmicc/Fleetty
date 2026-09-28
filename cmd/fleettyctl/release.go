@@ -1,30 +1,24 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Rhythmicc/fleetty/internal/releaseasset"
 )
 
-const (
-	defaultReleaseBaseURL = "https://github.com/Rhythmicc/fleetty/releases/latest/download"
-	maxChecksumsSize      = 2 << 20
-	maxReleaseAssetSize   = 256 << 20
-	maxReleaseRedirects   = 5
-)
+const defaultReleaseBaseURL = "https://github.com/Rhythmicc/fleetty/releases/latest/download"
 
-var releaseHTTPClientFactory = defaultReleaseHTTPClient
+var releaseHTTPClientFactory = releaseasset.NewClient
 
 type releasePreparation struct {
 	Targets     []resolvedTarget
@@ -32,35 +26,6 @@ type releasePreparation struct {
 	ReleaseID   string
 	Assets      map[string]string
 	RelayAssets map[string]string
-}
-
-func validateReleaseBaseURL(value string) error {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return fmt.Errorf("parse release base_url: %w", err)
-	}
-	if parsed.Scheme != "https" || parsed.Host == "" {
-		return errors.New("release base_url must be an absolute HTTPS URL")
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("release base_url must not contain credentials, a query, or a fragment")
-	}
-	return nil
-}
-
-func defaultReleaseHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 3 * time.Minute,
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= maxReleaseRedirects {
-				return errors.New("too many release download redirects")
-			}
-			if request.URL.Scheme != "https" {
-				return errors.New("release download redirected away from HTTPS")
-			}
-			return nil
-		},
-	}
 }
 
 func prepareReleaseTargets(
@@ -220,13 +185,13 @@ func downloadReleaseNamedAssets(
 	client *http.Client,
 ) (map[string]string, string, error) {
 	if client == nil {
-		client = defaultReleaseHTTPClient()
+		client = releaseasset.NewClient()
 	}
-	checksums, err := downloadReleaseBytes(ctx, client, release.BaseURL+"/checksums.txt", maxChecksumsSize)
+	checksums, err := releaseasset.Bytes(ctx, client, release.BaseURL+"/checksums.txt", releaseasset.MaxChecksumsSize)
 	if err != nil {
 		return nil, "", fmt.Errorf("download release checksums: %w", err)
 	}
-	expected, err := parseReleaseChecksums(checksums)
+	expected, err := releaseasset.Checksums(checksums)
 	if err != nil {
 		return nil, "", err
 	}
@@ -248,67 +213,13 @@ func downloadReleaseNamedAssets(
 		if expectedHash == "" {
 			return nil, "", fmt.Errorf("release checksums do not contain %s", asset)
 		}
-		path, err := ensureReleaseAsset(ctx, client, release.BaseURL+"/"+asset, cacheDir, asset, expectedHash)
+		path, err := releaseasset.Asset(ctx, client, release.BaseURL+"/"+asset, cacheDir, asset, expectedHash)
 		if err != nil {
 			return nil, "", err
 		}
 		assets[key] = path
 	}
 	return assets, releaseID, nil
-}
-
-func downloadReleaseBytes(ctx context.Context, client *http.Client, address string, maximum int64) ([]byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("User-Agent", "fleettyctl-release-updater")
-	request.Header.Set("Accept", "application/octet-stream")
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected HTTP status %s", response.Status)
-	}
-	if response.ContentLength > maximum {
-		return nil, fmt.Errorf("download exceeds %d bytes", maximum)
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maximum {
-		return nil, fmt.Errorf("download exceeds %d bytes", maximum)
-	}
-	return data, nil
-}
-
-func parseReleaseChecksums(data []byte) (map[string]string, error) {
-	checksums := make(map[string]string)
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) != 2 || !validSHA256(fields[0]) {
-			return nil, fmt.Errorf("invalid release checksum line %q", safeRemoteText(scanner.Text(), 160))
-		}
-		name := strings.TrimPrefix(fields[1], "*")
-		if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
-			return nil, fmt.Errorf("invalid release asset name %q", name)
-		}
-		if _, exists := checksums[name]; exists {
-			return nil, fmt.Errorf("duplicate checksum for %s", name)
-		}
-		checksums[name] = strings.ToLower(fields[0])
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	if len(checksums) == 0 {
-		return nil, errors.New("release checksums are empty")
-	}
-	return checksums, nil
 }
 
 func ensurePrivateReleaseDirectory(path string) error {
@@ -329,86 +240,6 @@ func ensurePrivateReleaseDirectory(path string) error {
 		return err
 	}
 	return nil
-}
-
-func ensureReleaseAsset(
-	ctx context.Context,
-	client *http.Client,
-	address, cacheDir, asset, expectedHash string,
-) (string, error) {
-	destination := filepath.Join(cacheDir, asset)
-	if info, err := os.Lstat(destination); err == nil {
-		if info.Mode().IsRegular() {
-			actual, hashErr := fileSHA256(destination)
-			if hashErr == nil && actual == expectedHash {
-				if chmodErr := os.Chmod(destination, 0o700); chmodErr != nil {
-					return "", chmodErr
-				}
-				return destination, nil
-			}
-		}
-		if removeErr := os.Remove(destination); removeErr != nil {
-			return "", fmt.Errorf("replace invalid cached release asset: %w", removeErr)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
-	if err != nil {
-		return "", err
-	}
-	request.Header.Set("User-Agent", "fleettyctl-release-updater")
-	request.Header.Set("Accept", "application/octet-stream")
-	response, err := client.Do(request)
-	if err != nil {
-		return "", fmt.Errorf("download %s: %w", asset, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %s: unexpected HTTP status %s", asset, response.Status)
-	}
-	if response.ContentLength > maxReleaseAssetSize {
-		return "", fmt.Errorf("download %s exceeds %d bytes", asset, maxReleaseAssetSize)
-	}
-	temporary, err := os.CreateTemp(cacheDir, "."+asset+"-*")
-	if err != nil {
-		return "", err
-	}
-	temporaryPath := temporary.Name()
-	committed := false
-	defer func() {
-		_ = temporary.Close()
-		if !committed {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o700); err != nil {
-		return "", err
-	}
-	digest := sha256.New()
-	written, err := io.Copy(io.MultiWriter(temporary, digest), io.LimitReader(response.Body, maxReleaseAssetSize+1))
-	if err != nil {
-		return "", fmt.Errorf("download %s: %w", asset, err)
-	}
-	if written > maxReleaseAssetSize {
-		return "", fmt.Errorf("download %s exceeds %d bytes", asset, maxReleaseAssetSize)
-	}
-	actualHash := hex.EncodeToString(digest.Sum(nil))
-	if actualHash != expectedHash {
-		return "", fmt.Errorf("download %s checksum mismatch", asset)
-	}
-	if err := temporary.Sync(); err != nil {
-		return "", err
-	}
-	if err := temporary.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(temporaryPath, destination); err != nil {
-		return "", err
-	}
-	committed = true
-	return destination, nil
 }
 
 func releasePlans(

@@ -405,6 +405,7 @@ func (m *launcherModel) helpView() string {
 		valueStyle.Render("fleetty snapshot") + " " + dimStyle.Render("machine-readable JSON snapshot"),
 		valueStyle.Render("fleetty metrics") + "  " + dimStyle.Render("Prometheus text output"),
 		valueStyle.Render("fleetty doctor") + "   " + dimStyle.Render("installed service diagnostics"),
+		valueStyle.Render("fleetty update") + "   " + dimStyle.Render("verify and install the latest release"),
 		valueStyle.Render("fleetty version") + "  " + dimStyle.Render("build and platform information"),
 		"",
 		"SSH serving is always explicit. Running Fleetty without arguments never",

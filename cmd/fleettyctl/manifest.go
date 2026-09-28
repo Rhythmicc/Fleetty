@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Rhythmicc/fleetty/internal/releaseasset"
 )
 
 const (
@@ -299,7 +301,7 @@ func (manifest *fleetManifest) resolveReleaseConfig() error {
 	if release.BaseURL == "" {
 		release.BaseURL = defaultReleaseBaseURL
 	}
-	if err := validateReleaseBaseURL(release.BaseURL); err != nil {
+	if err := releaseasset.ValidateBaseURL(release.BaseURL); err != nil {
 		return err
 	}
 	release.CacheDir = strings.TrimSpace(release.CacheDir)
