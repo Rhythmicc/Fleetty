@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -1289,18 +1290,26 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 			return renderCard(content)
 		}
 		if profile == machineProfileCPU {
-			content = renderCPUHubCard(snapshot)
+			content = renderCPUHubCard(snapshot, width)
 			return renderCard(content)
 		}
 		gpuUtil, gpuMemoryUsed, gpuMemoryTotal, maxTemperature := hubGPUStats(snapshot.GPUs)
-		loadPrefix := fmt.Sprintf("%s ×%d  %s %3.0f%% ", dimStyle.Render("GPU"), len(snapshot.GPUs), dimStyle.Render("PEAK"), gpuUtil)
-		temperature := "  " + gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature))
-		meterWidth := min(12, max(1, width-4-lipgloss.Width(loadPrefix)-lipgloss.Width(temperature)))
+		gpuPrefix := fmt.Sprintf("%s ×%d %3.0f%%  %s ", dimStyle.Render("GPU"), len(snapshot.GPUs), gpuUtil, dimStyle.Render("VRAM"))
+		memory := bytes(gpuMemoryUsed) + "/" + bytes(gpuMemoryTotal)
+		if lipgloss.Width(gpuPrefix)+lipgloss.Width(memory) > width-4 {
+			memory = hubCompactBytes(gpuMemoryUsed) + "/" + hubCompactBytes(gpuMemoryTotal)
+		}
+		network := gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature)) + "  " + renderHubNetworkRates(snapshot)
+		if lipgloss.Width(network) > width-4 {
+			network = gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature)) +
+				" " + networkRXStyle.Render("↓") + valueStyle.Render(hubCompactBytes(snapshot.NetworkRX)+"/s") +
+				" " + networkTXStyle.Render("↑") + valueStyle.Render(hubCompactBytes(snapshot.NetworkTX)+"/s")
+		}
 		content = []string{
 			renderHubResourceSummary(snapshot),
-			loadPrefix + hubLoadMeter(gpuUtil, meterWidth) + temperature,
-			dimStyle.Render("VRAM ") + valueStyle.Render(bytes(gpuMemoryUsed)+" / "+bytes(gpuMemoryTotal)),
-			renderHubNetworkRates(snapshot),
+			gpuPrefix + valueStyle.Render(memory),
+			network,
+			bar(math.Max(snapshot.CPUPercent, gpuUtil), max(1, width-4)),
 		}
 	}
 	if node.Description == "" && strings.HasPrefix(content[0], "\x1b") {
@@ -1326,7 +1335,7 @@ func hubNodeAddressLabel(address string) string {
 	return label + sanitizeTerminalText(host)
 }
 
-func renderCPUHubCard(snapshot monitorSnapshot) []string {
+func renderCPUHubCard(snapshot monitorSnapshot, width int) []string {
 	load := strings.TrimSpace(strings.TrimPrefix(snapshot.LoadAverage, "load"))
 	if load == "" {
 		load = "--"
@@ -1336,8 +1345,8 @@ func renderCPUHubCard(snapshot monitorSnapshot) []string {
 		fmt.Sprintf("%s %d  %s %s",
 			cpuTitleStyle.Render("CORES"), snapshot.CPUCores,
 			dimStyle.Render("LOAD"), dimStyle.Render(load)),
-		dimStyle.Render("MEM ") + valueStyle.Render(bytes(snapshot.MemoryUsed)+" / "+bytes(snapshot.MemoryTotal)),
 		renderHubNetworkRates(snapshot),
+		bar(snapshot.CPUPercent, max(1, width-4)),
 	}
 }
 
@@ -1357,12 +1366,8 @@ func hubCapacityStyle(usage float64, normal lipgloss.Style) lipgloss.Style {
 	return normal
 }
 
-func hubLoadMeter(usage float64, width int) string {
-	filled := min(width, max(0, int(usage*float64(width)/100)))
-	if usage > 0 && filled == 0 {
-		filled = 1
-	}
-	return gpuTitleStyle.Render(strings.Repeat("━", filled)) + dimStyle.Render(strings.Repeat("─", width-filled))
+func hubCompactBytes(value uint64) string {
+	return strings.ReplaceAll(strings.ReplaceAll(bytes(value), ".0 ", " "), " ", "")
 }
 
 func renderHubNetworkRates(snapshot monitorSnapshot) string {

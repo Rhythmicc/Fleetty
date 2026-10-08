@@ -246,19 +246,16 @@ func TestHubPackedGroupsAndPagination(t *testing.T) {
 	}
 }
 
-func TestHubLiveCardRemovesDuplicateLoadAndThickBar(t *testing.T) {
+func TestHubLiveCardShowsFullWidthBlockBarWithoutDuplicateLoad(t *testing.T) {
 	m := compactTestHub(238, 48)
 	card := ansi.Strip(m.renderNodeCard(2, hubPreferredCardWidth))
-	for _, want := range []string{"GPU ×1", "PEAK 100%", "━", "VRAM", "↓", "↑", "IP"} {
+	for _, want := range []string{"GPU ×1 100%", strings.Repeat("█", hubPreferredCardWidth-4), "VRAM", "↓", "↑", "IP"} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("missing %s: %s", want, card)
 		}
 	}
-	if strings.ContainsAny(card, "█░") || strings.Contains(card, "MAX") || strings.Contains(card, "LOAD") {
-		t.Fatalf("duplicate/heavy GPU load display: %s", card)
-	}
-	if hubLoadMeter(100, 8) != gpuTitleStyle.Render(strings.Repeat("━", 8))+dimStyle.Render("") {
-		t.Fatal("normal full utilization styled as an alarm")
+	if strings.Contains(card, "━") || strings.Contains(card, "MAX") || strings.Contains(card, "LOAD") {
+		t.Fatalf("thin/duplicate GPU load display: %s", card)
 	}
 	if hubCapacityStyle(96, diskTitleStyle).Render("96%") != dangerStyle.Render("96%") {
 		t.Fatal("real capacity risk lost its warning color")
@@ -282,7 +279,40 @@ func TestHubAdaptiveGridAvoidsWidthCliffs(t *testing.T) {
 	m.states[0].Snapshot.GPUs = make([]gpuInfo, 16)
 	m.states[0].Snapshot.GPUs[0] = gpuInfo{Utilization: 100, Temperature: 100}
 	card := ansi.Strip(m.renderNodeCard(0, m.cardWidth()))
-	if !strings.Contains(card, "GPU ×16") || !strings.Contains(card, "PEAK 100%") || !strings.Contains(card, "100°C") {
+	if !strings.Contains(card, "GPU ×16 100%") || !strings.Contains(card, "100°C") {
 		t.Fatalf("important GPU fields clipped at minimum width: %s", card)
+	}
+}
+
+func TestHubBlockBarReflectsBusyCPUAndGPUAcrossWidths(t *testing.T) {
+	for _, profile := range []string{machineProfileGPU, machineProfileCPU} {
+		for _, width := range []int{36, 39, 46, 52, 72} {
+			for _, cpu := range []float64{0, 50, 100} {
+				for _, gpu := range []float64{0, 50, 100} {
+					m := compactTestHub(238, 48)
+					m.config.Nodes[0].Profile = profile
+					m.states[0].Snapshot.CPUPercent = cpu
+					m.states[0].Snapshot.GPUs[0].Utilization = gpu
+					m.states[0].Snapshot.NetworkRX = 120 << 20
+					m.states[0].Snapshot.NetworkTX = 120 << 20
+					card := m.renderNodeCard(0, width)
+					if lipgloss.Width(card) != width || lipgloss.Height(card) != hubCardHeight {
+						t.Fatalf("%s width %d changed card geometry", profile, width)
+					}
+					lines := strings.Split(card, "\n")
+					load := cpu
+					if profile == machineProfileGPU && gpu > load {
+						load = gpu
+					}
+					want := "│ " + ansi.Strip(bar(load, width-4)) + " │"
+					if ansi.Strip(lines[4]) != want {
+						t.Fatalf("%s cpu %.0f gpu %.0f: wrong full-width load bar: %s", profile, cpu, gpu, lines[4])
+					}
+					if !strings.Contains(lines[3], "↑") || !strings.Contains(lines[3], "↓") || strings.Contains(lines[3], "…") {
+						t.Fatalf("%s width %d clipped network directions: %s", profile, width, lines[3])
+					}
+				}
+			}
+		}
 	}
 }
