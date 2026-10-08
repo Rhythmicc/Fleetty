@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os/user"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,12 +17,56 @@ import (
 )
 
 type networkConnectionInfo struct {
-	PID      int    `json:"pid"`
-	Name     string `json:"name"`
-	Protocol string `json:"protocol"`
-	State    string `json:"state"`
-	Local    string `json:"local"`
-	Remote   string `json:"remote"`
+	PID              int    `json:"pid"`
+	Name             string `json:"name"`
+	Protocol         string `json:"protocol"`
+	State            string `json:"state"`
+	Local            string `json:"local"`
+	Remote           string `json:"remote"`
+	User             string `json:"user"`
+	RX               uint64 `json:"rx_bytes_per_second"`
+	TX               uint64 `json:"tx_bytes_per_second"`
+	RXTotal          uint64 `json:"rx_bytes_total"`
+	TXTotal          uint64 `json:"tx_bytes_total"`
+	TrafficAvailable bool   `json:"traffic_available"`
+	RateAvailable    bool   `json:"rate_available"`
+}
+
+func (c *metricsCollector) applyConnectionTraffic(connections []networkConnectionInfo, current map[string]connectionNetworkCounters, now time.Time) {
+	seconds := now.Sub(c.lastProcessNetAt).Seconds()
+	users := make(map[uint32]string)
+	for i := range connections {
+		connection := &connections[i]
+		key := connectionNetworkKey(connection.Protocol, connection.Local, connection.Remote)
+		counters, ok := current[key]
+		if !ok {
+			continue
+		}
+		if connection.State != "TIME_WAIT" {
+			name, ok := users[counters.uid]
+			if !ok {
+				name = strconv.FormatUint(uint64(counters.uid), 10)
+				if owner, err := user.LookupId(name); err == nil {
+					name = sanitizeTerminalText(owner.Username)
+				}
+				users[counters.uid] = name
+			}
+			connection.User = name
+		}
+		connection.TrafficAvailable = counters.available
+		connection.RXTotal, connection.TXTotal = counters.rx, counters.tx
+		if previous, ok := c.previousConnectionNet[key]; ok && counters.available && previous.available &&
+			previous.cookie == counters.cookie && !c.lastProcessNetAt.IsZero() && seconds > 0 &&
+			counters.rx >= previous.rx && counters.tx >= previous.tx {
+			connection.RateAvailable = true
+			connection.RX = uint64(float64(counters.rx-previous.rx) / seconds)
+			connection.TX = uint64(float64(counters.tx-previous.tx) / seconds)
+		}
+	}
+	c.previousConnectionNet = current
+	sort.SliceStable(connections, func(i, j int) bool {
+		return connections[i].RX+connections[i].TX > connections[j].RX+connections[j].TX
+	})
 }
 
 func (c *metricsCollector) collectLinuxNetworkConnections(snapshot *monitorSnapshot) {
@@ -39,30 +84,45 @@ func (c *metricsCollector) collectLinuxNetworkConnections(snapshot *monitorSnaps
 		return
 	}
 	names := make(map[int32]string)
+	owners := make(map[int32]string)
 	unattributed := false
 	for _, connection := range connections {
 		if _, ok := names[connection.Pid]; !ok {
 			name := "--"
+			owner := "--"
 			if connection.Pid > 0 {
 				if p, err := process.NewProcessWithContext(ctx, connection.Pid); err == nil {
 					if value, err := p.NameWithContext(ctx); err == nil {
 						name = sanitizeTerminalText(value)
 					}
+					if value, err := p.UsernameWithContext(ctx); err == nil {
+						owner = sanitizeTerminalText(value)
+					}
 				}
 			}
 			names[connection.Pid] = name
+			owners[connection.Pid] = owner
 		}
 		if connection.Pid == 0 && connection.Status != "TIME_WAIT" {
 			unattributed = true
 		}
 	}
 	snapshot.NetworkConnections = summarizeNetworkConnections(connections, names)
+	for i := range snapshot.NetworkConnections {
+		snapshot.NetworkConnections[i].User = owners[int32(snapshot.NetworkConnections[i].PID)]
+	}
+	current, trafficErr := readLinuxConnectionCounters(ctx)
+	now := time.Now()
+	c.applyConnectionTraffic(snapshot.NetworkConnections, current, now)
 	if unattributed {
 		snapshot.NetworkProcessError = "Some owners are unavailable; root can inspect other users' sockets."
 	}
+	if trafficErr != nil {
+		snapshot.NetworkProcessError = strings.TrimSpace(snapshot.NetworkProcessError + " TCP traffic unavailable: " + sanitizeTerminalText(trafficErr.Error()))
+	}
 	c.cachedNetworkConnections = append([]networkConnectionInfo(nil), snapshot.NetworkConnections...)
 	c.cachedConnectionWarning = snapshot.NetworkProcessError
-	c.lastProcessNetAt = time.Now()
+	c.lastProcessNetAt = now
 }
 
 func summarizeNetworkConnections(connections []gopsnet.ConnectionStat, names map[int32]string) []networkConnectionInfo {
@@ -104,27 +164,64 @@ func summarizeNetworkConnections(connections []gopsnet.ConnectionStat, names map
 	return result
 }
 
-func networkConnectionCells(width int, values []string) string {
-	sizes := []int{6, 8, 4, 5, max(5, width-27)}
-	if width >= 100 {
-		endpoint := (width - 43) / 2
-		sizes = []int{7, 16, 4, 11, endpoint, width - 43 - endpoint}
-	} else if width >= 64 {
-		sizes = []int{7, 14, 4, 11, width - 40}
+type connectionColumn struct {
+	label string
+	size  int
+}
+
+func networkConnectionColumns(width int) []connectionColumn {
+	columns := []connectionColumn{{"PID", 7}, {"PROCESS", 14}, {"USER", 10}, {"DOWN", 11}, {"UP", 11}}
+	if width < 80 {
+		columns = []connectionColumn{{"PID", 6}, {"PROCESS", 9}, {"USER", 8}, {"DOWN", 9}, {"UP", 9}}
 	}
-	cells := make([]string, len(sizes))
-	for i, size := range sizes {
-		cells[i] = fixedCell(values[i], size, false)
+	if width < 52 {
+		columns = []connectionColumn{{"PID", 5}, {"PROCESS", 7}, {"USER", 6}, {"DOWN", 7}, {"UP", 7}}
+	}
+	if width >= 100 {
+		columns = append(columns, connectionColumn{"TYPE", 4}, connectionColumn{"STATE", 11})
+	}
+	used := len(columns)
+	for _, col := range columns {
+		used += col.size
+	}
+	if width >= 140 {
+		localWidth := min(39, (width-used-1)/2)
+		columns = append(columns, connectionColumn{"LOCAL", localWidth})
+		used += localWidth + 1
+	}
+	if width > used+6 {
+		columns = append(columns, connectionColumn{"REMOTE", width - used})
+	}
+	return columns
+}
+
+func networkConnectionCells(width int, values map[string]string, header bool) string {
+	var cells []string
+	for _, col := range networkConnectionColumns(width) {
+		cell := fixedCell(values[col.label], col.size, !header && (col.label == "DOWN" || col.label == "UP"))
+		if !header {
+			switch col.label {
+			case "DOWN":
+				cell = networkRXStyle.Render(cell)
+			case "UP":
+				cell = networkTXStyle.Render(cell)
+			case "USER", "TYPE", "STATE", "LOCAL":
+				cell = dimStyle.Render(cell)
+			default:
+				cell = valueStyle.Render(cell)
+			}
+		}
+		cells = append(cells, cell)
 	}
 	return ansi.Truncate(strings.Join(cells, " "), width, "")
 }
 
 func networkConnectionHeader(width int) string {
-	values := []string{"PID", "PROCESS", "TYPE", "STATE", "REMOTE"}
-	if width >= 100 {
-		values = []string{"PID", "PROCESS", "TYPE", "STATE", "LOCAL", "REMOTE"}
+	values := make(map[string]string)
+	for _, col := range networkConnectionColumns(width) {
+		values[col.label] = col.label
 	}
-	return dimStyle.Copy().Bold(true).Render(networkConnectionCells(width, values))
+	return dimStyle.Copy().Bold(true).Render(networkConnectionCells(width, values, true))
 }
 
 func renderNetworkConnectionRow(connection networkConnectionInfo, width int) string {
@@ -132,24 +229,19 @@ func renderNetworkConnectionRow(connection networkConnectionInfo, width int) str
 	if connection.PID > 0 {
 		pid = strconv.Itoa(connection.PID)
 	}
-	state := connection.State
-	if width < 64 {
-		switch state {
-		case "ESTABLISHED":
-			state = "ESTAB"
-		case "LISTEN":
-			state = "LISTN"
-		case "TIME_WAIT":
-			state = "TWAIT"
-		case "UNCONN":
-			state = "UNCON"
+	down, up := "--", "--"
+	if connection.TrafficAvailable {
+		down, up = "sample…", "sample…"
+		if connection.RateAvailable {
+			down, up = bytes(connection.RX)+"/s", bytes(connection.TX)+"/s"
 		}
 	}
-	values := []string{pid, sanitizeTerminalText(connection.Name), connection.Protocol, state, connection.Remote}
-	if width >= 100 {
-		values = []string{pid, sanitizeTerminalText(connection.Name), connection.Protocol, state, connection.Local, connection.Remote}
+	owner := connection.User
+	if owner == "" {
+		owner = "--"
 	}
-	return valueStyle.Render(networkConnectionCells(width, values))
+	values := map[string]string{"PID": pid, "PROCESS": sanitizeTerminalText(connection.Name), "USER": sanitizeTerminalText(owner), "TYPE": connection.Protocol, "STATE": connection.State, "LOCAL": connection.Local, "REMOTE": connection.Remote, "DOWN": down, "UP": up}
+	return networkConnectionCells(width, values, false)
 }
 
 func (m *monitorModel) networkApplicationCount() int {
@@ -161,7 +253,7 @@ func (m *monitorModel) networkApplicationCount() int {
 
 func (m *monitorModel) networkApplicationMeta() string {
 	if m.snapshot.NetworkConnectionMode {
-		return fmt.Sprintf("%d TCP/UDP · CONNECTIONS ONLY", m.networkApplicationCount())
+		return fmt.Sprintf("%d TCP/UDP · TCP PAYLOAD · UDP --", m.networkApplicationCount())
 	}
 	return fmt.Sprintf("%d ATTRIBUTED", m.networkApplicationCount())
 }

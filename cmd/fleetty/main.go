@@ -2282,6 +2282,7 @@ type metricsCollector struct {
 	previousNet                netCounters
 	previousInterfaces         map[string]networkDeviceCounters
 	previousProcessNet         map[int]processNetworkCounters
+	previousConnectionNet      map[string]connectionNetworkCounters
 	haveCPU                    bool
 	haveNet                    bool
 	lastNetAt                  time.Time
@@ -2314,6 +2315,10 @@ func counterDelta(current, previous uint64) uint64 {
 }
 
 func newMetricsCollector(config machineConfig) *metricsCollector {
+	processNetInterval := 5 * time.Second
+	if runtime.GOOS == "linux" {
+		processNetInterval = time.Second
+	}
 	return &metricsCollector{
 		config:                     config,
 		identity:                   readSystemIdentity(),
@@ -2321,7 +2326,7 @@ func newMetricsCollector(config machineConfig) *metricsCollector {
 		previousProcessNet:         make(map[int]processNetworkCounters),
 		processRefreshInterval:     3 * time.Second,
 		gpuWorkloadRefreshInterval: 5 * time.Second,
-		processNetRefreshInterval:  5 * time.Second,
+		processNetRefreshInterval:  processNetInterval,
 	}
 }
 
