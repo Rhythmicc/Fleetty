@@ -90,34 +90,36 @@ func loadExportMachineConfig(configPath string) (machineConfig, error) {
 }
 
 type snapshotExport struct {
-	CollectedAt         time.Time          `json:"collected_at"`
-	NodeName            string             `json:"node_name,omitempty"`
-	Profile             string             `json:"profile,omitempty"`
-	OSName              string             `json:"os_name,omitempty"`
-	CPUModel            string             `json:"cpu_model,omitempty"`
-	CPUCores            int                `json:"cpu_cores,omitempty"`
-	Uptime              uint64             `json:"uptime_seconds"`
-	CPUPercent          float64            `json:"cpu_percent"`
-	CPUCoreUsage        []cpuCoreUsage     `json:"cpu_core_usage,omitempty"`
-	LoadAverage         string             `json:"load_average,omitempty"`
-	MemoryUsed          uint64             `json:"memory_used_bytes"`
-	MemoryTotal         uint64             `json:"memory_total_bytes"`
-	DiskUsed            uint64             `json:"disk_used_bytes"`
-	DiskTotal           uint64             `json:"disk_total_bytes"`
-	NetworkRX           uint64             `json:"network_rx_bytes_per_second"`
-	NetworkTX           uint64             `json:"network_tx_bytes_per_second"`
-	NetworkRXTotal      uint64             `json:"network_rx_total_bytes"`
-	NetworkTXTotal      uint64             `json:"network_tx_total_bytes"`
-	NetworkProcessError string             `json:"network_process_error,omitempty"`
-	Battery             *batteryExport     `json:"battery,omitempty"`
-	Filesystems         []filesystemExport `json:"filesystems,omitempty"`
-	Services            []serviceExport    `json:"services,omitempty"`
-	Containers          []containerExport  `json:"containers,omitempty"`
-	PM2Processes        []pm2Export        `json:"pm2_processes,omitempty"`
-	GPUs                []gpuExport        `json:"gpus,omitempty"`
-	Processes           []processExport    `json:"processes,omitempty"`
-	History             []historySample    `json:"history,omitempty"`
-	Warning             string             `json:"warning,omitempty"`
+	CollectedAt           time.Time               `json:"collected_at"`
+	NodeName              string                  `json:"node_name,omitempty"`
+	Profile               string                  `json:"profile,omitempty"`
+	OSName                string                  `json:"os_name,omitempty"`
+	CPUModel              string                  `json:"cpu_model,omitempty"`
+	CPUCores              int                     `json:"cpu_cores,omitempty"`
+	Uptime                uint64                  `json:"uptime_seconds"`
+	CPUPercent            float64                 `json:"cpu_percent"`
+	CPUCoreUsage          []cpuCoreUsage          `json:"cpu_core_usage,omitempty"`
+	LoadAverage           string                  `json:"load_average,omitempty"`
+	MemoryUsed            uint64                  `json:"memory_used_bytes"`
+	MemoryTotal           uint64                  `json:"memory_total_bytes"`
+	DiskUsed              uint64                  `json:"disk_used_bytes"`
+	DiskTotal             uint64                  `json:"disk_total_bytes"`
+	NetworkRX             uint64                  `json:"network_rx_bytes_per_second"`
+	NetworkTX             uint64                  `json:"network_tx_bytes_per_second"`
+	NetworkRXTotal        uint64                  `json:"network_rx_total_bytes"`
+	NetworkTXTotal        uint64                  `json:"network_tx_total_bytes"`
+	NetworkProcessError   string                  `json:"network_process_error,omitempty"`
+	NetworkConnections    []networkConnectionInfo `json:"network_connections,omitempty"`
+	NetworkConnectionMode bool                    `json:"network_connection_mode,omitempty"`
+	Battery               *batteryExport          `json:"battery,omitempty"`
+	Filesystems           []filesystemExport      `json:"filesystems,omitempty"`
+	Services              []serviceExport         `json:"services,omitempty"`
+	Containers            []containerExport       `json:"containers,omitempty"`
+	PM2Processes          []pm2Export             `json:"pm2_processes,omitempty"`
+	GPUs                  []gpuExport             `json:"gpus,omitempty"`
+	Processes             []processExport         `json:"processes,omitempty"`
+	History               []historySample         `json:"history,omitempty"`
+	Warning               string                  `json:"warning,omitempty"`
 }
 
 type batteryExport struct {
@@ -216,25 +218,27 @@ type processExport struct {
 
 func exportSnapshot(snapshot monitorSnapshot) snapshotExport {
 	export := snapshotExport{
-		CollectedAt:         snapshot.CollectedAt,
-		NodeName:            snapshot.NodeName,
-		Profile:             snapshot.Profile,
-		OSName:              snapshot.OSName,
-		CPUModel:            snapshot.CPUModel,
-		CPUCores:            snapshot.CPUCores,
-		Uptime:              snapshot.Uptime,
-		CPUPercent:          snapshot.CPUPercent,
-		CPUCoreUsage:        snapshot.CPUCoreUsage,
-		LoadAverage:         snapshot.LoadAverage,
-		MemoryUsed:          snapshot.MemoryUsed,
-		MemoryTotal:         snapshot.MemoryTotal,
-		DiskUsed:            snapshot.DiskUsed,
-		DiskTotal:           snapshot.DiskTotal,
-		NetworkRX:           snapshot.NetworkRX,
-		NetworkTX:           snapshot.NetworkTX,
-		NetworkRXTotal:      snapshot.NetworkRXTotal,
-		NetworkTXTotal:      snapshot.NetworkTXTotal,
-		NetworkProcessError: snapshot.NetworkProcessError,
+		CollectedAt:           snapshot.CollectedAt,
+		NodeName:              snapshot.NodeName,
+		Profile:               snapshot.Profile,
+		OSName:                snapshot.OSName,
+		CPUModel:              snapshot.CPUModel,
+		CPUCores:              snapshot.CPUCores,
+		Uptime:                snapshot.Uptime,
+		CPUPercent:            snapshot.CPUPercent,
+		CPUCoreUsage:          snapshot.CPUCoreUsage,
+		LoadAverage:           snapshot.LoadAverage,
+		MemoryUsed:            snapshot.MemoryUsed,
+		MemoryTotal:           snapshot.MemoryTotal,
+		DiskUsed:              snapshot.DiskUsed,
+		DiskTotal:             snapshot.DiskTotal,
+		NetworkRX:             snapshot.NetworkRX,
+		NetworkTX:             snapshot.NetworkTX,
+		NetworkRXTotal:        snapshot.NetworkRXTotal,
+		NetworkTXTotal:        snapshot.NetworkTXTotal,
+		NetworkProcessError:   snapshot.NetworkProcessError,
+		NetworkConnections:    snapshot.NetworkConnections,
+		NetworkConnectionMode: snapshot.NetworkConnectionMode,
 	}
 	if snapshot.Battery != nil {
 		export.Battery = &batteryExport{

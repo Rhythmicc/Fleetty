@@ -169,6 +169,10 @@ type processNetworkCounters struct {
 }
 
 func (c *metricsCollector) collectProcessNetwork(snapshot *monitorSnapshot) {
+	if runtime.GOOS == "linux" {
+		c.collectLinuxNetworkConnections(snapshot)
+		return
+	}
 	if runtime.GOOS != "darwin" {
 		snapshot.NetworkProcessError = "Per-process traffic attribution is not available from the host OS."
 		return

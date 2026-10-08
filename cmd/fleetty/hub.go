@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -27,6 +29,7 @@ const (
 	hubGroupStyleProcess      = "process"
 	defaultHubRefreshInterval = time.Second
 	hubCardHeight             = 7
+	hubCardWidth              = 48
 	hubOverviewRPCTimeout     = 900 * time.Millisecond
 	hubHistoryRPCTimeout      = 900 * time.Millisecond
 	hubHistoryRefreshInterval = time.Minute
@@ -833,14 +836,11 @@ func (m *hubModel) openSelected() tea.Cmd {
 }
 
 func (m *hubModel) columns() int {
-	switch {
-	case usableWidth(m.width) >= 132:
-		return 3
-	case usableWidth(m.width) >= 76:
-		return 2
-	default:
-		return 1
-	}
+	return max(1, (usableWidth(m.width)+1)/(hubCardWidth+1))
+}
+
+func (m *hubModel) cardWidth() int {
+	return min(hubCardWidth, usableWidth(m.width))
 }
 
 func (m *hubModel) nodeGroups() []hubNodeGroup {
@@ -1072,7 +1072,7 @@ func (m *hubModel) nodeAt(x, y int) (int, bool) {
 		return 0, false
 	}
 	columns := m.columns()
-	cardWidth := max(20, (usableWidth(m.width)-(columns-1))/columns)
+	cardWidth := m.cardWidth()
 	rowY := 1
 	for _, row := range pages[m.offset].rows {
 		if row.title != "" {
@@ -1129,10 +1129,9 @@ func (m *hubModel) hubView() string {
 	title := titleStyle.Render(m.config.displayName()) + "  " + liveBadgeStyle.Render(fmt.Sprintf("%d/%d ONLINE", online, len(m.config.Nodes)))
 	meta := dimStyle.Render(fmt.Sprintf("%ds  ·  %s", int(m.config.refreshInterval().Seconds()), strings.ToUpper(m.colorMode.String())))
 	headerGap := max(2, width-lipgloss.Width(title)-lipgloss.Width(meta))
-	header := title + strings.Repeat(" ", headerGap) + meta
+	header := ansi.Truncate(title+strings.Repeat(" ", headerGap)+meta, width, "")
 
-	columns := m.columns()
-	cardWidth := max(20, (width-(columns-1))/columns)
+	cardWidth := m.cardWidth()
 	pages := m.pages()
 	pageIndex := min(max(0, m.offset), len(pages)-1)
 	var rows []string
@@ -1212,12 +1211,20 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		border = lipgloss.Color("#B9A4FF")
 	}
 	meta := "CHECKING"
+	renderCard := func(content []string) string {
+		address := dimStyle.Render(hubNodeAddressLabel(node.Address))
+		if state.Warning != "" {
+			meta += " WARN"
+			address += warningStyle.Render(" · " + sanitizeTerminalText(state.Warning))
+		}
+		content = append(content, ansi.Truncate(address, max(1, width-4), "…"))
+		return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+	}
 	content := []string{
 		dimStyle.Render(truncate(node.Description, width-4)),
-		dimStyle.Render(truncate(normalizeNodeAddress(node.Address), width-4)),
 		"Waiting for the first snapshot…",
+		"",
 		dimStyle.Render(strings.Repeat("·", max(1, width-4))),
-		dimStyle.Render("Enter or click to open"),
 	}
 	if state.Error != "" {
 		meta = "OFFLINE"
@@ -1231,7 +1238,6 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		}
 		content = []string{
 			dangerStyle.Render("● OFFLINE / UNREACHABLE"),
-			dimStyle.Render(truncate(normalizeNodeAddress(node.Address), width-4)),
 			dimStyle.Render(truncate(lastSeen, width-4)),
 			warningStyle.Render(truncate(state.Error, width-4)),
 			dimStyle.Render(truncate("[r] retry now · "+retry, width-4)),
@@ -1245,17 +1251,11 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		}
 		if profile == machineProfileNAS {
 			content = renderNASHubCard(snapshot)
-			if state.Warning != "" {
-				content[4] = warningStyle.Render(truncate(state.Warning, width-4))
-			}
-			return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+			return renderCard(content)
 		}
 		if profile == machineProfileCPU {
 			content = renderCPUHubCard(snapshot, width)
-			if state.Warning != "" {
-				content[4] = warningStyle.Render(truncate(state.Warning, width-4))
-			}
-			return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+			return renderCard(content)
 		}
 		memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
 		disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
@@ -1279,10 +1279,6 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 			gpuStyle.Render(fmt.Sprintf("MAX %3.0f%% · %d°C", gpuUtil, maxTemperature)) +
 				"  " + dimStyle.Render(fmt.Sprintf("↓%s/s ↑%s/s", bytes(snapshot.NetworkRX), bytes(snapshot.NetworkTX))),
 			loadVisual,
-			dimStyle.Render("Enter or click to open live details"),
-		}
-		if state.Warning != "" {
-			content[4] = warningStyle.Render(truncate(state.Warning, width-4))
 		}
 	}
 	if node.Description == "" && strings.HasPrefix(content[0], "\x1b") {
@@ -1290,7 +1286,22 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		// a stable height even when no optional description was configured.
 		content[0] = strings.TrimSpace(content[0])
 	}
-	return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+	return renderCard(content)
+}
+
+func hubNodeAddressLabel(address string) string {
+	if strings.TrimSpace(address) == "" {
+		return "IP --"
+	}
+	host, _, err := net.SplitHostPort(normalizeNodeAddress(address))
+	if err != nil {
+		return "HOST " + sanitizeTerminalText(address)
+	}
+	label := "IP "
+	if _, err := netip.ParseAddr(host); err != nil {
+		label = "HOST "
+	}
+	return label + sanitizeTerminalText(host)
 }
 
 func renderCPUHubCard(snapshot monitorSnapshot, width int) []string {
@@ -1312,7 +1323,6 @@ func renderCPUHubCard(snapshot monitorSnapshot, width int) []string {
 			networkRXStyle.Render("↓"), bytes(snapshot.NetworkRX),
 			networkTXStyle.Render("↑"), bytes(snapshot.NetworkTX)),
 		bar(snapshot.CPUPercent, max(8, width-4)),
-		dimStyle.Render("Enter or click to open live details"),
 	}
 }
 
@@ -1372,7 +1382,6 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 			processTitleStyle.Render("HTTP"), compactHealthCount(healthyHTTP, len(snapshot.Services)),
 			accentStyle.Render("CTR"), containerHealth,
 			gpuTitleStyle.Render("PM2"), pm2Health),
-		dimStyle.Render("Enter or click to open NAS details"),
 	}
 }
 

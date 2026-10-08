@@ -43,10 +43,10 @@ func newTestHubModel(width, height int, cursor int) *hubModel {
 }
 
 func TestHubUpFromCPUNodeFollowsVisualGrid(t *testing.T) {
-	// 132 columns renders three card columns; the flat grouped list is not
+	// 160 terminal columns renders three card columns; the flat grouped list is not
 	// aligned with the visual grid, so navigation must follow the visible
 	// grouped rows rather than subtracting a fixed card stride.
-	model := newTestHubModel(132, 24, 8)
+	model := newTestHubModel(160, 24, 8)
 	model.moveCursorVertical(-1)
 	if model.cursor != 6 {
 		t.Fatalf("up from intel9462 selected index %d, want n4 (6)", model.cursor)
@@ -75,7 +75,7 @@ func TestHubUsesDeclarativeGroupMembership(t *testing.T) {
 }
 
 func TestHubDownFromN3StaysInSameColumn(t *testing.T) {
-	model := newTestHubModel(132, 24, 5)
+	model := newTestHubModel(160, 24, 5)
 	model.moveCursorVertical(1)
 	if model.cursor != 6 {
 		t.Fatalf("down from n3 selected index %d, want n4 (6)", model.cursor)
@@ -83,7 +83,7 @@ func TestHubDownFromN3StaysInSameColumn(t *testing.T) {
 }
 
 func TestHubHorizontalNavigationWrapsAcrossRows(t *testing.T) {
-	model := newTestHubModel(132, 24, 0)
+	model := newTestHubModel(160, 24, 0)
 	model.moveCursorHorizontal(1)
 	if model.cursor != 1 {
 		t.Fatalf("right from A100 selected index %d, want 4090 (1)", model.cursor)

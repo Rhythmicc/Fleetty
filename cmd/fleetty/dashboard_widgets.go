@@ -524,6 +524,13 @@ func (m *monitorModel) largeNetworkDetails(width, detailLimit int) (string, []st
 	meta := "LARGE"
 	var lines []string
 	switch {
+	case m.snapshot.NetworkConnectionMode:
+		meta += fmt.Sprintf(" · %d CONNECTIONS", m.networkApplicationCount())
+		lines = []string{networkTitleStyle.Render("PROCESS CONNECTIONS"), networkConnectionHeader(width)}
+		lines = append(lines, m.networkApplicationRows(width, max(1, detailLimit))...)
+		if m.snapshot.NetworkProcessError != "" {
+			lines = append(lines, dimStyle.Render(truncate(m.snapshot.NetworkProcessError, width)))
+		}
 	case len(m.snapshot.NetworkProcesses) > 0:
 		meta += fmt.Sprintf(" · %d PROCESSES", len(m.snapshot.NetworkProcesses))
 		lines = []string{

@@ -240,7 +240,7 @@ func processStateMarker(state string) string {
 	case 'R':
 		return "▶"
 	case 'S':
-		return "·"
+		return "●"
 	case 'D':
 		return "!"
 	case 'T', 't':

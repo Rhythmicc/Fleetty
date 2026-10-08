@@ -936,6 +936,8 @@ func (m *monitorModel) networkActivityPanelSpec(width int, rich bool, detailLimi
 func (m *monitorModel) networkOverviewDetails(width, limit int) (string, []string) {
 	var lines []string
 	switch {
+	case m.snapshot.NetworkConnectionMode:
+		return "PROCESS CONNECTIONS", m.networkApplicationRows(width, limit)
 	case len(m.snapshot.NetworkProcesses) > 0:
 		limit = min(limit, len(m.snapshot.NetworkProcesses))
 		for _, process := range m.snapshot.NetworkProcesses[:limit] {
@@ -956,8 +958,8 @@ func (m *monitorModel) networkOverviewDetails(width, limit int) (string, []strin
 }
 
 func (m *monitorModel) networkOverviewHeader(width int) string {
-	if len(m.snapshot.NetworkProcesses) > 0 {
-		return networkProcessHeader(width)
+	if m.snapshot.NetworkConnectionMode || len(m.snapshot.NetworkProcesses) > 0 {
+		return m.networkApplicationHeader(width)
 	}
 	return networkInterfaceHeader(width)
 }
@@ -1195,9 +1197,13 @@ func (m *monitorModel) renderNetworkPage(width int) (string, []widgetPlacement) 
 	bodyHeight := max(15, m.height-headerHeight-footerHeight)
 	summary := renderPagePanel(width, m.networkTrafficSummaryPanelSpec(width))
 	remaining := max(10, bodyHeight-lipgloss.Height(summary))
+	warningRows := 0
+	if m.snapshot.NetworkConnectionMode && m.networkApplicationCount() > 0 && m.snapshot.NetworkProcessError != "" {
+		warningRows = 1
+	}
 
 	applicationHeight := min(
-		len(m.snapshot.NetworkProcesses)+1+panelOverhead,
+		m.networkApplicationCount()+1+warningRows+panelOverhead,
 		max(7, remaining/2),
 	)
 	applicationHeight = max(5, applicationHeight)
@@ -1210,7 +1216,7 @@ func (m *monitorModel) renderNetworkPage(width int) (string, []widgetPlacement) 
 	applications := renderPagePanelAtLeast(
 		width,
 		max(3, applicationHeight-panelOverhead),
-		m.networkApplicationsPanelSpec(width, max(1, applicationHeight-panelOverhead-1)),
+		m.networkApplicationsPanelSpec(width, max(1, applicationHeight-panelOverhead-1-warningRows)),
 	)
 	interfaces := renderPagePanelAtLeast(
 		width,
@@ -1233,8 +1239,8 @@ func (m *monitorModel) networkTrafficSummaryPanelSpec(width int) pagePanelSpec {
 		errorsAndDrops += networkInterface.RXErrors + networkInterface.TXErrors +
 			networkInterface.RXDrops + networkInterface.TXDrops
 	}
-	processState := fmt.Sprintf("%d ATTRIBUTED", len(m.snapshot.NetworkProcesses))
-	if len(m.snapshot.NetworkProcesses) == 0 && m.snapshot.NetworkProcessError != "" {
+	processState := m.networkApplicationMeta()
+	if m.networkApplicationCount() == 0 && m.snapshot.NetworkProcessError != "" {
 		processState = truncate(m.snapshot.NetworkProcessError, max(12, contentWidth/2))
 	}
 	lines := []string{
@@ -1272,20 +1278,27 @@ func (m *monitorModel) networkTrafficSummaryPanelSpec(width int) pagePanelSpec {
 
 func (m *monitorModel) networkApplicationsPanelSpec(width, limit int) pagePanelSpec {
 	contentWidth := max(24, width-4)
-	lines := []string{networkProcessHeader(contentWidth)}
-	limit = min(max(1, limit), len(m.snapshot.NetworkProcesses))
-	for _, process := range m.snapshot.NetworkProcesses[:limit] {
-		lines = append(lines, renderNetworkProcessRow(process, contentWidth))
-	}
-	if len(m.snapshot.NetworkProcesses) == 0 {
+	lines := []string{m.networkApplicationHeader(contentWidth)}
+	lines = append(lines, m.networkApplicationRows(contentWidth, max(1, limit))...)
+	if m.networkApplicationCount() == 0 {
 		message := "Collecting per-process traffic attribution…"
+		if m.snapshot.NetworkConnectionMode {
+			message = "No TCP/UDP connections visible in this network namespace."
+		}
 		if m.snapshot.NetworkProcessError != "" {
 			message = m.snapshot.NetworkProcessError
 		}
 		lines = append(lines, dimStyle.Render(truncate(message, contentWidth)))
 	}
+	title := "TOP APPLICATIONS"
+	if m.snapshot.NetworkConnectionMode {
+		title = "PROCESS CONNECTIONS"
+		if m.networkApplicationCount() > 0 && m.snapshot.NetworkProcessError != "" {
+			lines = append(lines, warningStyle.Render(truncate(m.snapshot.NetworkProcessError, contentWidth)))
+		}
+	}
 	return pagePanelSpec{
-		title: "TOP APPLICATIONS", meta: fmt.Sprintf("%d ATTRIBUTED", len(m.snapshot.NetworkProcesses)),
+		title: title, meta: m.networkApplicationMeta(),
 		lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
 	}
 }

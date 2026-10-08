@@ -2193,6 +2193,8 @@ type monitorSnapshot struct {
 	NetworkRXTotal          uint64
 	NetworkTXTotal          uint64
 	NetworkProcesses        []processNetworkInfo
+	NetworkConnections      []networkConnectionInfo
+	NetworkConnectionMode   bool
 	NetworkProcessError     string
 	Battery                 *batteryInfo
 	NetworkInterfaces       []networkInterfaceInfo
@@ -2298,6 +2300,8 @@ type metricsCollector struct {
 	lastGPUWorkloadsAt         time.Time
 	cachedGPUWorkloads         map[string][]gpuWorkloadInfo
 	cachedNetworkProcesses     []processNetworkInfo
+	cachedNetworkConnections   []networkConnectionInfo
+	cachedConnectionWarning    string
 }
 
 type netCounters struct{ rx, tx uint64 }
