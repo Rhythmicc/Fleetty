@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -29,7 +28,8 @@ const (
 	hubGroupStyleProcess      = "process"
 	defaultHubRefreshInterval = time.Second
 	hubCardHeight             = 7
-	hubCardWidth              = 48
+	hubPreferredCardWidth     = 46
+	hubMinimumCardWidth       = 36
 	hubOverviewRPCTimeout     = 900 * time.Millisecond
 	hubHistoryRPCTimeout      = 900 * time.Millisecond
 	hubHistoryRefreshInterval = time.Minute
@@ -553,10 +553,13 @@ type hubNodeGroup struct {
 }
 
 type hubDisplayRow struct {
-	title string
-	style string
-	count int
-	nodes []int
+	headings []hubGroupSpan
+	nodes    []int
+}
+
+type hubGroupSpan struct {
+	group int
+	span  int
 }
 
 type hubPage struct {
@@ -836,11 +839,17 @@ func (m *hubModel) openSelected() tea.Cmd {
 }
 
 func (m *hubModel) columns() int {
-	return max(1, (usableWidth(m.width)+1)/(hubCardWidth+1))
+	width := usableWidth(m.width)
+	stride := hubPreferredCardWidth + 1
+	// Pick the nearest column count, rather than leaving almost a whole card
+	// empty when the terminal is just below a fixed-width breakpoint.
+	preferred := max(1, (width+1+stride/2)/stride)
+	return min(preferred, max(1, (width+1)/(hubMinimumCardWidth+1)))
 }
 
 func (m *hubModel) cardWidth() int {
-	return min(hubCardWidth, usableWidth(m.width))
+	columns := m.columns()
+	return (usableWidth(m.width) - columns + 1) / columns
 }
 
 func (m *hubModel) nodeGroups() []hubNodeGroup {
@@ -989,6 +998,31 @@ func (m *hubModel) moveCursorHorizontal(delta int) {
 
 func (m *hubModel) pages() []hubPage {
 	columns := m.columns()
+	// Pack in configured group order, allowing small adjacent groups to share
+	// a row. Headings cover only the cards belonging to their group.
+	var grid []hubDisplayRow
+	row := hubDisplayRow{}
+	for groupIndex, group := range m.nodeGroups() {
+		// Keep a small group together instead of stranding its last card on the
+		// next row. Large groups still flow across as many rows as needed.
+		if len(group.nodes) <= columns && len(row.nodes) > 0 && len(group.nodes) > columns-len(row.nodes) {
+			grid = append(grid, row)
+			row = hubDisplayRow{}
+		}
+		for start := 0; start < len(group.nodes); {
+			take := min(columns-len(row.nodes), len(group.nodes)-start)
+			row.headings = append(row.headings, hubGroupSpan{group: groupIndex, span: take})
+			row.nodes = append(row.nodes, group.nodes[start:start+take]...)
+			start += take
+			if len(row.nodes) == columns {
+				grid = append(grid, row)
+				row = hubDisplayRow{}
+			}
+		}
+	}
+	if len(row.nodes) > 0 {
+		grid = append(grid, row)
+	}
 	heightBudget := max(hubCardHeight+1, max(10, m.height)-2)
 	var pages []hubPage
 	current := hubPage{}
@@ -1002,29 +1036,24 @@ func (m *hubModel) pages() []hubPage {
 		usedHeight = 0
 	}
 
-	for _, group := range m.nodeGroups() {
-		nodeRows := make([][]int, 0, (len(group.nodes)+columns-1)/columns)
-		for start := 0; start < len(group.nodes); start += columns {
-			end := min(start+columns, len(group.nodes))
-			nodeRows = append(nodeRows, group.nodes[start:end])
+	var previous []hubGroupSpan
+	for _, row := range grid {
+		heading := len(current.rows) == 0 || len(row.headings) > 1 || len(previous) != 1 || previous[0].group != row.headings[0].group
+		needed := hubCardHeight
+		if heading {
+			needed++
 		}
-		for len(nodeRows) > 0 {
-			if len(current.rows) > 0 && heightBudget-usedHeight < hubCardHeight+1 {
-				flush()
-			}
-			current.rows = append(current.rows, hubDisplayRow{
-				title: group.title, style: group.style, count: len(group.nodes),
-			})
+		if usedHeight+needed > heightBudget {
+			flush()
+			heading = true
+		}
+		if heading {
+			current.rows = append(current.rows, hubDisplayRow{headings: row.headings})
 			usedHeight++
-			for len(nodeRows) > 0 && heightBudget-usedHeight >= hubCardHeight {
-				current.rows = append(current.rows, hubDisplayRow{nodes: nodeRows[0]})
-				nodeRows = nodeRows[1:]
-				usedHeight += hubCardHeight
-			}
-			if len(nodeRows) > 0 {
-				flush()
-			}
 		}
+		current.rows = append(current.rows, hubDisplayRow{nodes: row.nodes})
+		usedHeight += hubCardHeight
+		previous = row.headings
 	}
 	flush()
 	if len(pages) == 0 {
@@ -1075,7 +1104,7 @@ func (m *hubModel) nodeAt(x, y int) (int, bool) {
 	cardWidth := m.cardWidth()
 	rowY := 1
 	for _, row := range pages[m.offset].rows {
-		if row.title != "" {
+		if len(row.headings) > 0 {
 			if y == rowY {
 				return 0, false
 			}
@@ -1135,9 +1164,15 @@ func (m *hubModel) hubView() string {
 	pages := m.pages()
 	pageIndex := min(max(0, m.offset), len(pages)-1)
 	var rows []string
+	groups := m.nodeGroups()
 	for _, row := range pages[pageIndex].rows {
-		if row.title != "" {
-			rows = append(rows, renderHubSectionTitle(row.title, row.style, row.count, width))
+		if len(row.headings) > 0 {
+			var headings []string
+			for _, section := range row.headings {
+				group := groups[section.group]
+				headings = append(headings, renderHubSectionTitle(group.title, group.style, len(group.nodes), section.span*(cardWidth+1)-1))
+			}
+			rows = append(rows, strings.Join(headings, " "))
 			continue
 		}
 		var cards []string
@@ -1187,14 +1222,14 @@ func renderHubSectionTitle(title, styleName string, count, width int) string {
 	} else if styleName == hubGroupStyleProcess {
 		style = processTitleStyle
 	}
-	label := style.Render(" " + title + " ")
 	unit := "NODES"
 	if count == 1 {
 		unit = "NODE"
 	}
 	countLabel := dimStyle.Render(fmt.Sprintf("%d %s ", count, unit))
+	label := style.Render(" " + truncate(title, max(1, width-lipgloss.Width(countLabel)-2)) + " ")
 	line := strings.Repeat("─", max(0, width-lipgloss.Width(label)-lipgloss.Width(countLabel)))
-	return label + dimStyle.Render(line) + countLabel
+	return ansi.Truncate(label+dimStyle.Render(line)+countLabel, width, "")
 }
 
 func (m *hubModel) renderNodeCard(index, width int) string {
@@ -1254,31 +1289,18 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 			return renderCard(content)
 		}
 		if profile == machineProfileCPU {
-			content = renderCPUHubCard(snapshot, width)
+			content = renderCPUHubCard(snapshot)
 			return renderCard(content)
 		}
-		memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
-		disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
 		gpuUtil, gpuMemoryUsed, gpuMemoryTotal, maxTemperature := hubGPUStats(snapshot.GPUs)
-		_, gpuStyle := gpuLoadStatus(gpuUtil)
-		// Hub cards are status summaries. Their layout must not depend on whether
-		// a node happens to have history persistence enabled or reachable: that
-		// produced a sparkline for some nodes and a load bar for others. Keep the
-		// current peak load as the one consistent visual here; trends remain in
-		// the live node detail view.
-		loadVisual := bar(math.Max(snapshot.CPUPercent, gpuUtil), max(8, width-4))
+		loadPrefix := fmt.Sprintf("%s ×%d  %s %3.0f%% ", dimStyle.Render("GPU"), len(snapshot.GPUs), dimStyle.Render("PEAK"), gpuUtil)
+		temperature := "  " + gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature))
+		meterWidth := min(12, max(1, width-4-lipgloss.Width(loadPrefix)-lipgloss.Width(temperature)))
 		content = []string{
-			fmt.Sprintf("%s %5.1f%%   %s %5.1f%%   %s %5.1f%%",
-				cpuTitleStyle.Render("CPU"), snapshot.CPUPercent,
-				memoryTitleStyle.Render("MEM"), memory,
-				diskTitleStyle.Render("DSK"), disk),
-			fmt.Sprintf("%s %d  %s %5.1f%%  %s %s/%s",
-				gpuTitleStyle.Render("GPU"), len(snapshot.GPUs),
-				gpuStyle.Render("LOAD"), gpuUtil,
-				dimStyle.Render("VRAM"), bytes(gpuMemoryUsed), bytes(gpuMemoryTotal)),
-			gpuStyle.Render(fmt.Sprintf("MAX %3.0f%% · %d°C", gpuUtil, maxTemperature)) +
-				"  " + dimStyle.Render(fmt.Sprintf("↓%s/s ↑%s/s", bytes(snapshot.NetworkRX), bytes(snapshot.NetworkTX))),
-			loadVisual,
+			renderHubResourceSummary(snapshot),
+			loadPrefix + hubLoadMeter(gpuUtil, meterWidth) + temperature,
+			dimStyle.Render("VRAM ") + valueStyle.Render(bytes(gpuMemoryUsed)+" / "+bytes(gpuMemoryTotal)),
+			renderHubNetworkRates(snapshot),
 		}
 	}
 	if node.Description == "" && strings.HasPrefix(content[0], "\x1b") {
@@ -1304,26 +1326,48 @@ func hubNodeAddressLabel(address string) string {
 	return label + sanitizeTerminalText(host)
 }
 
-func renderCPUHubCard(snapshot monitorSnapshot, width int) []string {
-	memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
-	disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
+func renderCPUHubCard(snapshot monitorSnapshot) []string {
 	load := strings.TrimSpace(strings.TrimPrefix(snapshot.LoadAverage, "load"))
 	if load == "" {
 		load = "--"
 	}
 	return []string{
-		fmt.Sprintf("%s %5.1f%%   %s %5.1f%%   %s %5.1f%%",
-			cpuTitleStyle.Render("CPU"), snapshot.CPUPercent,
-			memoryTitleStyle.Render("MEM"), memory,
-			diskTitleStyle.Render("DSK"), disk),
+		renderHubResourceSummary(snapshot),
 		fmt.Sprintf("%s %d  %s %s",
 			cpuTitleStyle.Render("CORES"), snapshot.CPUCores,
 			dimStyle.Render("LOAD"), dimStyle.Render(load)),
-		fmt.Sprintf("%s %s/s   %s %s/s",
-			networkRXStyle.Render("↓"), bytes(snapshot.NetworkRX),
-			networkTXStyle.Render("↑"), bytes(snapshot.NetworkTX)),
-		bar(snapshot.CPUPercent, max(8, width-4)),
+		dimStyle.Render("MEM ") + valueStyle.Render(bytes(snapshot.MemoryUsed)+" / "+bytes(snapshot.MemoryTotal)),
+		renderHubNetworkRates(snapshot),
 	}
+}
+
+func renderHubResourceSummary(snapshot monitorSnapshot) string {
+	return dimStyle.Render("CPU ") + cpuTitleStyle.Render(fmt.Sprintf("%4.1f%%", snapshot.CPUPercent)) +
+		dimStyle.Render("  MEM ") + hubCapacityStyle(percent(snapshot.MemoryUsed, snapshot.MemoryTotal), memoryTitleStyle).Render(fmt.Sprintf("%4.1f%%", percent(snapshot.MemoryUsed, snapshot.MemoryTotal))) +
+		dimStyle.Render("  DSK ") + hubCapacityStyle(percent(snapshot.DiskUsed, snapshot.DiskTotal), diskTitleStyle).Render(fmt.Sprintf("%4.1f%%", percent(snapshot.DiskUsed, snapshot.DiskTotal)))
+}
+
+func hubCapacityStyle(usage float64, normal lipgloss.Style) lipgloss.Style {
+	if usage >= 95 {
+		return dangerStyle
+	}
+	if usage >= 85 {
+		return warningStyle
+	}
+	return normal
+}
+
+func hubLoadMeter(usage float64, width int) string {
+	filled := min(width, max(0, int(usage*float64(width)/100)))
+	if usage > 0 && filled == 0 {
+		filled = 1
+	}
+	return gpuTitleStyle.Render(strings.Repeat("━", filled)) + dimStyle.Render(strings.Repeat("─", width-filled))
+}
+
+func renderHubNetworkRates(snapshot monitorSnapshot) string {
+	return networkRXStyle.Render("↓ ") + valueStyle.Render(bytes(snapshot.NetworkRX)+"/s") +
+		"   " + networkTXStyle.Render("↑ ") + valueStyle.Render(bytes(snapshot.NetworkTX)+"/s")
 }
 
 func renderNASHubCard(snapshot monitorSnapshot) []string {

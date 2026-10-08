@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	gopsnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
@@ -195,16 +196,17 @@ func networkConnectionColumns(width int) []connectionColumn {
 	return columns
 }
 
-func networkConnectionCells(width int, values map[string]string, header bool) string {
+func networkConnectionCells(width int, values map[string]string, connection *networkConnectionInfo) string {
+	header := connection == nil
 	var cells []string
 	for _, col := range networkConnectionColumns(width) {
 		cell := fixedCell(values[col.label], col.size, !header && (col.label == "DOWN" || col.label == "UP"))
 		if !header {
 			switch col.label {
 			case "DOWN":
-				cell = networkRXStyle.Render(cell)
+				cell = networkRateStyle(connection.RX, connection.RateAvailable, networkRXStyle).Render(cell)
 			case "UP":
-				cell = networkTXStyle.Render(cell)
+				cell = networkRateStyle(connection.TX, connection.RateAvailable, networkTXStyle).Render(cell)
 			case "USER", "TYPE", "STATE", "LOCAL":
 				cell = dimStyle.Render(cell)
 			default:
@@ -221,7 +223,33 @@ func networkConnectionHeader(width int) string {
 	for _, col := range networkConnectionColumns(width) {
 		values[col.label] = col.label
 	}
-	return dimStyle.Copy().Bold(true).Render(networkConnectionCells(width, values, true))
+	values["DOWN"] = networkRXStyle.Render("DOWN")
+	values["UP"] = networkTXStyle.Render("UP")
+	return dimStyle.Copy().Bold(true).Render(networkConnectionCells(width, values, nil))
+}
+
+// These are absolute traffic levels, not link saturation or health alarms:
+// the speed of a socket's underlying link is not known here.
+func networkRateStyle(rate uint64, available bool, direction lipgloss.Style) lipgloss.Style {
+	switch {
+	case !available || rate < 1024:
+		return dimStyle
+	case rate >= 10*1024*1024:
+		return diskTitleStyle
+	case rate >= 1024*1024:
+		return warningStyle
+	case rate >= 100*1024:
+		return cpuTitleStyle
+	default:
+		return direction
+	}
+}
+
+func networkConnectionRateLegend(width int) string {
+	return ansi.Truncate(dimStyle.Render("↓ DOWN+UP · RATE/s ")+
+		dimStyle.Render("<1KiB ")+networkRXStyle.Render("1KiB+ ")+
+		cpuTitleStyle.Render("100KiB+ ")+warningStyle.Render("1MiB+ ")+
+		diskTitleStyle.Render("10MiB+"), width, "")
 }
 
 func renderNetworkConnectionRow(connection networkConnectionInfo, width int) string {
@@ -241,7 +269,7 @@ func renderNetworkConnectionRow(connection networkConnectionInfo, width int) str
 		owner = "--"
 	}
 	values := map[string]string{"PID": pid, "PROCESS": sanitizeTerminalText(connection.Name), "USER": sanitizeTerminalText(owner), "TYPE": connection.Protocol, "STATE": connection.State, "LOCAL": connection.Local, "REMOTE": connection.Remote, "DOWN": down, "UP": up}
-	return networkConnectionCells(width, values, false)
+	return networkConnectionCells(width, values, &connection)
 }
 
 func (m *monitorModel) networkApplicationCount() int {
@@ -253,7 +281,7 @@ func (m *monitorModel) networkApplicationCount() int {
 
 func (m *monitorModel) networkApplicationMeta() string {
 	if m.snapshot.NetworkConnectionMode {
-		return fmt.Sprintf("%d TCP/UDP · TCP PAYLOAD · UDP --", m.networkApplicationCount())
+		return fmt.Sprintf("SORT ↓ DOWN+UP · %d TCP/UDP · TCP PAYLOAD · UDP --", m.networkApplicationCount())
 	}
 	return fmt.Sprintf("%d ATTRIBUTED", m.networkApplicationCount())
 }

@@ -123,7 +123,7 @@ func TestHourHistoryCmdRefreshesOncePerMinute(t *testing.T) {
 	}
 }
 
-func TestHubCardKeepsLoadBarWhenHistoryExists(t *testing.T) {
+func TestHubCardKeepsThinLoadMeterWhenHistoryExists(t *testing.T) {
 	model := &hubModel{
 		config: hubConfig{Nodes: []hubNodeConfig{{
 			Name: "gpu-1", Profile: machineProfileGPU, Description: "Training node",
@@ -147,8 +147,8 @@ func TestHubCardKeepsLoadBarWhenHistoryExists(t *testing.T) {
 	if strings.Contains(rendered, "▁") || strings.Contains(rendered, "▂") {
 		t.Fatalf("hub card should not switch to a history sparkline:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "█") {
-		t.Fatalf("hub card should render a load bar:\n%s", rendered)
+	if !strings.Contains(rendered, "━") || strings.ContainsAny(rendered, "█░") {
+		t.Fatalf("hub card should render a thin load meter:\n%s", rendered)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -42,12 +43,62 @@ func TestNetworkConnectionSummaryAndRendering(t *testing.T) {
 			t.Fatalf("missing %s: %s", want, plain)
 		}
 	}
-	if panel.title != "PROCESS CONNECTIONS" || !strings.Contains(panel.meta, "TCP PAYLOAD") || !strings.Contains(panel.meta, "UDP --") {
+	if panel.title != "PROCESS CONNECTIONS" || !strings.Contains(panel.meta, "TCP PAYLOAD") || !strings.Contains(panel.meta, "UDP --") || !strings.Contains(panel.meta, "SORT ↓ DOWN+UP") {
 		t.Fatalf("incorrect connection labels: %#v", panel)
 	}
 	exported := exportSnapshot(m.snapshot)
 	if !exported.NetworkConnectionMode || len(exported.NetworkConnections) != 3 {
 		t.Fatal("snapshot lost network connections")
+	}
+}
+
+func TestConnectionSortUsesCombinedRateNotDownloadOrLifetimeTraffic(t *testing.T) {
+	now := time.Now()
+	c := &metricsCollector{lastProcessNetAt: now.Add(-time.Second), previousConnectionNet: make(map[string]connectionNetworkCounters)}
+	connections := []networkConnectionInfo{
+		{PID: 1, Protocol: "TCP", Local: "127.0.0.1:1", Remote: "127.0.0.1:9"},
+		{PID: 2, Protocol: "TCP", Local: "127.0.0.1:2", Remote: "127.0.0.1:9"},
+		{PID: 3, Protocol: "TCP", Local: "127.0.0.1:3", Remote: "127.0.0.1:9"},
+	}
+	current := make(map[string]connectionNetworkCounters)
+	for i, connection := range connections {
+		key := connectionNetworkKey(connection.Protocol, connection.Local, connection.Remote)
+		previous := connectionNetworkCounters{cookie: uint64(i + 1), available: true}
+		if i == 0 {
+			previous.rx = 1 << 40 // Lifetime volume must not override current rate.
+		}
+		c.previousConnectionNet[key] = previous
+		next := previous
+		next.rx += []uint64{50, 31, 40}[i]
+		next.tx += []uint64{0, 40, 10}[i]
+		current[key] = next
+	}
+	c.applyConnectionTraffic(connections, current, now)
+	for i, want := range []int{2, 1, 3} {
+		if connections[i].PID != want {
+			t.Fatalf("combined rate/stable tie sort: %#v", connections)
+		}
+	}
+}
+
+func TestNetworkRateColorLevels(t *testing.T) {
+	for _, direction := range []lipgloss.Style{networkRXStyle, networkTXStyle} {
+		for _, test := range []struct {
+			rate      uint64
+			available bool
+			want      lipgloss.Style
+		}{
+			{1 << 30, false, dimStyle}, {0, true, dimStyle}, {1023, true, dimStyle},
+			{1024, true, direction}, {100*1024 - 1, true, direction},
+			{100 * 1024, true, cpuTitleStyle}, {1024*1024 - 1, true, cpuTitleStyle},
+			{1024 * 1024, true, warningStyle}, {10*1024*1024 - 1, true, warningStyle},
+			{10 * 1024 * 1024, true, diskTitleStyle},
+		} {
+			got := networkRateStyle(test.rate, test.available, direction)
+			if !reflect.DeepEqual(got.GetForeground(), test.want.GetForeground()) {
+				t.Errorf("rate %d available %v has incorrect color", test.rate, test.available)
+			}
+		}
 	}
 }
 

@@ -528,6 +528,9 @@ func (m *monitorModel) largeNetworkDetails(width, detailLimit int) (string, []st
 		meta += " · " + m.networkApplicationMeta()
 		lines = []string{networkTitleStyle.Render("PROCESS CONNECTIONS"), networkConnectionHeader(width)}
 		lines = append(lines, m.networkApplicationRows(width, max(1, detailLimit))...)
+		if m.networkApplicationCount() > 0 {
+			lines = append(lines, networkConnectionRateLegend(width))
+		}
 		if m.snapshot.NetworkProcessError != "" {
 			lines = append(lines, dimStyle.Render(truncate(m.snapshot.NetworkProcessError, width)))
 		}

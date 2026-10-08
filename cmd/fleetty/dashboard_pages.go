@@ -1197,13 +1197,16 @@ func (m *monitorModel) renderNetworkPage(width int) (string, []widgetPlacement) 
 	bodyHeight := max(15, m.height-headerHeight-footerHeight)
 	summary := renderPagePanel(width, m.networkTrafficSummaryPanelSpec(width))
 	remaining := max(10, bodyHeight-lipgloss.Height(summary))
-	warningRows := 0
-	if m.snapshot.NetworkConnectionMode && m.networkApplicationCount() > 0 && m.snapshot.NetworkProcessError != "" {
-		warningRows = 1
+	extraRows := 0
+	if m.snapshot.NetworkConnectionMode && m.networkApplicationCount() > 0 {
+		extraRows++ // Rate color legend and sort key.
+		if m.snapshot.NetworkProcessError != "" {
+			extraRows++
+		}
 	}
 
 	applicationHeight := min(
-		m.networkApplicationCount()+1+warningRows+panelOverhead,
+		m.networkApplicationCount()+1+extraRows+panelOverhead,
 		max(7, remaining/2),
 	)
 	applicationHeight = max(5, applicationHeight)
@@ -1216,7 +1219,7 @@ func (m *monitorModel) renderNetworkPage(width int) (string, []widgetPlacement) 
 	applications := renderPagePanelAtLeast(
 		width,
 		max(3, applicationHeight-panelOverhead),
-		m.networkApplicationsPanelSpec(width, max(1, applicationHeight-panelOverhead-1-warningRows)),
+		m.networkApplicationsPanelSpec(width, max(1, applicationHeight-panelOverhead-1-extraRows)),
 	)
 	interfaces := renderPagePanelAtLeast(
 		width,
@@ -1293,6 +1296,9 @@ func (m *monitorModel) networkApplicationsPanelSpec(width, limit int) pagePanelS
 	title := "TOP APPLICATIONS"
 	if m.snapshot.NetworkConnectionMode {
 		title = "PROCESS CONNECTIONS"
+		if m.networkApplicationCount() > 0 {
+			lines = append(lines, networkConnectionRateLegend(contentWidth))
+		}
 		if m.networkApplicationCount() > 0 && m.snapshot.NetworkProcessError != "" {
 			lines = append(lines, warningStyle.Render(truncate(m.snapshot.NetworkProcessError, contentWidth)))
 		}
