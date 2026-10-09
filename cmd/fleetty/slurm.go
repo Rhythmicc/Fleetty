@@ -1909,12 +1909,12 @@ func slurmJobTableHeader(width int) string {
 	switch {
 	case width >= 152:
 		reasonWidth := max(8, width-144)
-		header = fmt.Sprintf("%-14s %-15s %-10s %-11s %10s %-12s %-9s %-9s %5s %-16s %-22s %-*s",
+		header = fmt.Sprintf("%-14s %-15s %-10s %-11s %10s %-12s %9s %9s %5s %-16s %-22s %-*s",
 			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "LIMIT", "NODES", "PARTITION", "NAME",
 			reasonWidth, "NODE / BLOCKER")
 	case width >= 112:
 		reasonWidth := max(8, width-104)
-		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-10s %-8s %5s %-18s %-*s",
+		header = fmt.Sprintf("%-12s %-13s %-9s %-10s %10s %-10s %8s %5s %-18s %-*s",
 			"CLUSTER", "JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "NODES", "NAME",
 			reasonWidth, "NODE / BLOCKER")
 	default:
@@ -2069,7 +2069,7 @@ func slurmNodeJobHeader(width int) string {
 	if width < slurmCompactWidth {
 		return newCompactSlurmFormat(width, false).render(slurmDisplayJob{}, true, lipgloss.NewStyle())
 	}
-	header := fmt.Sprintf("%-15s %-10s %-9s %10s %-12s %-9s %-9s %-16s %s",
+	header := fmt.Sprintf("%-15s %-10s %-9s %10s %-12s %9s %9s %-16s %s",
 		"JOB ID", "USER", "STATE", "WEIGHT", "QOS", "ELAPSED", "LIMIT", "PARTITION", "NAME / BLOCKER")
 	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 }

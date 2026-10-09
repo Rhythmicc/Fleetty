@@ -171,6 +171,48 @@ func TestWideSlurmKeepsWeightAndQOS(t *testing.T) {
 	}
 }
 
+func TestSlurmTimeHeadersMatchRowAlignment(t *testing.T) {
+	rightEdge := func(line, value string) int {
+		t.Helper()
+		line = ansi.Strip(line)
+		index := strings.Index(line, value)
+		if index < 0 {
+			t.Fatalf("missing %q in %q", value, line)
+		}
+		return lipgloss.Width(line[:index]) + lipgloss.Width(value)
+	}
+	for _, width := range []int{56, 96, 111, 112, 151, 152, 200} {
+		for _, node := range []bool{false, true} {
+			for _, elapsed := range []string{"0:00", "3:30", "23:59:59", "12-23:59:59"} {
+				t.Run(fmt.Sprintf("width=%d/node=%v/elapsed=%s", width, node, elapsed), func(t *testing.T) {
+					job := slurmDisplayJob{Cluster: "SSSLab", Job: slurmJob{
+						ID: "144566", User: "lhc", State: "RUNNING", QOS: "normal",
+						Elapsed: elapsed, TimeLimit: "20:00", Name: "training",
+					}}
+					header, row := slurmJobTableHeader(width), renderSlurmJobRow(job, width)
+					elapsedWidth := 11
+					if width >= slurmCompactWidth {
+						elapsedWidth = 8
+						if node || width >= 152 {
+							elapsedWidth = 9
+						}
+					}
+					if node {
+						header, row = slurmNodeJobHeader(width), renderSlurmNodeJobRow(job, width)
+					}
+					visibleElapsed := strings.TrimSpace(fixedCell(elapsed, elapsedWidth, true))
+					if rightEdge(header, "ELAPSED") != rightEdge(row, visibleElapsed) {
+						t.Fatalf("ELAPSED is not right-aligned\nheader: %q\nrow:    %q", ansi.Strip(header), ansi.Strip(row))
+					}
+					if strings.Contains(ansi.Strip(header), "LIMIT") && rightEdge(header, "LIMIT") != rightEdge(row, job.Job.TimeLimit) {
+						t.Fatalf("LIMIT is not right-aligned\nheader: %q\nrow:    %q", ansi.Strip(header), ansi.Strip(row))
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestCompactSlurmStateCodes(t *testing.T) {
 	for _, test := range []struct {
 		state string
