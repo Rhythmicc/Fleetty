@@ -1246,6 +1246,13 @@ func TestDarwinCurrentAppleGPU(t *testing.T) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		t.Skip("Apple Silicon integration check")
 	}
+	hardware, err := commandOutput(2*time.Second, "ioreg", "-r", "-c", "AGXAccelerator", "-l")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hardware), "AGXAccelerator") {
+		t.Skip("physical Apple GPU unavailable (e.g. a virtual Mac)")
+	}
 	gpus, err := readDarwinAppleGPU()
 	if err != nil {
 		t.Fatal(err)
@@ -3057,8 +3064,8 @@ func TestStorageScanUsesBoundedWorkersAndDeduplicatesParallelHardLinks(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Workers != 4 {
-		t.Fatalf("storage workers = %d, want 4", result.Workers)
+	if want := storageScanWorkerCount(len(directories)); result.Workers != want {
+		t.Fatalf("storage workers = %d, want %d", result.Workers, want)
 	}
 	if result.Files != 4 {
 		t.Fatalf("parallel scan files = %d, want 4", result.Files)
