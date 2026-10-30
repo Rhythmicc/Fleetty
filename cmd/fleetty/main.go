@@ -1537,7 +1537,7 @@ func gpuPanelMetricsLine(gpu gpuInfo, width int) string {
 func shortGPUBar(value float64, width int) string {
 	filled := int(value / 100 * float64(width))
 	filled = max(0, min(width, filled))
-	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	return strings.Repeat("█", filled) + barTrackStyle.Render(strings.Repeat("░", width-filled))
 }
 
 func shortGPUCount(value uint64) string {
@@ -2765,6 +2765,8 @@ var (
 	titleStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
 	sectionStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
 	valueStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Bold(true)
+	hubMetricStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#D7DAE0"))
+	barTrackStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#343C49"))
 	accentStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
 	cpuTitleStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#7EE2B8")).Bold(true)
 	memoryTitleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A7E7")).Bold(true)
@@ -3005,17 +3007,18 @@ var lightThemeColorSwaps = []themeColorSwap{
 	{"#FFD166", "#8A5A00"},
 	{"#FF9F43", "#B54708"},
 	{"#30374A", "#D9E0EA"},
+	{"#343C49", "#D5D9DF"},
 	{"#FFF4F2", "#8F1D18"},
 	{"#5A3037", "#F4D8D5"},
-	{"#40516B", "#7A889C"},
-	{"#315F57", "#5E877D"},
-	{"#514A78", "#756D99"},
-	{"#6B5438", "#92795C"},
-	{"#315B72", "#66869A"},
-	{"#615B32", "#827A4E"},
-	{"#53517A", "#74739C"},
-	{"#465572", "#697D9B"},
-	{"#5B6B8A", "#7183A0"},
+	{"#40516B", "#C4CBD4"},
+	{"#315F57", "#AFC6BF"},
+	{"#514A78", "#C2BBD1"},
+	{"#6B5438", "#CEBFA8"},
+	{"#315B72", "#B0C5D1"},
+	{"#615B32", "#C9C4A8"},
+	{"#53517A", "#BFBDD1"},
+	{"#465572", "#B6C1D2"},
+	{"#5B6B8A", "#B6C1D2"},
 }
 
 // Rendering always uses the immutable dark palette. Light mode rewrites only
@@ -3137,7 +3140,7 @@ func bar(value float64, width int) string {
 		filled = width
 	}
 	_, loadStyle := gpuLoadStatus(value)
-	return loadStyle.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
+	return loadStyle.Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
 }
 
 func batteryBar(value float64, width int) string {
@@ -3152,7 +3155,7 @@ func batteryBar(value float64, width int) string {
 	case value <= 50:
 		style = gpuBusyStyle
 	}
-	return style.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
+	return style.Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
 }
 func compactCommandError(err error) string {
 	if errors.Is(err, exec.ErrNotFound) {

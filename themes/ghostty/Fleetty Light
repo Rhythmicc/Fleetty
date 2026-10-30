@@ -1,0 +1,24 @@
+# Fleetty Light — warm paper with Fleetty's light UI accents.
+background = #f4f1ea
+foreground = #263244
+cursor-color = #000000
+cursor-text = #ffffff
+selection-background = #d9e0ea
+selection-foreground = #172033
+
+palette = 0=#e4e9f0
+palette = 1=#b42318
+palette = 2=#1f6f50
+palette = 3=#945e13
+palette = 4=#315d91
+palette = 5=#704e91
+palette = 6=#0b668a
+palette = 7=#384252
+palette = 8=#667085
+palette = 9=#a80f2d
+palette = 10=#166b4b
+palette = 11=#8a5a00
+palette = 12=#315d91
+palette = 13=#5a3fa3
+palette = 14=#0b668a
+palette = 15=#172033

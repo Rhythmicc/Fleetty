@@ -29,6 +29,33 @@ Fleetty 是一个面向个人电脑、计算服务器、存储节点和 Slurm �
 - 可接入多个本地或远程 Slurm 集群的队列页面；
 - 面向 NAS 的网络、存储、Docker 和 HTTP 服务监控页面。
 
+## 推荐客户端与主题
+
+我们强烈建议使用 [Ghostty](https://ghostty.org/) 作为 Fleetty 的终端客户端。本地运行与 SSH 远程连接均可使用；Ghostty 的系统深浅色切换可直接驱动 Fleetty 的自动主题，无需向服务器转发主题环境变量。
+
+仓库提供配套的 [Fleetty Dark](themes/ghostty/Fleetty%20Dark) 和 [Fleetty Light](themes/ghostty/Fleetty%20Light) 主题：深色使用炭黑背景与柔和亮色，浅色使用暖纸背景与深色强调色，浅色光标为纯黑。
+
+在客户端电脑上安装主题（不需要在服务器上安装）：
+
+```bash
+fleetty_theme_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ghostty/themes"
+mkdir -p "$fleetty_theme_dir"
+curl -fL "https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/themes/ghostty/Fleetty%20Dark" \
+  -o "$fleetty_theme_dir/Fleetty Dark"
+curl -fL "https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/themes/ghostty/Fleetty%20Light" \
+  -o "$fleetty_theme_dir/Fleetty Light"
+```
+
+将 Ghostty 配置中的 `theme` 设置替换为：
+
+```ini
+theme = dark:Fleetty Dark,light:Fleetty Light
+```
+
+重新加载 Ghostty 配置后，终端会[跟随系统外观切换主题](https://ghostty.org/docs/features/theme#separate-light-and-dark-themes)。Fleetty 保持默认的 `--theme auto` / `DEFAULT_THEME=auto` 即可；手动按 `t` 会停止当前会话的自动跟随。终端主题控制 shell 和终端色板，Fleetty 自己控制监控界面的语义配色。
+
+为了保持稳定的对比度，建议在 Ghostty 配置中使用 `background-opacity = 1`；透明背景会受窗口后方内容影响。主题文件只提供颜色，不修改字体、快捷键或透明度设置。其他终端仍可使用 Fleetty；自动跟随取决于终端是否支持相应的深浅色报告，不支持时可按 `t` 手动切换。
+
 ## 性能设计
 
 - 每个节点只维护一份采集器和最近快照缓存：多个 SSH 会话与 Hub RPC 共享同一轮采集，避免每个会话重复执行 `ps`、`nvidia-smi` 和 `nettop`；

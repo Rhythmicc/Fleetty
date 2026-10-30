@@ -1241,7 +1241,7 @@ func renderHubSectionTitle(title, styleName string, count, width int) string {
 	countLabel := dimStyle.Render(fmt.Sprintf("%d %s ", count, unit))
 	label := style.Render(" " + truncate(title, max(1, width-lipgloss.Width(countLabel)-2)) + " ")
 	line := strings.Repeat("─", max(0, width-lipgloss.Width(label)-lipgloss.Width(countLabel)))
-	return ansi.Truncate(label+dimStyle.Render(line)+countLabel, width, "")
+	return ansi.Truncate(label+lipgloss.NewStyle().Foreground(colorPanelBorder).Render(line)+countLabel, width, "")
 }
 
 func (m *hubModel) renderNodeCard(index, width int) string {
@@ -1251,9 +1251,11 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		state = m.states[index]
 	}
 	selected := index == m.cursor
+	title := node.Name
 	titleStyleForCard := processTitleStyle
 	border := colorPanelBorder
 	if selected {
+		title = "▸ " + title
 		titleStyleForCard = accentStyle
 		border = lipgloss.Color("#B9A4FF")
 	}
@@ -1265,7 +1267,7 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 			address += warningStyle.Render(" · " + sanitizeTerminalText(state.Warning))
 		}
 		content = append(content, ansi.Truncate(address, max(1, width-4), "…"))
-		return btopPanel(width, node.Name, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+		return btopPanel(width, title, meta, strings.Join(content, "\n"), titleStyleForCard, border)
 	}
 	content := []string{
 		dimStyle.Render(truncate(node.Description, width-4)),
@@ -1313,12 +1315,12 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		network := gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature)) + "  " + renderHubNetworkRates(snapshot)
 		if lipgloss.Width(network) > width-4 {
 			network = gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature)) +
-				" " + networkRXStyle.Render("↓") + valueStyle.Render(hubCompactBytes(snapshot.NetworkRX)+"/s") +
-				" " + networkTXStyle.Render("↑") + valueStyle.Render(hubCompactBytes(snapshot.NetworkTX)+"/s")
+				" " + networkRXStyle.Render("↓") + hubMetricStyle.Render(hubCompactBytes(snapshot.NetworkRX)+"/s") +
+				" " + networkTXStyle.Render("↑") + hubMetricStyle.Render(hubCompactBytes(snapshot.NetworkTX)+"/s")
 		}
 		content = []string{
 			renderHubResourceSummary(snapshot),
-			gpuPrefix + valueStyle.Render(memory),
+			gpuPrefix + hubMetricStyle.Render(memory),
 			network,
 			bar(math.Max(snapshot.CPUPercent, gpuUtil), max(1, width-4)),
 		}
@@ -1382,8 +1384,8 @@ func hubCompactBytes(value uint64) string {
 }
 
 func renderHubNetworkRates(snapshot monitorSnapshot) string {
-	return networkRXStyle.Render("↓ ") + valueStyle.Render(bytes(snapshot.NetworkRX)+"/s") +
-		"   " + networkTXStyle.Render("↑ ") + valueStyle.Render(bytes(snapshot.NetworkTX)+"/s")
+	return networkRXStyle.Render("↓ ") + hubMetricStyle.Render(bytes(snapshot.NetworkRX)+"/s") +
+		"   " + networkTXStyle.Render("↑ ") + hubMetricStyle.Render(bytes(snapshot.NetworkTX)+"/s")
 }
 
 func renderNASHubCard(snapshot monitorSnapshot) []string {
