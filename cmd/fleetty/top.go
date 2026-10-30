@@ -16,7 +16,7 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 	flags := flag.NewFlagSet("top", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "optional machine configuration")
-	theme := flags.String("theme", envString("DEFAULT_THEME", "dark"), "dark or light")
+	theme := flags.String("theme", envString("DEFAULT_THEME", "auto"), "auto, dark or light")
 	layoutPathFlag := flags.String("layout", "", "dashboard layout file")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -25,8 +25,8 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 		return errors.New("top does not accept positional arguments")
 	}
 	mode := parseColorMode(*theme)
-	if normalized := strings.ToLower(strings.TrimSpace(*theme)); normalized != "dark" && normalized != "light" {
-		return errors.New("theme must be dark or light")
+	if normalized := strings.ToLower(strings.TrimSpace(*theme)); normalized != "auto" && normalized != "dark" && normalized != "light" {
+		return errors.New("theme must be auto, dark or light")
 	}
 
 	machine := machineConfig{Profile: machineProfileGPU}
@@ -69,6 +69,7 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 		profile:     machine.Profile,
 		status:      "Local metrics refresh every second.",
 		colorMode:   mode,
+		theme:       newTerminalTheme(*theme),
 		panelLayout: panelLayout,
 		layoutPath:  layoutPath,
 		storage:     newStorageMapState(),
@@ -76,6 +77,7 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 	if layoutErr != nil {
 		model.status = "Using the default layout: " + layoutErr.Error()
 	}
+	defer resetTerminalTheme(stdout)
 	_, err = tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout)).Run()
 	return err
 }

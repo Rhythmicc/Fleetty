@@ -13,7 +13,7 @@ Environment=SSH_AUTHORIZED_KEYS_FILE=%h/.config/fleetty/authorized_keys
 Environment=SSH_MAX_CONNECTIONS=64
 Environment=SSH_IDLE_TIMEOUT=30m
 Environment=SSH_MAX_TIMEOUT=24h
-Environment=DEFAULT_THEME=dark
+Environment=DEFAULT_THEME=auto
 EnvironmentFile=-%h/.config/fleetty/machine.env
 EnvironmentFile=-%h/.config/fleetty/admin.env
 ExecStart=%h/.local/bin/fleetty serve

@@ -1,6 +1,6 @@
 module github.com/Rhythmicc/fleetty
 
-go 1.26.8
+go 1.26.10
 
 require (
 	charm.land/bubbletea/v2 v2.0.2
@@ -10,6 +10,7 @@ require (
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/ultraviolet v0.0.0-20260205113103-524a6607adb8
 	github.com/charmbracelet/x/ansi v0.11.6
+	github.com/ebitengine/purego v0.10.2
 	github.com/shirou/gopsutil/v4 v4.26.8
 	golang.org/x/crypto v0.56.0
 	golang.org/x/sys v0.47.0
@@ -27,7 +28,6 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect
-	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/go-logfmt/logfmt v0.6.1 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect

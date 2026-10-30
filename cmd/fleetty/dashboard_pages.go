@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"image/color"
-	"math"
 	"strings"
 	"time"
 
@@ -31,9 +30,7 @@ type pagePanelSpec struct {
 func (m *monitorModel) capabilities() monitorCapabilities {
 	return monitorCapabilities{
 		Battery: m.snapshot.Battery != nil,
-		GPU: len(m.snapshot.GPUs) > 0 ||
-			m.profile == machineProfileGPU ||
-			m.snapshot.Profile == machineProfileGPU,
+		GPU:     len(m.snapshot.GPUs) > 0 || m.snapshot.GPUError != "",
 		Slurm:   m.slurmQueue != nil,
 		Network: true,
 		Services: len(m.snapshot.Services) > 0 || len(m.snapshot.Containers) > 0 ||
@@ -225,6 +222,13 @@ func (m *monitorModel) renderMonitorPageFooter(width int) string {
 		return ansi.Truncate(accentStyle.Render("FILTER /")+" "+
 			inputStyle.Render(value+"█")+"  "+dimStyle.Render("[enter] apply  [esc] cancel"), width, "")
 	}
+	if m.useCPUChart() && m.cpuCoreFocused {
+		return ansi.Truncate(strings.Join([]string{
+			keyHint("←→↑↓", "core"), keyHint("home/end", "first/last"),
+			keyHint("esc/f", "processes"), keyHint("v", "CPU detail"),
+			keyHint("tab", "next page"), keyHint("q", "quit"),
+		}, "  "), width, "")
+	}
 	pageRange := "1–3"
 	if m.storage != nil {
 		pageRange = "1–4"
@@ -317,38 +321,19 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	}
 	host := m.hostHealthPanelSpec(summaryWidth, rich)
 	compute := m.computeActivityPanelSpec(summaryWidth)
-	tallGrowth := 0
-	if columns && m.height > 40 {
-		tallGrowth = m.height - 40
-	}
-	detailGrowth := tallGrowth / 2
-	detailWidth := width
-	if columns && (capabilities.Slurm || !capabilities.GPU) {
-		detailWidth = (width - 1) / 2
-	}
-	networkGrowth := detailGrowth
-	if columns && !capabilities.GPU {
-		networkGrowth = 2
-	}
-	network := m.networkActivityPanelSpec(detailWidth, rich, 5+networkGrowth)
+	detailWidth := summaryWidth
+	network := m.networkActivityPanelSpec(detailWidth, rich, 5)
 	queueRows := 4
-	if rich {
-		queueRows = 7 + detailGrowth
-	}
-	queueWidth := width
-	// Only GPU overviews put the queue beside Network. CPU-only nodes
-	// move Network into the summary row and give the queue a full row.
-	if columns && capabilities.GPU && capabilities.Slurm {
-		queueWidth = (width - 1) / 2
-	}
-	queue := m.nodeQueuePanelSpec(queueRows, queueWidth)
+	queue := m.nodeQueuePanelSpec(queueRows, width)
 	networkRendered := false
 	summaryTarget := max(pagePanelLineHeight(host), pagePanelLineHeight(compute))
 	detailTarget := max(pagePanelLineHeight(network), pagePanelLineHeight(queue))
 
 	switch {
 	case columns && capabilities.GPU:
-		appendSection(renderPagePanelRowAtLeast(width, summaryTarget, host, compute))
+		appendSection(renderPagePanelRow(width, host, network))
+		appendSection(renderPagePanel(width, m.computeActivityPanelSpec(width)))
+		networkRendered = true
 	case columns:
 		appendSection(renderPagePanelRowAtLeast(width, summaryTarget, host, network))
 		networkRendered = true
@@ -376,9 +361,7 @@ func (m *monitorModel) renderOverviewPage(width int) (string, []widgetPlacement)
 	footerHeight := 1
 	processOverhead := 4 // Borders, header and the state-marker legend.
 	availableRows := m.height - headerHeight - footerHeight - y - processOverhead
-	// Taller terminals grow the summary/detail regions first. Every row left in
-	// the process panel then becomes a real process row, keeping the component's
-	// information density coupled to its rendered height.
+	// The overview stays bounded; extra terminal height belongs to processes.
 	processPanelRows := max(3, availableRows)
 	processRows := processPanelRows
 	processPanel := m.renderOverviewProcesses(width, processPanelRows, processRows)
@@ -397,20 +380,15 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 	diskUsage := percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal)
 	memoryAvailable := counterDelta(m.snapshot.MemoryTotal, m.snapshot.MemoryUsed)
 	diskFree := counterDelta(m.snapshot.DiskTotal, m.snapshot.DiskUsed)
-	cpuState, cpuStateStyle := healthStatus(m.snapshot.CPUPercent)
 	memoryState, memoryStateStyle := healthStatus(memoryUsage)
 	diskState, diskStateStyle := capacityStatus(diskUsage)
-	cpuHistoryLine := sparkline(m.cpuHistory, 28, 100, cpuTitleStyle)
-	if width >= 56 && len(m.hourCPUHistory) >= 2 {
-		cpuHistoryLine += "  " + dimStyle.Render("1H") + " " +
-			sparkline(m.hourCPUHistory, 12, 100, cpuTitleStyle)
-	}
+	cpuHistoryLine := strings.Join(renderHistoryChart(m.cpuHistory, max(4, width-4), historyPlotHeight, "CPU %", 100, cpuTitleStyle), "\n")
 	lines := []string{
-		fmt.Sprintf("%s  %s  %s  %s",
+		fmt.Sprintf("%s  %s  %s",
 			cpuTitleStyle.Render("CPU"),
 			valueStyle.Render(fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent)),
-			cpuStateStyle.Render(cpuState),
-			dimStyle.Render(truncate(m.snapshot.LoadAverage, 30))),
+			valueStyle.Render(cpuClockSummary(m.snapshot.CPUFrequency))),
+		dimStyle.Render(truncate(m.snapshot.LoadAverage, max(4, width-4))),
 		cpuHistoryLine,
 		fmt.Sprintf("%s  %s  %s  %s",
 			memoryTitleStyle.Render("MEMORY"),
@@ -425,59 +403,82 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 			dimStyle.Render("FREE "+bytes(diskFree))),
 		bar(diskUsage, 28),
 	}
+	if !rich && m.height > 0 && m.height < 34 {
+		lines = append(lines[:2], lines[3:]...)
+	}
 	if rich {
 		contentWidth := max(24, width-4)
-		load := strings.TrimSpace(strings.TrimPrefix(m.snapshot.LoadAverage, "load"))
-		cpuModel := m.hostCPUModelLabel()
-		if cpuModel == "" {
-			cpuModel = "CPU model unavailable"
-		}
-		cpuCount := ""
-		if m.snapshot.CPUCores > 0 {
-			cpuCount = fmt.Sprintf("%d vCPU", m.snapshot.CPUCores)
-		}
-		loadText := dimStyle.Render("LOAD ") + valueStyle.Render(load) +
-			dimStyle.Render("  (1m 5m 15m)")
-		loadGraphWidth := min(24, max(6,
-			contentWidth-lipgloss.Width(loadText)-lipgloss.Width(cpuModel)-4))
-		cpuLine := loadText + "  " + sparkline(m.cpuHistory, loadGraphWidth, 100, cpuTitleStyle)
-		if contentWidth >= 72 && len(m.hourCPUHistory) >= 2 {
-			graphWidth := max(6, loadGraphWidth-16)
-			cpuLine = loadText + "  " + sparkline(m.cpuHistory, graphWidth, 100, cpuTitleStyle) +
-				"  " + dimStyle.Render("1H") + " " +
-				sparkline(m.hourCPUHistory, 10, 100, cpuTitleStyle)
-		}
-		lines = []string{
-			alignedPageLine(
-				cpuTitleStyle.Render("CPU")+"  "+
-					valueStyle.Render(fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent))+"  "+
-					cpuStateStyle.Render(cpuState),
-				dimStyle.Render(cpuCount), contentWidth),
-			alignedPageLine(cpuLine, dimStyle.Render(cpuModel), contentWidth),
-			pageRule(contentWidth),
-			alignedPageLine(memoryTitleStyle.Render("MEMORY"),
-				dimStyle.Render(bytes(m.snapshot.MemoryUsed)+" used"), contentWidth),
-			fmt.Sprintf("%s  %s  %s",
-				valueStyle.Render(fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal))),
-				dimStyle.Render(fmt.Sprintf("(%.1f%%)", memoryUsage)),
-				memoryStateStyle.Render(memoryState)),
-			alignedPageLine(bar(memoryUsage, min(28, max(12, contentWidth/3))),
-				dimStyle.Render(bytes(memoryAvailable)+" available"), contentWidth),
-			pageRule(contentWidth),
-			alignedPageLine(diskTitleStyle.Render("ROOT DISK  (/)"),
-				dimStyle.Render(bytes(m.snapshot.DiskUsed)+" used"), contentWidth),
-			fmt.Sprintf("%s  %s  %s",
-				valueStyle.Render(fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal))),
-				dimStyle.Render(fmt.Sprintf("(%.1f%%)", diskUsage)),
-				diskStateStyle.Render(diskState)),
-			alignedPageLine(bar(diskUsage, min(28, max(12, contentWidth/3))),
-				dimStyle.Render(bytes(diskFree)+" free"), contentWidth),
+		lines = append(m.overviewCPUHeader(contentWidth), pageRule(contentWidth))
+		if contentWidth >= 64 {
+			leftWidth := (contentWidth - 3) / 2
+			rightWidth := contentWidth - leftWidth - 3
+			memory := overviewCapacityLines("MEM", m.snapshot.MemoryUsed, m.snapshot.MemoryTotal, leftWidth, memoryTitleStyle)
+			disk := overviewCapacityLines("DISK /", m.snapshot.DiskUsed, m.snapshot.DiskTotal, rightWidth, diskTitleStyle)
+			lines = append(lines, strings.Split(renderWidgetColumns(memory, disk, leftWidth, rightWidth), "\n")...)
+		} else {
+			lines = append(lines, overviewCapacityLines("MEM", m.snapshot.MemoryUsed, m.snapshot.MemoryTotal, contentWidth, memoryTitleStyle)...)
+			lines = append(lines, overviewCapacityLines("DISK /", m.snapshot.DiskUsed, m.snapshot.DiskTotal, contentWidth, diskTitleStyle)...)
 		}
 	}
 	return pagePanelSpec{
 		title: "HOST HEALTH", meta: "CURRENT",
-		lines: lines, titleStyle: processRunningStyle, borderColor: colorPanelBorder,
+		lines: strings.Split(strings.Join(lines, "\n"), "\n"), titleStyle: processRunningStyle, borderColor: colorPanelBorder,
 	}
+}
+
+func overviewCapacityLines(label string, used, total uint64, width int, style lipgloss.Style) []string {
+	usage := percent(used, total)
+	reading := style.Render(label+" ") + valueStyle.Render(fmt.Sprintf("%.1f%%", usage)) +
+		dimStyle.Render("  "+compactByteCount(used)+" / "+compactByteCount(total))
+	return []string{ansi.Truncate(reading, width, "…"), bar(usage, width)}
+}
+
+// Keep hardware, live readings and trends on separate rows. Secondary details
+// disappear as the panel narrows, without truncating the primary readings.
+func (m *monitorModel) overviewCPUHeader(width int) []string {
+	historyWidth := 0
+	if width >= 64 {
+		historyWidth = min(24, width/3)
+		width -= historyWidth + 3
+	}
+	model := m.hostCPUModelLabel()
+	if model == "" {
+		model = "model unavailable"
+	}
+	count := ""
+	if m.snapshot.CPUCores > 0 {
+		count = fmt.Sprintf("%d logical CPUs", m.snapshot.CPUCores)
+		if lipgloss.Width(count) > width/2 {
+			count = fmt.Sprintf("%d logical", m.snapshot.CPUCores)
+		}
+	}
+	hardware := alignedPageLine(cpuTitleStyle.Render("CPU")+"  "+dimStyle.Render(model),
+		dimStyle.Render(count), width)
+	readings := dimStyle.Render("USAGE ") + valueStyle.Render(fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent)) +
+		"  " + valueStyle.Render(cpuClockSummary(m.snapshot.CPUFrequency))
+	if frequency := m.snapshot.CPUFrequency; frequency != nil && validCPUFrequency(frequency.AverageMHz) {
+		clockRange := dimStyle.Render(fmt.Sprintf("  RANGE %.2f–%.2fGHz", frequency.MinMHz/1000, frequency.MaxMHz/1000))
+		if lipgloss.Width(readings+clockRange) <= width {
+			readings += clockRange
+		}
+	}
+	load := strings.TrimSpace(strings.TrimPrefix(m.snapshot.LoadAverage, "load"))
+	if load == "" {
+		load = "--"
+	}
+	trend := dimStyle.Render("LOAD ") + valueStyle.Render(load)
+	for _, legend := range []string{"  (1m 5m 15m)", " (1/5/15m)"} {
+		if lipgloss.Width(trend+legend) <= width {
+			trend += dimStyle.Render(legend)
+			break
+		}
+	}
+	lines := []string{hardware, ansi.Truncate(readings, width, "…"), ansi.Truncate(trend, width, "…")}
+	if historyWidth > 0 {
+		history := renderHistoryChart(m.cpuHistory, historyWidth, historyPlotHeight, "CPU %", 100, cpuTitleStyle)
+		return historyColumns(lines, history, width)
+	}
+	return lines
 }
 
 func (m *monitorModel) hostCPUModelLabel() string {
@@ -527,98 +528,19 @@ func (m *monitorModel) computeActivityPanelSpec(width int) pagePanelSpec {
 }
 
 func buildGPUOverviewPanelSpec(gpus []gpuInfo, gpuError string, width int) pagePanelSpec {
-	var lines []string
-	if gpuError != "" && len(gpus) == 0 {
-		lines = append(lines, warningStyle.Render("GPU metrics unavailable: "+gpuError))
+	spec := pagePanelSpec{title: "GPU", titleStyle: gpuTitleStyle, borderColor: colorGPUBorder}
+	switch {
+	case len(gpus) > 1:
+		spec.meta = gpuDeviceCountMeta(len(gpus))
+		spec.lines = multiGPUOverviewLines(gpus, max(24, width-4))
+	case len(gpus) == 1:
+		spec.lines = singleGPUOverviewLines(gpus[0], max(4, width-4))
+	case gpuError != "":
+		spec.lines = []string{warningStyle.Render(truncate(gpuError, max(4, width-4)))}
+	default:
+		spec.lines = []string{dimStyle.Render("Unavailable")}
 	}
-	if len(gpus) > 1 {
-		lines = multiGPUOverviewLines(gpus, max(24, width-4))
-		meta := fmt.Sprintf("%d DEVICES", len(gpus))
-		return pagePanelSpec{
-			title: "COMPUTE ACTIVITY", meta: meta,
-			lines: lines, titleStyle: gpuTitleStyle, borderColor: colorGPUBorder,
-		}
-	}
-	limit := min(3, len(gpus))
-	for _, gpu := range gpus[:limit] {
-		status, statusStyle := gpuLoadStatus(gpu.Utilization)
-		lines = append(lines,
-			fmt.Sprintf("%s  %-22s  %s",
-				accentStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)),
-				truncate(gpu.Name, 22),
-				statusStyle.Render(status)),
-			gpuMetricLine(
-				"UTIL",
-				bar(gpu.Utilization, 18),
-				statusStyle.Render(fmt.Sprintf("%.0f%%", gpu.Utilization)),
-			),
-		)
-		memoryUsage := percent(gpu.MemoryUsed, gpu.MemoryTotal)
-		_, memoryStyle := gpuLoadStatus(memoryUsage)
-		lines = append(lines, gpuMetricLine(
-			"MEMORY",
-			bar(memoryUsage, 18),
-			memoryStyle.Render(gpuMemoryText(gpu, 1, 1)),
-		))
-		if len(gpus) == 1 {
-			if gpu.Platform == "apple" {
-				_, rendererStyle := gpuLoadStatus(gpu.RendererUtilization)
-				_, tilerStyle := gpuLoadStatus(gpu.TilerUtilization)
-				lines = append(lines,
-					gpuMetricLine(
-						"RENDER",
-						bar(gpu.RendererUtilization, 18),
-						rendererStyle.Render(fmt.Sprintf("%.0f%%", gpu.RendererUtilization)),
-					),
-					gpuMetricLine(
-						"TILER",
-						bar(gpu.TilerUtilization, 18),
-						tilerStyle.Render(fmt.Sprintf("%.0f%%", gpu.TilerUtilization)),
-					),
-					pageRule(36),
-					gpuTitleStyle.Render(fmt.Sprintf("CORES %d", gpu.CoreCount))+
-						dimStyle.Render("  ·  Unified memory architecture"),
-					dimStyle.Render("API Metal  ·  Memory shared with the system"),
-					dimStyle.Render("ARCH Integrated Apple Silicon GPU"),
-					dimStyle.Render("SOURCE IOKit AGXAccelerator  ·  Refresh 1s"),
-				)
-			} else {
-				lines = append(lines,
-					gpuMetricLine("CLOCK", "", fmt.Sprintf("%d MHz", gpu.ClockMHz)),
-					gpuMetricLine("POWER", "", fmt.Sprintf("%.0f / %.0f W", gpu.Power, gpu.PowerLimit)),
-					gpuMetricLine("TEMP", "", fmt.Sprintf("%d°C", gpu.Temperature)),
-					pageRule(36),
-					dimStyle.Render("NVIDIA CUDA device  ·  Live telemetry"),
-				)
-			}
-		} else if gpu.Platform == "apple" {
-			lines = append(lines, statusStyle.Render(gpuTelemetry(gpu, false)))
-		} else {
-			lines = append(lines, statusStyle.Render(gpuTelemetry(gpu, true)))
-		}
-		if gpu.Platform != "apple" {
-			lines = append(lines, gpuWorkloadSummary(gpu))
-		}
-	}
-	if len(gpus) > 0 && gpus[0].Platform != "apple" && gpus[0].DriverVersion != "" {
-		lines = append(lines, pageRule(36),
-			dimStyle.Render("DRIVER ")+valueStyle.Render(gpus[0].DriverVersion)+
-				dimStyle.Render("  ·  NVIDIA management telemetry"))
-	}
-	if len(gpus) > limit {
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("+ %d more devices on the Compute page", len(gpus)-limit)))
-	}
-	if len(lines) == 0 {
-		lines = append(lines, dimStyle.Render("No GPU capability was reported by this host."))
-	}
-	meta := fmt.Sprintf("%d DEVICE", len(gpus))
-	if len(gpus) != 1 {
-		meta += "S"
-	}
-	return pagePanelSpec{
-		title: "COMPUTE ACTIVITY", meta: meta,
-		lines: lines, titleStyle: gpuTitleStyle, borderColor: colorGPUBorder,
-	}
+	return spec
 }
 
 func multiGPUOverviewLines(gpus []gpuInfo, width int) []string {
@@ -626,16 +548,15 @@ func multiGPUOverviewLines(gpus []gpuInfo, width int) []string {
 	limit := min(4, len(gpus))
 	lines := []string{multiGPUOverviewHeader(width)}
 	var (
-		active        int
-		workloads     int
-		totalMemory   uint64
-		usedMemory    uint64
-		totalPower    float64
-		totalLimit    float64
-		totalUtil     float64
-		busiestIndex  int
-		busiestUtil   float64
-		driverVersion string
+		active       int
+		workloads    int
+		totalMemory  uint64
+		usedMemory   uint64
+		totalPower   float64
+		totalLimit   float64
+		totalUtil    float64
+		busiestIndex int
+		busiestUtil  float64
 	)
 	for index, gpu := range gpus {
 		if gpu.Utilization >= 5 {
@@ -649,9 +570,6 @@ func multiGPUOverviewLines(gpus []gpuInfo, width int) []string {
 		totalUtil += gpu.Utilization
 		if index == 0 || gpu.Utilization > busiestUtil {
 			busiestIndex, busiestUtil = gpu.Index, gpu.Utilization
-		}
-		if driverVersion == "" {
-			driverVersion = strings.TrimSpace(gpu.DriverVersion)
 		}
 		if index < limit {
 			lines = append(lines, multiGPUOverviewRow(gpu, width))
@@ -678,19 +596,9 @@ func multiGPUOverviewLines(gpus []gpuInfo, width int) []string {
 			dimStyle.Render(fmt.Sprintf("JOBS %d", workloads))),
 		width, "…",
 	))
-	driver := "NVIDIA management telemetry"
-	if driverVersion != "" {
-		driver = "DRIVER " + driverVersion + "  ·  " + driver
-	}
-	lines = append(lines, ansi.Truncate(dimStyle.Render(driver), width, "…"))
-	more := ""
 	if len(gpus) > limit {
-		more = fmt.Sprintf("  ·  +%d more devices", len(gpus)-limit)
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("+%d · [2 COMPUTE]", len(gpus)-limit)))
 	}
-	lines = append(lines, ansi.Truncate(
-		accentStyle.Render("[2 COMPUTE]")+" "+dimStyle.Render("full per-device telemetry"+more),
-		width, "…",
-	))
 	return lines
 }
 
@@ -844,17 +752,6 @@ func compactGPUUUID(uuid string) string {
 	return uuid[:12] + "…" + uuid[len(uuid)-4:]
 }
 
-func gpuMetricLine(label, visual, value string) string {
-	parts := []string{dimStyle.Render(fixedCell(label, 8, false))}
-	if visual != "" {
-		parts = append(parts, visual)
-	}
-	if value != "" {
-		parts = append(parts, value)
-	}
-	return strings.Join(parts, " ")
-}
-
 func (m *monitorModel) networkActivityPanelSpec(width int, rich bool, detailLimit int) pagePanelSpec {
 	detailWidth := max(24, width-4)
 	summary := networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
@@ -862,44 +759,36 @@ func (m *monitorModel) networkActivityPanelSpec(width int, rich bool, detailLimi
 		dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s",
 			bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)))
 	detailLimit = max(1, detailLimit)
+	if !rich || width < 70 {
+		detailLimit = min(detailLimit, 3)
+	}
 	detailTitle, details := m.networkOverviewDetails(detailWidth, detailLimit)
 	if !rich {
-		lines := []string{
-			summary,
-			renderMetricVisual(metricCard{
-				visual:         metricVisualNetwork,
-				primaryHistory: m.networkRXHistory, secondaryHistory: m.networkTXHistory,
-			}, max(12, min(72, width-4))),
-			networkTitleStyle.Render(detailTitle),
+		lines := []string{summary}
+		if m.height == 0 || m.height >= 34 {
+			lines = append(lines, strings.Join(renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, max(4, width-4)), "\n"))
 		}
+		lines = append(lines, networkTitleStyle.Render(detailTitle))
 		lines = append(lines, details...)
 		return pagePanelSpec{
-			title: "NETWORK ACTIVITY", meta: "NOW + TOTAL",
+			title: "NETWORK ACTIVITY", meta: m.primaryNetworkSource(),
 			lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
 		}
 	}
 
 	contentWidth := max(24, width-4)
-	if width >= 96 {
-		leftWidth := min(68, max(36, (contentWidth-3)/2))
+	if width >= 70 {
+		leftWidth := min(68, max(34, (contentWidth-3)/2))
 		rightWidth := contentWidth - leftWidth - 3
-		detailTitle, details = m.networkOverviewDetails(rightWidth, detailLimit)
-		left := []string{
-			dimStyle.Render("60 SECOND HISTORY"),
-			networkHistoryLine("RX", m.networkRXHistory, leftWidth, networkRXStyle),
-			networkHistoryLine("TX", m.networkTXHistory, leftWidth, networkTXStyle),
-			alignedPageLine(dimStyle.Render("TOTAL RX"), valueStyle.Render(bytes(m.snapshot.NetworkRXTotal)), leftWidth),
-			alignedPageLine(dimStyle.Render("TOTAL TX"), valueStyle.Render(bytes(m.snapshot.NetworkTXTotal)), leftWidth),
-			alignedPageLine(dimStyle.Render("SOURCE"), valueStyle.Render(m.primaryNetworkSource()), leftWidth),
-			dimStyle.Render("Rates refresh every second."),
-		}
+		left := renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, leftWidth)
+		// Use every row beside the plots, but never make the summary taller.
+		_, details = m.networkOverviewDetails(rightWidth, min(detailLimit, len(left)-1))
 		right := []string{
-			networkTitleStyle.Render(detailTitle),
 			m.networkOverviewHeader(rightWidth),
 		}
 		right = append(right, details...)
 		rowCount := max(len(left), len(right))
-		lines := []string{summary, pageRule(contentWidth)}
+		lines := make([]string, 0, rowCount+2)
 		for index := 0; index < rowCount; index++ {
 			leftLine, rightLine := "", ""
 			if index < len(left) {
@@ -910,25 +799,22 @@ func (m *monitorModel) networkActivityPanelSpec(width int, rich bool, detailLimi
 			}
 			lines = append(lines, joinPageColumns(leftLine, rightLine, leftWidth, contentWidth))
 		}
+		lines = append(lines, pageRule(contentWidth), summary)
 		return pagePanelSpec{
-			title: "NETWORK ACTIVITY", meta: "NOW + TOTAL",
+			title: "NETWORK ACTIVITY", meta: m.primaryNetworkSource() + " · 1m",
 			lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
 		}
 	}
 
 	lines := []string{
-		summary,
+		strings.Join(renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, contentWidth), "\n"),
 		pageRule(contentWidth),
-		dimStyle.Render("60 SECOND HISTORY"),
-		networkHistoryLine("RX", m.networkRXHistory, contentWidth, networkRXStyle),
-		networkHistoryLine("TX", m.networkTXHistory, contentWidth, networkTXStyle),
-		pageRule(contentWidth),
-		networkTitleStyle.Render(detailTitle),
 		m.networkOverviewHeader(contentWidth),
 	}
 	lines = append(lines, details...)
+	lines = append(lines, pageRule(contentWidth), summary)
 	return pagePanelSpec{
-		title: "NETWORK ACTIVITY", meta: "NOW + TOTAL",
+		title: "NETWORK ACTIVITY", meta: m.primaryNetworkSource() + " · 1m",
 		lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
 	}
 }
@@ -937,17 +823,31 @@ func (m *monitorModel) networkOverviewDetails(width, limit int) (string, []strin
 	var lines []string
 	switch {
 	case m.snapshot.NetworkConnectionMode:
+		if width < 48 {
+			for _, connection := range m.snapshot.NetworkConnections[:min(limit, len(m.snapshot.NetworkConnections))] {
+				lines = append(lines, compactNetworkOverviewRow(connection.Name, connection.RX, connection.TX, connection.RateAvailable, width))
+			}
+			return "PROCESS CONNECTIONS", lines
+		}
 		return "PROCESS CONNECTIONS", m.networkApplicationRows(width, limit)
 	case len(m.snapshot.NetworkProcesses) > 0:
 		limit = min(limit, len(m.snapshot.NetworkProcesses))
 		for _, process := range m.snapshot.NetworkProcesses[:limit] {
-			lines = append(lines, renderNetworkProcessRow(process, width))
+			if width < 48 {
+				lines = append(lines, compactNetworkOverviewRow(process.Name, process.RX, process.TX, true, width))
+			} else {
+				lines = append(lines, renderNetworkProcessRow(process, width))
+			}
 		}
 		return "TOP APPLICATIONS / PROCESSES", lines
 	case len(m.snapshot.NetworkInterfaces) > 0:
 		limit = min(limit, len(m.snapshot.NetworkInterfaces))
 		for _, networkInterface := range m.snapshot.NetworkInterfaces[:limit] {
-			lines = append(lines, renderNetworkInterfaceRow(networkInterface, width))
+			if width < 48 {
+				lines = append(lines, compactNetworkOverviewRow(networkInterface.Name, networkInterface.RX, networkInterface.TX, true, width))
+			} else {
+				lines = append(lines, renderNetworkInterfaceRow(networkInterface, width))
+			}
 		}
 		return "NETWORK INTERFACES", lines
 	default:
@@ -958,10 +858,22 @@ func (m *monitorModel) networkOverviewDetails(width, limit int) (string, []strin
 }
 
 func (m *monitorModel) networkOverviewHeader(width int) string {
+	if width < 48 {
+		return dimStyle.Render(fixedCell("NAME", max(1, width-22), false) + " " + fixedCell("DOWN", 10, true) + " " + fixedCell("UP", 10, true))
+	}
 	if m.snapshot.NetworkConnectionMode || len(m.snapshot.NetworkProcesses) > 0 {
 		return m.networkApplicationHeader(width)
 	}
 	return networkInterfaceHeader(width)
+}
+
+func compactNetworkOverviewRow(name string, rx, tx uint64, available bool, width int) string {
+	down, up := "--", "--"
+	if available {
+		down, up = bytes(rx)+"/s", bytes(tx)+"/s"
+	}
+	return valueStyle.Render(fixedCell(sanitizeTerminalText(name), max(1, width-22), false)) + " " +
+		networkRXStyle.Render(fixedCell(down, 10, true)) + " " + networkTXStyle.Render(fixedCell(up, 10, true))
 }
 
 func (m *monitorModel) primaryNetworkSource() string {
@@ -969,17 +881,6 @@ func (m *monitorModel) primaryNetworkSource() string {
 		return m.snapshot.NetworkInterfaces[0].Name
 	}
 	return "aggregate"
-}
-
-func networkHistoryLine(label string, history []float64, width int, style lipgloss.Style) string {
-	peak := historyMax(history)
-	peakText := "PEAK " + bytes(uint64(math.Max(0, peak))) + "/s"
-	prefix := style.Render(label + " ")
-	graphWidth := max(8, width-lipgloss.Width(prefix)-lipgloss.Width(peakText)-2)
-	return alignedPageLine(
-		prefix+sparkline(history, graphWidth, math.Max(1, peak), style),
-		dimStyle.Render(peakText), width,
-	)
 }
 
 func joinPageColumns(left, right string, leftWidth, totalWidth int) string {
@@ -1068,7 +969,7 @@ func renderPagePanelRowAtLeast(width, lineCount int, specs ...pagePanelSpec) str
 	extra := available % len(specs)
 	maxLines := 1
 	for _, spec := range specs {
-		maxLines = max(maxLines, len(spec.lines))
+		maxLines = max(maxLines, lipgloss.Height(strings.Join(spec.lines, "\n")))
 	}
 	maxLines = max(maxLines, lineCount)
 	parts := make([]string, 0, len(specs)*2)
@@ -1077,7 +978,7 @@ func renderPagePanelRowAtLeast(width, lineCount int, specs ...pagePanelSpec) str
 		if index < extra {
 			panelWidth++
 		}
-		lines := append([]string(nil), spec.lines...)
+		lines := strings.Split(strings.Join(spec.lines, "\n"), "\n")
 		for len(lines) < maxLines {
 			lines = append(lines, "")
 		}
@@ -1095,13 +996,13 @@ func renderPagePanelRowAtLeast(width, lineCount int, specs ...pagePanelSpec) str
 func pagePanelLineHeight(specs ...pagePanelSpec) int {
 	height := 0
 	for _, spec := range specs {
-		height = max(height, len(spec.lines))
+		height = max(height, lipgloss.Height(strings.Join(spec.lines, "\n")))
 	}
 	return height
 }
 
 func padPagePanelSpec(spec pagePanelSpec, lineCount int) pagePanelSpec {
-	spec.lines = append([]string(nil), spec.lines...)
+	spec.lines = strings.Split(strings.Join(spec.lines, "\n"), "\n")
 	for len(spec.lines) < lineCount {
 		spec.lines = append(spec.lines, "")
 	}
@@ -1160,7 +1061,9 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 		y += lipgloss.Height(section)
 	}
 	cpuCard, _ := m.metricWidgetCard(dashboardPanelCPU)
-	appendSection(m.renderCPUWidget(cpuCard, width, widgetSizeMedium))
+	cpuPanel := m.renderCPUWidget(cpuCard, width, widgetSizeMedium)
+	placements := []widgetPlacement{{ID: dashboardPanelCPU, X: 0, Y: 0, Width: width, Height: lipgloss.Height(cpuPanel)}}
+	appendSection(cpuPanel)
 	if m.capabilities().GPU {
 		layout := dashboardLayout{width: width, height: m.height, compactGPU: width < 112}
 		appendSection(m.gpuPanel(layout))
@@ -1182,10 +1085,10 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 		"CLICK HEADER TO SORT",
 	)
 	appendSection(workloads)
-	return strings.Join(sections, "\n"), []widgetPlacement{{
+	return strings.Join(sections, "\n"), append(placements, widgetPlacement{
 		ID: dashboardPanelProcesses, X: 0, Y: processY, Width: width,
 		Height: lipgloss.Height(workloads), ProcessRows: processRows, ProcessRowStart: 2,
-	}}
+	})
 }
 
 func (m *monitorModel) renderNetworkPage(width int) (string, []widgetPlacement) {
@@ -1258,8 +1161,7 @@ func (m *monitorModel) networkTrafficSummaryPanelSpec(width int) pagePanelSpec {
 			contentWidth,
 		),
 		pageRule(contentWidth),
-		networkHistoryLine("RX", m.networkRXHistory, contentWidth, networkRXStyle),
-		networkHistoryLine("TX", m.networkTXHistory, contentWidth, networkTXStyle),
+		strings.Join(renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, contentWidth), "\n"),
 		pageRule(contentWidth),
 		alignedPageLine(
 			dimStyle.Render("PRIMARY  ")+valueStyle.Render(m.primaryNetworkSource()),
@@ -1389,6 +1291,7 @@ func (m *monitorModel) switchMonitorPage(page monitorPage) tea.Cmd {
 		m.storage.DuplicateMode = false
 	}
 	m.monitorPage = page
+	m.cpuCoreFocused = false
 	m.dashboardScroll = 0
 	m.monitorFocus = monitorFocusProcesses
 	m.status = page.label() + " page."

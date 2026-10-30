@@ -120,7 +120,11 @@ func runOperationsWithInput(args []string, stdin io.Reader, stdout, stderr io.Wr
 		}
 		switch result.Action {
 		case launcherActionTop:
-			return true, runTopCommand(nil, stdin, stdout, stderr)
+			var topArgs []string
+			if result.Theme != "" {
+				topArgs = []string{"--theme", result.Theme}
+			}
+			return true, runTopCommand(topArgs, stdin, stdout, stderr)
 		case launcherActionServe:
 			if result.AuthorizedKeysPath != "" {
 				if err := os.Setenv("SSH_AUTHORIZED_KEYS_FILE", result.AuthorizedKeysPath); err != nil {
@@ -188,7 +192,7 @@ func writeOperationsUsage(writer io.Writer) {
 
 Usage:
   fleetty
-  fleetty top [--config PATH] [--theme dark|light] [--layout PATH]
+  fleetty top [--config PATH] [--theme auto|dark|light] [--layout PATH]
   fleetty update [--check] [--version latest|TAG]
   fleetty dedupe-link --keep PATH --replace PATH --sha256 HEX
   fleetty serve

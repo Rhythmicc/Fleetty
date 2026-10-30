@@ -28,10 +28,6 @@ func TestOverviewQueueUsesRenderedPanelWidth(t *testing.T) {
 				page, _ := m.renderOverviewPage(width)
 				lines := strings.Split(ansi.Strip(page), "\n")
 				panelWidth, start := width, 0
-				if withGPU && width >= 96 {
-					panelWidth = (width - 1) / 2
-					start = width - panelWidth
-				}
 				foundRule, foundJob := false, false
 				for i, line := range lines {
 					if lipgloss.Width(line) > width {

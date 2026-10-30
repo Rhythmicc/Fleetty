@@ -535,6 +535,7 @@ type hubModel struct {
 	offset          int
 	collecting      bool
 	colorMode       colorMode
+	theme           terminalTheme
 	status          string
 	detail          *monitorModel
 	slurmView       bool
@@ -579,12 +580,13 @@ func newHubModel(service *hubService, _ ssh.Session, width, height int) *hubMode
 		width:       width,
 		height:      height,
 		colorMode:   parseColorMode(os.Getenv("DEFAULT_THEME")),
+		theme:       newTerminalTheme(os.Getenv("DEFAULT_THEME")),
 		status:      "Select a server to open its live dashboard.",
 	}
 }
 
 func (m *hubModel) Init() tea.Cmd {
-	return tea.Batch(m.startCollect(), hubTick(m.config.refreshInterval()))
+	return tea.Batch(m.theme.init(), m.startCollect(), hubTick(m.config.refreshInterval()))
 }
 
 func hubTick(interval time.Duration) tea.Cmd {
@@ -612,6 +614,12 @@ func (m *hubModel) startCollect() tea.Cmd {
 }
 
 func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.theme.update(msg, &m.colorMode) {
+		if m.detail != nil {
+			m.detail.colorMode, m.detail.theme = m.colorMode, m.theme
+		}
+		return m, nil
+	}
 	// Hub refresh messages belong to the parent model even while a node
 	// dashboard is open. Forwarding either message to the child drops the
 	// refresh timer chain and can leave collecting stuck at true.
@@ -635,6 +643,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key, ok := msg.(tea.KeyPressMsg); ok && m.detail.screen == screenMonitor {
 			if key.String() == "esc" || key.String() == "q" || key.String() == "Q" {
 				m.colorMode = m.detail.colorMode
+				m.theme = m.detail.theme
 				m.detail.adminCredential = ""
 				m.detail = nil
 				m.status = "Returned to the server overview."
@@ -644,6 +653,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		updated, command := m.detail.Update(msg)
 		if child, ok := updated.(*monitorModel); ok {
 			m.detail = child
+			m.colorMode, m.theme = child.colorMode, child.theme
 		}
 		return m, command
 	}
@@ -834,6 +844,7 @@ func (m *hubModel) openSelected() tea.Cmd {
 		return nil
 	}
 	m.detail = newRemoteMonitorModel(node, m.width, m.height, m.colorMode)
+	m.detail.theme = m.theme
 	m.detail.slurmQueue = m.nodeSlurmQueue(m.cursor)
 	m.detail.status = fmt.Sprintf("Connected through Hub to %s. Esc returns to the server list.", node.Name)
 	return tea.Batch(m.detail.startCollect(), tick())
@@ -1144,7 +1155,7 @@ func (m *hubModel) View() tea.View {
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
 	view.WindowTitle = m.config.displayName()
-	view.BackgroundColor, view.ForegroundColor = viewColors(m.colorMode)
+	view.BackgroundColor, view.ForegroundColor = m.theme.colors(m.colorMode)
 	return view
 }
 
@@ -1475,6 +1486,7 @@ func hubGPUStats(gpus []gpuInfo) (maxUtil float64, memoryUsed, memoryTotal uint6
 }
 
 func (m *hubModel) toggleColorMode() {
+	m.theme.manual()
 	if m.colorMode == colorModeLight {
 		m.colorMode = colorModeDark
 	} else {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -92,6 +93,7 @@ func runServer() {
 				}
 				return newMonitorModel(admin, cache, history, machine, sess, pty.Window.Width, pty.Window.Height), nil
 			}),
+			terminalThemeCleanup,
 			activeterm.Middleware(),
 			nodeRPCMiddleware(rpc),
 			accesscontrol.Middleware(nodeRPCCommand),
@@ -166,6 +168,7 @@ type monitorModel struct {
 	hourCPUHistory    []float64
 	hourHistoryAt     time.Time
 	colorMode         colorMode
+	theme             terminalTheme
 	slurmQueue        *nodeSlurmQueue
 	monitorPage       monitorPage
 	monitorFocus      monitorPanelFocus
@@ -174,6 +177,9 @@ type monitorModel struct {
 	dashboardContent  int
 	dashboardViewport int
 	widgetPlacements  []widgetPlacement
+	cpuCoreSelected   string
+	cpuCoreFocused    bool
+	cpuCoreDetailed   bool
 	panelLayout       panelLayoutConfig
 	layoutPath        string
 	layoutCursor      int
@@ -252,6 +258,7 @@ func newMonitorModel(
 		height:    height,
 		status:    "Live data refreshes every second.",
 		colorMode: parseColorMode(os.Getenv("DEFAULT_THEME")),
+		theme:     newTerminalTheme(os.Getenv("DEFAULT_THEME")),
 	}
 }
 
@@ -271,7 +278,7 @@ func newRemoteMonitorModel(node hubNodeConfig, width, height int, mode colorMode
 }
 
 func (m *monitorModel) Init() tea.Cmd {
-	return tea.Batch(m.startCollect(), tick())
+	return tea.Batch(m.theme.init(), m.startCollect(), tick())
 }
 
 func tick() tea.Cmd {
@@ -378,6 +385,9 @@ func hourCPUValues(samples []historySample) []float64 {
 }
 
 func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.theme.update(msg, &m.colorMode) {
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -539,6 +549,9 @@ func (m *monitorModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 	switch m.screen {
 	case screenMonitor:
+		if m.handleCPUChartKey(key) {
+			return nil
+		}
 		switch key {
 		case "o", "O":
 			if m.monitorPage == monitorPageOverview || m.monitorPage == monitorPageCompute || m.monitorPage == monitorPageCustom {
@@ -1005,6 +1018,9 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 			}
 			return m.handleStorageClick(x, y)
 		}
+		if m.handleCPUChartClick(x, y) {
+			return nil
+		}
 		if m.monitorPage == monitorPageCustom {
 			if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelNodeQueue); ok &&
 				x >= placement.X && x < placement.X+placement.Width &&
@@ -1017,6 +1033,7 @@ func (m *monitorModel) handleClick(x, y int) tea.Cmd {
 		if placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelProcesses); ok &&
 			x >= placement.X && x < placement.X+placement.Width &&
 			y >= screenY && y < screenY+placement.Height {
+			m.cpuCoreFocused = false
 			m.monitorFocus = monitorFocusProcesses
 			processRowStart := placement.ProcessRowStart
 			if processRowStart <= 0 {
@@ -1342,7 +1359,7 @@ func (m *monitorModel) View() tea.View {
 	if m.profile == machineProfileNAS {
 		v.WindowTitle = "Fleetty · NAS"
 	}
-	v.BackgroundColor, v.ForegroundColor = viewColors(m.colorMode)
+	v.BackgroundColor, v.ForegroundColor = m.theme.colors(m.colorMode)
 	return v
 }
 
@@ -1361,7 +1378,7 @@ func (m *monitorModel) systemMetricCards() []metricCard {
 	diskPercent := percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal)
 	return []metricCard{
 		{
-			title: "CPU", value: fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent), detail: m.snapshot.LoadAverage,
+			title: "CPU", value: cpuSummaryValue(m.snapshot), detail: m.snapshot.LoadAverage,
 			visual: metricVisualCPU, usage: m.snapshot.CPUPercent, primaryHistory: m.cpuHistory,
 			titleStyle: cpuTitleStyle, borderColor: colorCPUBorder,
 		},
@@ -1908,7 +1925,7 @@ func newDashboardLayoutForMetrics(width, height, gpuCount int, gpuUnavailable bo
 		cols = 2
 	}
 	compactGPU := width < 112
-	metricLines := ((metricCount + cols - 1) / cols) * 5 // three content lines plus border
+	metricLines := ((metricCount + cols - 1) / cols) * 10 // Readings, multi-row history and borders.
 	gpuContentLines := -2
 	if gpuCount < 0 {
 		gpuContentLines = -2
@@ -1933,7 +1950,7 @@ func newDashboardLayoutForMetrics(width, height, gpuCount int, gpuUnavailable bo
 
 func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 	cardWidth := max(16, (layout.width-(layout.metricCols-1))/layout.metricCols)
-	render := func(c metricCard) string {
+	render := func(c metricCard, minimumRows int) string {
 		contentWidth := max(4, cardWidth-4)
 		title := c.titleStyle
 		if title.GetForeground() == nil {
@@ -1943,21 +1960,37 @@ func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 		if border == nil {
 			border = colorPanelBorder
 		}
-		return btopPanel(cardWidth, c.title, "", strings.Join([]string{
+		lines := []string{
 			valueStyle.Render(truncate(c.value, cardWidth-4)),
 			dimStyle.Render(truncate(c.detail, cardWidth-4)),
 			renderMetricVisual(c, contentWidth),
-		}, "\n"), title, border)
+		}
+		if c.visual == metricVisualCPU && contentWidth >= 58 {
+			_, style := gpuLoadStatus(c.usage)
+			historyWidth := 24
+			leftWidth := contentWidth - historyWidth - 3
+			left := []string{valueStyle.Render(truncate(c.value, leftWidth)), dimStyle.Render(truncate(c.detail, leftWidth))}
+			lines = historyColumns(left, renderHistoryChart(c.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, style), leftWidth)
+		}
+		lines = strings.Split(strings.Join(lines, "\n"), "\n")
+		for len(lines) < minimumRows {
+			lines = append(lines, "")
+		}
+		return btopPanel(cardWidth, c.title, "", strings.Join(lines, "\n"), title, border)
 	}
 	rows := make([]string, 0, (len(cards)+layout.metricCols-1)/layout.metricCols)
 	for start := 0; start < len(cards); start += layout.metricCols {
 		end := min(start+layout.metricCols, len(cards))
+		minimumRows := 0
+		for _, card := range cards[start:end] {
+			minimumRows = max(minimumRows, lipgloss.Height(render(card, 0))-2)
+		}
 		items := make([]string, 0, end-start)
 		for _, card := range cards[start:end] {
 			if len(items) > 0 {
 				items = append(items, " ")
 			}
-			items = append(items, render(card))
+			items = append(items, render(card, minimumRows))
 		}
 		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, items...))
 	}
@@ -1968,16 +2001,11 @@ func renderMetricVisual(card metricCard, width int) string {
 	switch card.visual {
 	case metricVisualCPU:
 		_, style := gpuLoadStatus(card.usage)
-		return sparkline(card.primaryHistory, width, 100, style)
+		return strings.Join(renderHistoryChart(card.primaryHistory, width, historyPlotHeight, "CPU %", 100, style), "\n")
 	case metricVisualMeter:
 		return bar(card.usage, width)
 	case metricVisualNetwork:
-		graphWidth := max(2, (width-5)/2)
-		ceiling := historyMax(card.primaryHistory, card.secondaryHistory)
-		return networkRXStyle.Render("↓") +
-			sparkline(card.primaryHistory, graphWidth, ceiling, networkRXStyle) +
-			dimStyle.Render("  ") + networkTXStyle.Render("↑") +
-			sparkline(card.secondaryHistory, graphWidth, ceiling, networkTXStyle)
+		return strings.Join(renderNetworkHistories(card.primaryHistory, card.secondaryHistory, width), "\n")
 	case metricVisualBattery:
 		return batteryBar(card.usage, width)
 	default:
@@ -2186,6 +2214,7 @@ type monitorSnapshot struct {
 	Uptime                  uint64
 	CPUPercent              float64
 	CPUCoreUsage            []cpuCoreUsage
+	CPUFrequency            *cpuFrequencyInfo
 	LoadAverage             string
 	MemoryUsed, MemoryTotal uint64
 	DiskUsed, DiskTotal     uint64
@@ -2279,6 +2308,8 @@ type metricsCollector struct {
 	config                     machineConfig
 	identity                   systemIdentity
 	previousCPU                map[string]cpuCounters
+	cpuFrequencyReader         cpuFrequencyReader
+	cpuFrequencyInitialized    bool
 	previousNet                netCounters
 	previousInterfaces         map[string]networkDeviceCounters
 	previousProcessNet         map[int]processNetworkCounters
@@ -2352,6 +2383,7 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 	if err := c.collectCPU(&s); err != nil {
 		errs = append(errs, "cpu: "+err.Error())
 	}
+	c.collectCPUFrequency(&s)
 	if used, total, err := readMemory(); err != nil {
 		errs = append(errs, "memory: "+err.Error())
 	} else {
@@ -2470,7 +2502,7 @@ func (c *metricsCollector) collectGPUs() ([]gpuInfo, string) {
 	defer cancel()
 	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw,power.limit,driver_version", "--format=csv,noheader,nounits").Output()
 	if err != nil {
-		return nil, compactCommandError(err)
+		return nil, gpuMetricsError(err, "/sys/bus/pci/devices")
 	}
 	gpus := parseGPUs(output)
 	c.attachGPUWorkloads(gpus)
@@ -2929,6 +2961,7 @@ func (mode colorMode) String() string {
 }
 
 func (m *monitorModel) toggleColorMode() {
+	m.theme.manual()
 	if m.colorMode == colorModeLight {
 		m.colorMode = colorModeDark
 	} else {
@@ -3087,40 +3120,12 @@ func historyMax(histories ...[]float64) float64 {
 	maxValue := 0.0
 	for _, history := range histories {
 		for _, value := range history {
-			if value > maxValue {
+			if !math.IsNaN(value) && !math.IsInf(value, 0) && value > maxValue {
 				maxValue = value
 			}
 		}
 	}
-	if maxValue <= 0 {
-		return 1
-	}
 	return maxValue
-}
-
-func sparkline(history []float64, width int, ceiling float64, style lipgloss.Style) string {
-	const levels = "▁▂▃▄▅▆▇█"
-	width = max(1, width)
-	if ceiling <= 0 {
-		ceiling = 1
-	}
-	if len(history) > width {
-		history = history[len(history)-width:]
-	}
-	var graph strings.Builder
-	for _, value := range history {
-		ratio := value / ceiling
-		if ratio < 0 {
-			ratio = 0
-		}
-		if ratio > 1 {
-			ratio = 1
-		}
-		index := int(ratio * float64(len([]rune(levels))-1))
-		graph.WriteRune([]rune(levels)[index])
-	}
-	padding := width - len(history)
-	return dimStyle.Render(strings.Repeat("·", padding)) + style.Render(graph.String())
 }
 
 func bar(value float64, width int) string {

@@ -16,7 +16,7 @@ Environment=SSH_AUTHORIZED_KEYS_FILE=/etc/fleetty/authorized_keys
 Environment=SSH_MAX_CONNECTIONS=64
 Environment=SSH_IDLE_TIMEOUT=30m
 Environment=SSH_MAX_TIMEOUT=24h
-Environment=DEFAULT_THEME=dark
+Environment=DEFAULT_THEME=auto
 # Optional machine profile (for example, a NAS), owned by root (0600).
 EnvironmentFile=-/etc/fleetty/machine.env
 # Optional management-password and command overrides, owned by root (0600).

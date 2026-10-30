@@ -78,6 +78,8 @@ Fleetty 是一个面向个人电脑、计算服务器、存储节点和 Slurm �
 
 普通用户即可安装和运行 Fleetty。macOS 本地模式显示 CPU、内存、磁盘、网络和进程，不显示 NVIDIA GPU 区域。Linux 没有 `nvidia-smi` 时，其他指标仍可正常使用。Docker socket、其他用户的进程详情等指标始终遵循操作系统原有访问权限。
 
+GPU 卡片按实际采集结果显示，不由默认的 `gpu` profile 强制占位。Linux 的 NVIDIA 采集失败时，如果 PCI 硬件清单确认没有 NVIDIA GPU，Overview、Compute 和自定义页面会隐藏 GPU 卡片及 GPU/CUDA 标记，并重新利用空出的布局空间；存在 NVIDIA GPU，或无法读取硬件清单时，仍显示采集失败提示，避免掩盖驱动、工具或权限问题。
+
 ## 安装
 
 ### 命令行自更新
@@ -135,11 +137,17 @@ install -m 0755 "/tmp/${fleetty_asset}" "$HOME/.local/bin/fleetty"
 
 只有明确执行 `fleetty serve`，或从启动窗口选择 SSH Server 后，Fleetty 才会启动远程仪表盘服务。SSH Server 页面会显示监听地址和 authorized-keys 状态；如果发现有效的 `~/.config/fleetty/authorized_keys` 或 `~/.ssh/authorized_keys`，可以仅在当前进程中使用它并启动服务，不会静默写入配置或开启匿名访问。
 
-`fleetty top --theme light` 使用浅色主题。Apple Silicon Mac 会通过 IOKit 显示 GPU 总负载、渲染器与 Tiler 利用率、核心数和已使用/已分配的统一内存，无需 root。MacBook 的电量、充放电状态、剩余时间和电源来源显示在顶部状态栏中；没有电池的桌面 Mac 会自动省略这些信息。该模式不启动后台服务、不开放网络端口，也不需要 root。
+`fleetty top` 默认使用 `--theme auto`，启动时读取终端背景与深浅色报告，并订阅运行中的深浅色变化；直接 SSH 连接 Fleetty 的监控端口同样按客户端终端选择主题，无需转发环境变量。`--theme dark` / `--theme light` 或 `DEFAULT_THEME=dark|light` 可固定配色；按 `t` 后当前会话改为手动选择，不再跟随系统。不响应查询的终端使用深色，仍可按 `t` 切换。Apple Silicon Mac 会通过 IOKit 显示 GPU 总负载、渲染器与 Tiler 利用率、核心数和已使用/已分配的统一内存，无需 root。MacBook 的电量、充放电状态、剩余时间和电源来源显示在顶部状态栏中；没有电池的桌面 Mac 会自动省略这些信息。该模式不启动后台服务、不开放网络端口，也不需要 root。
 
 默认界面提供 Overview、Compute、Network 和 Storage 四个页面，可按 `1`–`4` 直接切换，也可以使用 `Tab` / `Shift+Tab` 顺序浏览。Overview 集中展示主机系统与运行时长、CPU/内存/磁盘健康度、GPU 工作负载、60 秒网络历史、应用流量、Slurm 节点队列和有限条进程摘要；Compute 页面在硬件与队列信息之后使用全部剩余高度展示进程；Network 页面展示实时速率、累计流量、60 秒峰值、应用流量以及各接口的实时和累计计数器。Fleetty 只显示当前平台能够提供的数据：没有 GPU 或 Slurm 的主机会自动隐藏对应区域，周围面板随终端宽高重新排布并利用空出的空间。方向键、回车和鼠标可以选择并查看进程详情，`/` 过滤进程，`t` 切换主题，`q` 退出。
 
-CPU 组件有三种形态：SMALL 显示整机使用率、负载和历史曲线；MEDIUM 在同一面板内增加逐核负载；LARGE 再增加高占用进程。按 `2` 进入 Compute 页默认使用逐核形态（`CPU · PER CORE`），不另设 CPU CORES 卡片；自定义布局可通过组件尺寸选择形态。Linux 和 macOS 均按操作系统逻辑 CPU 编号显示每核实时使用率（0–100%）及负载条，超线程分别计数，不是物理核心拓扑。核心多时按 `PgUp` / `PgDn` 滚动，不截断核心列表。首次采样、核心上线或计数器重置时显示 `--`，等下一次有效采样；没有逐核数据时明确提示不可用。总览保留整机平均使用率。采集基于相邻两次 CPU 时间计数，idle/iowait 不计为忙碌时间；1/5/15 分钟 load average 仍是独立的整机指标。JSON 快照的 `cpu_core_usage` 包含 CPU 编号、`percent` 和 `available`；Prometheus 导出 `fleetty_cpu_core_percent{node="…",cpu="cpu0"}`。通过 Hub 查看时需要更新 Hub 和对应节点的 Fleetty。
+CPU 组件有三种形态：SMALL 显示整机使用率、负载和历史曲线；MEDIUM 在同一面板内增加逐核负载；LARGE 再增加高占用进程。按 `2` 进入 Compute 页默认使用逐核形态（`CPU · PER CORE`），不另设 CPU CORES 卡片；自定义布局可通过组件尺寸选择形态。Linux 和 macOS 均按操作系统逻辑 CPU 编号显示每核实时使用率（0–100%）及负载条，超线程分别计数，不是物理核心拓扑。完整明细可按 `PgUp` / `PgDn` 滚动，不截断核心列表。首次采样、核心上线或计数器重置时显示 `--`，等下一次有效采样；没有逐核数据时明确提示不可用。总览保留整机平均使用率。采集基于相邻两次 CPU 时间计数，idle/iowait 不计为忙碌时间；1/5/15 分钟 load average 仍是独立的整机指标。JSON 快照的 `cpu_core_usage` 包含 CPU 编号、`percent` 和 `available`；Prometheus 导出 `fleetty_cpu_core_percent{node="…",cpu="cpu0"}`。通过 Hub 查看时需要更新 Hub 和对应节点的 Fleetty。
+
+Compute 页超过 32 个逻辑 CPU 时，默认使用紧凑纵向字符柱图，32 核及以下保留原有逐核横条。每核一根柱，按 CPU 编号固定排列、不按负载跳动排序；高度和颜色共同表示 0–100% 负载，贴底细线 `▁` 表示零负载，`?` 表示未采样。柱图最多两排，窄窗口或超多核心随选中核心翻页，完整采样不会被丢弃。点击柱子，或按 `f` 聚焦后用方向键、`Home` / `End` 选择核心，下方一行显示准确编号、负载和 GHz；`Esc` / `f` 返回进程操作，`v` 在纵向柱图与完整逐核明细之间切换。该显示选择只影响当前会话的 Compute 页，不改变采集、JSON/Prometheus 导出或自定义布局。
+
+所有历史图统一使用多行、贴底填充的字符柱图：顶部 `HIST · 指标 单位`，底部 `old → now`；CPU 按 0–100% 固定刻度，网络 RX/TX 按同一个窗口峰值缩放并标注峰值。降采样覆盖整个保留窗口，缺失样本留空，不画成零负载或浮动圆点；全部缺失时显示等待采样。概览只保留一张 CPU 近期历史图，不并排重复展示 1H 图，历史数据仍保留。网络上下行、概览、自定义卡片与 NAS 使用同一个组件。宽窗口优先并排展示，空间不足时堆叠或省略次要历史图，不退回单行曲线，也不改变即时负载条。概览网络摘要利用图表旁的空间显示最多五行，窄版三行，不增加面板高度；内存与根磁盘用紧凑短条展示，额外窗口高度全部留给主进程表。
+
+CPU 面板还会随每轮采样更新工作频率：`AVG` 是有频率数据的在线逻辑 CPU 的算术平均值，逐核视图在负载旁显示各核心 GHz，并显示频率范围及部分采样时的覆盖数。逐核面板顶部把摘要、load 和元信息收拢到 2 行（窄窗口 3 行），历史图放在核心区域旁的独立空间；采集来源保留在导出数据中。Linux 读取 `/proc/cpuinfo` 的 `cpu MHz`，这是内核上报的当前频率；Apple Silicon Mac 免 sudo 直接使用系统 IOReport，结合 IORegistry 的实际 DVFS 档位，计算相邻采样间各核心处于活动状态时的驻留时间加权频率，来源标注为 `IOReport · active residency`，不是瞬时寄存器读数。首次采样建立基线，完全休眠或计数器重置的核心显示 `--`；不使用最低档、标称频率、最大频率或调频目标值填充。接口不可用、档位与状态无法匹配、Intel Mac 或虚拟机不提供数据时显示 `CLK --`，不把缺失值当作 0 GHz。macOS 的 IOReport 是私有接口，系统更新可能影响可用性；Linux 数值精度取决于内核、硬件和虚拟化平台。JSON 的 `cpu_frequency` 包含均值、最小/最大 MHz、样本数及来源，`cpu_core_usage[].frequency_mhz` 包含逐核 MHz；Prometheus 提供 `fleetty_cpu_frequency_mhz` 和 `fleetty_cpu_core_frequency_mhz` 等指标。Hub 远程详情使用同一数据，需要节点提供新版采样。
 
 进程表支持点击表头按 CPU、内存比例、RSS、运行时长、PID、用户或命令排序；再次点击同一表头切换升降序。也可按 `o` 切换排序字段、`O` 反转顺序，无需进入管理模式。行号和面板右上角显示当前范围与进程总数，过滤后会标明匹配数量；每个连接的排序独立，刷新和排序时保留选中的 PID。
 
@@ -816,7 +824,7 @@ user scope 的配置位于 `~/.config/fleetty`，systemd unit 位于 `~/.config/
 | `SSH_MAX_CONNECTIONS` | `64` | 同时接受的 SSH 连接上限 |
 | `SSH_IDLE_TIMEOUT` | `30m` | SSH 空闲连接超时 |
 | `SSH_MAX_TIMEOUT` | `24h` | 单个 SSH 连接的最长持续时间 |
-| `DEFAULT_THEME` | `dark` | 新连接的默认主题，可设为 `light` |
+| `DEFAULT_THEME` | `auto` | 新连接跟随客户端终端的深浅色；设为 `dark` / `light` 可固定主题。`fleetty top --theme` 优先于此设置，按 `t` 后当前会话改为手动选择 |
 | `MACHINE_CONFIG_FILE` | 空 | 节点角色、网卡、挂载点及服务检查 JSON 配置 |
 | `HUB_NODES_FILE` | 空 | Hub 节点 JSON 配置；设置后首页切换为多服务器模式 |
 | `FLEETTY_HISTORY_FILE` | 空 | 节点历史 JSONL 路径；默认位于 machine.json 同目录，否则 `~/.config/fleetty/history.jsonl` |

@@ -39,6 +39,9 @@ func (m *monitorModel) nasView() string {
 	serviceHeight := 0
 	if m.hasNASServices() && available >= 6 {
 		storageRows = min(filesystemCount, max(1, available-5))
+		if width >= 108 && available >= 11 {
+			storageRows = min(filesystemCount, max(1, available-10))
+		}
 		serviceHeight = available - storageRows - 2
 	}
 
@@ -67,7 +70,7 @@ func (m *monitorModel) nasSystemPanel(width int) string {
 	layout := dashboardLayout{width: width, height: m.height, metricCols: 2}
 	return renderMetricRows([]metricCard{
 		{
-			title: "CPU", value: fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent), detail: m.snapshot.LoadAverage,
+			title: "CPU", value: cpuSummaryValue(m.snapshot), detail: m.snapshot.LoadAverage,
 			visual: metricVisualCPU, usage: m.snapshot.CPUPercent, primaryHistory: m.cpuHistory,
 			titleStyle: cpuTitleStyle, borderColor: colorCPUBorder,
 		},
@@ -88,8 +91,6 @@ func (m *monitorModel) nasNetworkPanel(width int) string {
 		errorsAndDrops = mainInterface.RXErrors + mainInterface.TXErrors + mainInterface.RXDrops + mainInterface.TXDrops
 	}
 	contentWidth := max(4, width-4)
-	graphWidth := max(2, (contentWidth-5)/2)
-	ceiling := historyMax(m.networkRXHistory, m.networkTXHistory)
 	lines := []string{
 		fmt.Sprintf("%s  %s  %s",
 			accentStyle.Render(interfaceName),
@@ -97,10 +98,19 @@ func (m *monitorModel) nasNetworkPanel(width int) string {
 			networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s")),
 		dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s  ·  ERR/DROP %d",
 			bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal), errorsAndDrops)),
-		networkRXStyle.Render("↓") +
-			sparkline(m.networkRXHistory, graphWidth, ceiling, networkRXStyle) +
-			dimStyle.Render("  ") + networkTXStyle.Render("↑") +
-			sparkline(m.networkTXHistory, graphWidth, ceiling, networkTXStyle),
+		strings.Join(renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, contentWidth), "\n"),
+	}
+	if contentWidth >= 100 {
+		leftWidth := min(42, contentWidth/3)
+		rightWidth := contentWidth - leftWidth - 3
+		left := []string{
+			accentStyle.Render(interfaceName),
+			networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " + networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s"),
+			dimStyle.Render("TOTAL ↓ " + bytes(m.snapshot.NetworkRXTotal)),
+			dimStyle.Render("TOTAL ↑ " + bytes(m.snapshot.NetworkTXTotal)),
+			dimStyle.Render(fmt.Sprintf("ERR/DROP %d", errorsAndDrops)),
+		}
+		lines = historyColumns(left, renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, rightWidth), leftWidth)
 	}
 	return btopPanel(width, "NETWORK", "PRIMARY", strings.Join(lines, "\n"), networkTitleStyle, colorNetworkBorder)
 }

@@ -99,6 +99,7 @@ type snapshotExport struct {
 	Uptime                uint64                  `json:"uptime_seconds"`
 	CPUPercent            float64                 `json:"cpu_percent"`
 	CPUCoreUsage          []cpuCoreUsage          `json:"cpu_core_usage,omitempty"`
+	CPUFrequency          *cpuFrequencyInfo       `json:"cpu_frequency,omitempty"`
 	LoadAverage           string                  `json:"load_average,omitempty"`
 	MemoryUsed            uint64                  `json:"memory_used_bytes"`
 	MemoryTotal           uint64                  `json:"memory_total_bytes"`
@@ -227,6 +228,7 @@ func exportSnapshot(snapshot monitorSnapshot) snapshotExport {
 		Uptime:                snapshot.Uptime,
 		CPUPercent:            snapshot.CPUPercent,
 		CPUCoreUsage:          snapshot.CPUCoreUsage,
+		CPUFrequency:          snapshot.CPUFrequency,
 		LoadAverage:           snapshot.LoadAverage,
 		MemoryUsed:            snapshot.MemoryUsed,
 		MemoryTotal:           snapshot.MemoryTotal,
@@ -323,6 +325,24 @@ func renderPrometheusMetrics(snapshot monitorSnapshot) string {
 		}
 		fmt.Fprintf(&builder, "fleetty_cpu_core_percent{%s,cpu=\"%s\"} %s\n", labels,
 			prometheusLabelValue(core.CPU), strconv.FormatFloat(core.Percent, 'g', -1, 64))
+	}
+	if frequency := snapshot.CPUFrequency; frequency != nil {
+		writePrometheusGauge(&builder, "fleetty_cpu_frequency_mhz", "Mean sampled working frequency of logical CPUs in MHz; macOS uses active-residency weighting.", labels, strconv.FormatFloat(frequency.AverageMHz, 'g', -1, 64))
+		writePrometheusGauge(&builder, "fleetty_cpu_min_frequency_mhz", "Minimum sampled logical CPU frequency in MHz.", labels, strconv.FormatFloat(frequency.MinMHz, 'g', -1, 64))
+		writePrometheusGauge(&builder, "fleetty_cpu_max_frequency_mhz", "Maximum sampled logical CPU frequency in MHz.", labels, strconv.FormatFloat(frequency.MaxMHz, 'g', -1, 64))
+		writePrometheusGauge(&builder, "fleetty_cpu_frequency_sampled_cores", "Logical CPUs with a valid frequency sample.", labels, strconv.Itoa(frequency.SampledCores))
+	}
+	wroteFrequencyHeader := false
+	for _, core := range snapshot.CPUCoreUsage {
+		if !validCPUFrequency(core.FrequencyMHz) {
+			continue
+		}
+		if !wroteFrequencyHeader {
+			builder.WriteString("# HELP fleetty_cpu_core_frequency_mhz Sampled logical CPU working frequency in MHz; macOS uses active-residency weighting.\n# TYPE fleetty_cpu_core_frequency_mhz gauge\n")
+			wroteFrequencyHeader = true
+		}
+		fmt.Fprintf(&builder, "fleetty_cpu_core_frequency_mhz{%s,cpu=\"%s\"} %s\n", labels,
+			prometheusLabelValue(core.CPU), strconv.FormatFloat(core.FrequencyMHz, 'g', -1, 64))
 	}
 	writePrometheusGauge(&builder, "fleetty_memory_used_bytes", "Used physical memory in bytes.", labels, strconv.FormatUint(snapshot.MemoryUsed, 10))
 	writePrometheusGauge(&builder, "fleetty_memory_total_bytes", "Total physical memory in bytes.", labels, strconv.FormatUint(snapshot.MemoryTotal, 10))

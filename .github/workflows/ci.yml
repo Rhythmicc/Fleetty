@@ -50,10 +50,12 @@ jobs:
       - name: Build release architectures
         shell: bash
         run: |
-          for fleetty_arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="${fleetty_arch}" \
-              go build -trimpath -o "/tmp/fleetty_${fleetty_arch}" \
-              ./cmd/fleetty
+          for fleetty_os in linux darwin; do
+            for fleetty_arch in amd64 arm64; do
+              CGO_ENABLED=0 GOOS="${fleetty_os}" GOARCH="${fleetty_arch}" \
+                go build -trimpath -o "/tmp/fleetty_${fleetty_os}_${fleetty_arch}" \
+                ./cmd/fleetty
+            done
           done
           for fleettyctl_os in linux darwin; do
             for fleettyctl_arch in amd64 arm64; do
@@ -63,3 +65,19 @@ jobs:
                 ./cmd/fleettyctl
             done
           done
+
+  macos:
+    name: macOS native metrics
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Test with race detector
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...

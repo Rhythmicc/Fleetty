@@ -3,7 +3,68 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 )
+
+func singleGPUOverviewLines(gpu gpuInfo, width int) []string {
+	name := sanitizeTerminalText(gpu.Name)
+	if gpu.Platform == "apple" && gpu.CoreCount > 0 {
+		name += fmt.Sprintf(" · %d cores", gpu.CoreCount)
+	}
+	var telemetry []string
+	if gpu.Platform != "apple" {
+		if gpu.Temperature > 0 {
+			telemetry = append(telemetry, fmt.Sprintf("%d°C", gpu.Temperature))
+		}
+		if gpu.Power > 0 || gpu.PowerLimit > 0 {
+			telemetry = append(telemetry, fmt.Sprintf("%.0fW", gpu.Power))
+		}
+		if gpu.ClockMHz > 0 {
+			telemetry = append(telemetry, fmt.Sprintf("%dMHz", gpu.ClockMHz))
+		}
+	}
+	lines := []string{alignedPageLine(accentStyle.Render(name), dimStyle.Render(strings.Join(telemetry, " · ")), width)}
+	type reading struct {
+		label, value string
+		usage        float64
+	}
+	memoryLabel := "VRAM"
+	if gpu.Platform == "apple" {
+		memoryLabel = "UMA"
+	}
+	readings := []reading{
+		{"LOAD", fmt.Sprintf("%.0f%%", gpu.Utilization), gpu.Utilization},
+		{memoryLabel, compactByteCount(gpu.MemoryUsed) + " / " + compactByteCount(gpu.MemoryTotal), percent(gpu.MemoryUsed, gpu.MemoryTotal)},
+	}
+	if gpu.Platform == "apple" {
+		readings = append(readings, reading{"RENDER", fmt.Sprintf("%.0f%%", gpu.RendererUtilization), gpu.RendererUtilization},
+			reading{"TILER", fmt.Sprintf("%.0f%%", gpu.TilerUtilization), gpu.TilerUtilization})
+	}
+	columns := 1
+	if width >= 50 {
+		columns = 2
+	}
+	if width >= 100 {
+		columns = len(readings)
+	}
+	cellWidth := max(1, (width-2*(columns-1))/columns)
+	for start := 0; start < len(readings); start += columns {
+		var labels, bars []string
+		for _, item := range readings[start:min(start+columns, len(readings))] {
+			_, style := gpuLoadStatus(item.usage)
+			label := dimStyle.Render(item.label+" ") + style.Render(item.value)
+			label = ansi.Truncate(label, cellWidth, "…")
+			labels = append(labels, label+strings.Repeat(" ", max(0, cellWidth-ansi.StringWidth(label))))
+			bars = append(bars, bar(item.usage, cellWidth))
+		}
+		lines = append(lines, strings.Join(labels, "  "), strings.Join(bars, "  "))
+	}
+	if len(gpu.Workloads) > 0 {
+		lines = append(lines, ansi.Truncate(gpuWorkloadSummary(gpu), width, "…"))
+	}
+	return lines
+}
 
 // gpuCardVariant describes presentation density, not where the metrics came
 // from. Local `fleetty top`, Hub node details, and custom dashboards all feed
@@ -40,6 +101,9 @@ func (card gpuCardComponent) panelSpec(variant gpuCardVariant, width, deviceLimi
 }
 
 func (card gpuCardComponent) render(variant gpuCardVariant, width, deviceLimit int) string {
+	if len(card.gpus) == 0 && card.gpuError == "" {
+		return ""
+	}
 	return renderPagePanel(width, card.panelSpec(variant, width, deviceLimit))
 }
 

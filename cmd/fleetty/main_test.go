@@ -1416,10 +1416,10 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 	for _, expected := range []string{
 		"1 OVERVIEW", "2 COMPUTE", "3 NETWORK",
 		"BAT 80% AC", "Caps: ", "GPU,Metal,UMA", "macOS 15.5",
-		"HOST HEALTH", "COMPUTE ACTIVITY", "NETWORK ACTIVITY",
+		"HOST HEALTH", "GPU", "NETWORK ACTIVITY",
 		"NODE QUEUE / SLURM", "TOP PROCESSES",
 		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [2 COMPUTE]",
-		"12 vCPU", "(1m 5m 15m)", "60 SECOND HISTORY", "PEAK",
+		"12 logical CPUs", "(1m 5m 15m)", "HIST · RX B/s", "PEAK",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("designed overview missing %q:\n%s", expected, rendered)
@@ -1472,8 +1472,8 @@ func TestAppleComputeActivityMetricColumnsAlign(t *testing.T) {
 		MemoryUsed: 3200 << 20, MemoryTotal: 9 << 30, CoreCount: 40,
 	}}}}
 	lines := model.computeActivityPanelSpec(80).lines
-	if len(lines) != 10 {
-		t.Fatalf("Apple compute activity lines = %d, want 10 to match Host Health without padding", len(lines))
+	if len(lines) != 5 {
+		t.Fatalf("Apple GPU lines = %d, want 5", len(lines))
 	}
 	visibleColumn := func(line, needle string) int {
 		plain := ansi.Strip(line)
@@ -1483,16 +1483,18 @@ func TestAppleComputeActivityMetricColumnsAlign(t *testing.T) {
 		}
 		return lipgloss.Width(plain[:index])
 	}
-	for _, line := range lines[1:5] {
-		if got := visibleColumn(line, "█"); got != 9 {
-			t.Fatalf("metric bar starts at column %d, want 9: %q", got, ansi.Strip(line))
+	for _, line := range []string{lines[2], lines[4]} {
+		if got := visibleColumn(line, "█"); got != 0 {
+			t.Fatalf("metric bar starts at column %d, want 0: %q", got, ansi.Strip(line))
 		}
 	}
-	for index, suffix := range []string{"33%", "UMA", "33%", "26%"} {
-		if got := visibleColumn(lines[index+1], suffix); got != 28 {
-			t.Fatalf("%s starts at column %d, want 28: %q",
-				suffix, got, ansi.Strip(lines[index+1]))
+	for _, row := range []string{lines[1], lines[3]} {
+		if got := visibleColumn(row, "33%"); got != 5 && got != 7 {
+			t.Fatalf("metric value not beside its label: %q", ansi.Strip(row))
 		}
+	}
+	if visibleColumn(lines[1], "UMA") != 39 || visibleColumn(lines[3], "TILER") != 39 {
+		t.Fatal("GPU metric columns are not aligned")
 	}
 }
 
@@ -1514,12 +1516,12 @@ func TestMultiGPUOverviewUsesOneBoundedRowPerDevice(t *testing.T) {
 	gpus[0].Workloads = []gpuWorkloadInfo{{PID: 42, User: "alice", Name: "/jobs/train.py"}}
 	lines := (&monitorModel{snapshot: monitorSnapshot{GPUs: gpus}}).
 		computeActivityPanelSpec(80).lines
-	if len(lines) != 10 {
-		t.Fatalf("8-GPU overview lines = %d, want a bounded 10-line summary", len(lines))
+	if len(lines) != 9 {
+		t.Fatalf("8-GPU overview lines = %d, want a bounded 9-line summary", len(lines))
 	}
 	rendered := strings.Join(lines, "\n")
 	plain := ansi.Strip(rendered)
-	for _, expected := range []string{"MODEL", "LOAD", "VRAM", "PWR", "TEMP", "RTX 5090", "RTX 5087", "train.py", "+4 more devices"} {
+	for _, expected := range []string{"MODEL", "LOAD", "VRAM", "PWR", "TEMP", "RTX 5090", "RTX 5087", "train.py", "+4 · [2 COMPUTE]"} {
 		if !strings.Contains(plain, expected) {
 			t.Fatalf("multi-GPU overview missing %q:\n%s", expected, plain)
 		}
@@ -1536,8 +1538,8 @@ func TestMultiGPUOverviewUsesOneBoundedRowPerDevice(t *testing.T) {
 	}
 	fourLines := (&monitorModel{snapshot: monitorSnapshot{GPUs: gpus[:4]}}).
 		computeActivityPanelSpec(80).lines
-	if len(fourLines) != 10 {
-		t.Fatalf("4-GPU overview lines = %d, want 10", len(fourLines))
+	if len(fourLines) != 8 {
+		t.Fatalf("4-GPU overview lines = %d, want 8", len(fourLines))
 	}
 	if strings.Contains(ansi.Strip(strings.Join(fourLines, "\n")), "more devices") {
 		t.Fatal("4-GPU overview should display every device without an overflow hint")
@@ -2837,8 +2839,8 @@ func TestMetricCardsJoinHorizontally(t *testing.T) {
 		{title: "NETWORK", value: "1 KiB/s", detail: "2 KiB/s", visual: metricVisualNetwork, primaryHistory: []float64{1}, secondaryHistory: []float64{2}, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder},
 	}
 	rendered := renderMetricRows(cards, dashboardLayout{width: 161, metricCols: 4})
-	if height := lipgloss.Height(rendered); height != 5 {
-		t.Fatalf("metric cards height = %d, want one five-line row", height)
+	if height := lipgloss.Height(rendered); height != 10 {
+		t.Fatalf("metric cards height = %d, want one ten-line history row", height)
 	}
 }
 
@@ -2860,9 +2862,9 @@ func TestBtopPanelsAndHistoryVisuals(t *testing.T) {
 	if len(history) != 60 || history[0] != 10 || history[len(history)-1] != 69 {
 		t.Fatalf("bounded history = %#v", history)
 	}
-	graph := sparkline([]float64{0, 50, 100}, 8, 100, cpuTitleStyle)
-	if lipgloss.Width(graph) != 8 || !strings.Contains(graph, "█") {
-		t.Fatalf("sparkline = %q, width %d", graph, lipgloss.Width(graph))
+	graph := strings.Join(renderHistoryChart([]float64{0, 50, 100}, 18, 3, "CPU %", 100, cpuTitleStyle), "\n")
+	if lipgloss.Width(graph) != 18 || !strings.Contains(graph, "█") || !strings.Contains(graph, "→ now") {
+		t.Fatalf("history chart = %q, width %d", graph, lipgloss.Width(graph))
 	}
 }
 

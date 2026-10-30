@@ -9,9 +9,10 @@ import (
 
 // CPU is the OS logical CPU identifier, not a physical socket/core number.
 type cpuCoreUsage struct {
-	CPU       string  `json:"cpu"`
-	Percent   float64 `json:"percent"`
-	Available bool    `json:"available"`
+	CPU          string  `json:"cpu"`
+	Percent      float64 `json:"percent"`
+	Available    bool    `json:"available"`
+	FrequencyMHz float64 `json:"frequency_mhz,omitempty"`
 }
 
 type cpuCounters struct{ total, idle float64 }

@@ -153,7 +153,8 @@ func TestCPUCoreGridResponsiveAndComplete(t *testing.T) {
 
 func TestComputeCPUCoreScrollAndLargeWidget(t *testing.T) {
 	m := &monitorModel{screen: screenMonitor, monitorPage: monitorPageCompute, width: 80, height: 24,
-		snapshot: monitorSnapshot{CollectedAt: time.Now(), CPUCores: 256, MemoryTotal: 1, DiskTotal: 1}}
+		cpuCoreDetailed: true,
+		snapshot:        monitorSnapshot{CollectedAt: time.Now(), CPUCores: 256, MemoryTotal: 1, DiskTotal: 1}}
 	for i := 0; i < 256; i++ {
 		m.snapshot.CPUCoreUsage = append(m.snapshot.CPUCoreUsage, cpuCoreUsage{CPU: fmt.Sprintf("cpu%d", i), Percent: 50, Available: true})
 	}
@@ -234,7 +235,8 @@ func TestComputePanelOrder(t *testing.T) {
 				}
 				previous = position
 			}
-			if len(placements) != 1 || !strings.Contains(strings.Split(plain, "\n")[placements[0].Y], "COMPUTE WORKLOADS") {
+			if len(placements) != 2 || placements[0].ID != dashboardPanelCPU || placements[1].ID != dashboardPanelProcesses ||
+				!strings.Contains(strings.Split(plain, "\n")[placements[1].Y], "COMPUTE WORKLOADS") {
 				t.Fatal("process placement no longer matches the rendered panel")
 			}
 		}

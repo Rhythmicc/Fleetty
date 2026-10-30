@@ -300,12 +300,10 @@ func renderMetricWidget(card metricCard, width int, size widgetSize) string {
 		dimStyle.Render(truncate(card.detail, contentWidth)),
 		renderMetricVisual(card, contentWidth),
 	}
-	if size == widgetSizeLarge {
+	if size == widgetSizeLarge && (card.visual == metricVisualCPU || card.visual == metricVisualNetwork) {
 		lines = []string{
 			valueStyle.Render(truncate(card.value, contentWidth)),
 			dimStyle.Render(truncate(card.detail, contentWidth)),
-			"",
-			dimStyle.Render("RECENT HISTORY"),
 			renderMetricVisual(card, contentWidth),
 			"",
 			dimStyle.Render("CURRENT LEVEL"),
@@ -318,7 +316,7 @@ func renderMetricWidget(card metricCard, width int, size widgetSize) string {
 func renderMetricCurrentLevel(card metricCard, width int) string {
 	switch card.visual {
 	case metricVisualNetwork:
-		return renderMetricVisual(card, width)
+		return networkRXStyle.Render(truncate(card.value, width)) + "\n" + networkTXStyle.Render(truncate(card.detail, width))
 	case metricVisualBattery:
 		return batteryBar(card.usage, width)
 	default:
@@ -571,6 +569,8 @@ func (m *monitorModel) largeNetworkDetails(width, detailLimit int) (string, []st
 }
 
 func renderWidgetColumns(left, right []string, leftWidth, rightWidth int) string {
+	left = strings.Split(strings.Join(left, "\n"), "\n")
+	right = strings.Split(strings.Join(right, "\n"), "\n")
 	height := max(len(left), len(right))
 	rows := make([]string, 0, height)
 	leftStyle := lipgloss.NewStyle().Width(leftWidth).MaxWidth(leftWidth)
@@ -644,9 +644,6 @@ func renderNetworkInterfaceRow(networkInterface networkInterfaceInfo, width int)
 
 func (m *monitorModel) renderGPUWidget(width int, size widgetSize) string {
 	if size == widgetSizeSmall {
-		if m.snapshot.GPUError == "" && len(m.snapshot.GPUs) == 0 {
-			return ""
-		}
 		return newGPUCardComponent(m.snapshot).render(gpuCardCompact, width, 1)
 	}
 	deviceLimit := 0

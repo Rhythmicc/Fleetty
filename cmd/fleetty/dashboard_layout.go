@@ -79,8 +79,7 @@ var dashboardPanelRegistry = []dashboardPanelDescriptor{
 		Description: "GPU load, memory, engines, and hardware telemetry",
 		DefaultSize: widgetSizeLarge,
 		Available: func(m *monitorModel) bool {
-			return m.profile == machineProfileGPU || m.snapshot.Profile == machineProfileGPU ||
-				len(m.snapshot.GPUs) > 0
+			return m.capabilities().GPU
 		},
 	},
 	{

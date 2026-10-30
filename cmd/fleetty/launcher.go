@@ -34,6 +34,7 @@ const (
 type launcherResult struct {
 	Action             launcherAction
 	AuthorizedKeysPath string
+	Theme              string
 }
 
 type launcherSSHState struct {
@@ -51,6 +52,7 @@ type launcherModel struct {
 	cursor     int
 	page       launcherPage
 	colorMode  colorMode
+	theme      terminalTheme
 	result     launcherResult
 	ssh        launcherSSHState
 	hostname   string
@@ -71,6 +73,7 @@ func runLauncher(stdin io.Reader, stdout io.Writer) (launcherResult, error) {
 		)
 	}
 	model := newLauncherModel()
+	defer resetTerminalTheme(stdout)
 	final, err := tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout)).Run()
 	if err != nil {
 		return launcherResult{}, err
@@ -78,6 +81,9 @@ func runLauncher(stdin io.Reader, stdout io.Writer) (launcherResult, error) {
 	launcher, ok := final.(*launcherModel)
 	if !ok {
 		return launcherResult{}, errors.New("launcher returned an unexpected model")
+	}
+	if !launcher.theme.automatic {
+		launcher.result.Theme = launcher.colorMode.String()
 	}
 	return launcher.result, nil
 }
@@ -96,6 +102,7 @@ func newLauncherModel() *launcherModel {
 	return &launcherModel{
 		width: 88, height: 28,
 		colorMode: parseColorMode(os.Getenv("DEFAULT_THEME")),
+		theme:     newTerminalTheme(os.Getenv("DEFAULT_THEME")),
 		ssh:       inspectLauncherSSH(),
 		hostname:  sanitizeTerminalText(hostname),
 	}
@@ -151,9 +158,12 @@ func launcherAuthorizedKeyCandidates() []string {
 	return candidates
 }
 
-func (m *launcherModel) Init() tea.Cmd { return nil }
+func (m *launcherModel) Init() tea.Cmd { return m.theme.init() }
 
 func (m *launcherModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	if m.theme.update(message, &m.colorMode) {
+		return m, nil
+	}
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = message.Width, message.Height
@@ -243,6 +253,7 @@ func (m *launcherModel) updateDetail(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m *launcherModel) toggleTheme() {
+	m.theme.manual()
 	if m.colorMode == colorModeLight {
 		m.colorMode = colorModeDark
 	} else {
@@ -267,7 +278,7 @@ func (m *launcherModel) View() tea.View {
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
 	view.WindowTitle = "Fleetty · Start"
-	view.BackgroundColor, view.ForegroundColor = viewColors(m.colorMode)
+	view.BackgroundColor, view.ForegroundColor = m.theme.colors(m.colorMode)
 	return view
 }
 
