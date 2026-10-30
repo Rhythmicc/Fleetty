@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -137,5 +139,44 @@ func TestHubSelectionHasNonColorCueInBothThemes(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestGhosttyPromptPaletteContrast(t *testing.T) {
+	for _, mode := range []string{"Dark", "Light"} {
+		t.Run(mode, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("..", "..", "themes", "ghostty", "Fleetty "+mode))
+			if err != nil {
+				t.Fatal(err)
+			}
+			palette := map[int]color.Color{}
+			for _, line := range strings.Split(string(data), "\n") {
+				var index int
+				var hex string
+				if _, err := fmt.Sscanf(line, "palette = %d=%s", &index, &hex); err == nil {
+					palette[index] = lipgloss.Color(hex)
+				}
+			}
+			for _, index := range []int{0, 4, 7, 12} {
+				if palette[index] == nil {
+					t.Fatalf("missing prompt palette index %d", index)
+				}
+			}
+			if got := themeContrast(palette[0], palette[7]); got < 4.5 {
+				t.Errorf("OS icon contrast %.2f is below 4.5", got)
+			}
+			textColors := []ansi.IndexedColor{254, 255}
+			if mode == "Dark" {
+				textColors = append(textColors, 250) // Shortened path segments.
+			}
+			for _, foreground := range textColors {
+				if got := themeContrast(palette[4], foreground); got < 4.5 {
+					t.Errorf("directory text %d contrast %.2f is below 4.5", foreground, got)
+				}
+			}
+			if mode == "Dark" && palette[4] == palette[12] {
+				t.Error("prompt background must not reuse the bright-blue foreground")
+			}
+		})
 	}
 }

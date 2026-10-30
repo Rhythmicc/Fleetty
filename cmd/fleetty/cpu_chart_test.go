@@ -72,7 +72,9 @@ func TestCPUIdleBaseline(t *testing.T) {
 			}
 		}
 		bottom := ansi.Strip(lines[layout.barHeight-1])
-		if strings.Count(bottom, "▁") != 127 || !strings.HasSuffix(bottom, "?") {
+		left, right := layout.barSpan(127)
+		wantIdle := layout.plotWidth - (layout.columns-1)/16 - (right - left)
+		if strings.Count(bottom, "▁") != wantIdle || !strings.HasSuffix(bottom, strings.Repeat("?", right-left)) {
 			t.Fatalf("idle/missing markers wrong: %q", bottom)
 		}
 	}
@@ -189,10 +191,13 @@ func TestCPUChartKeyboardAndMouse(t *testing.T) {
 	}
 	card, _ := m.metricWidgetCard(dashboardPanelCPU)
 	y := screenY + 1 + len(m.cpuMetricHeaderLines(card, placement.Width))
-	if m.handleCPUChartClick(placement.X+2+4+16, y) {
+	layout := newCPUChartLayout(128, placement.Width-4, m.height, 0)
+	_, gap := layout.barSpan(15)
+	if m.handleCPUChartClick(placement.X+2+4+gap, y) {
 		t.Fatal("group separator selected a core")
 	}
-	m.handleClick(placement.X+2+4+17, y)
+	start, _ := layout.barSpan(16)
+	m.handleClick(placement.X+2+4+start, y)
 	if m.cpuCoreSelected != "cpu16" || !m.cpuCoreFocused {
 		t.Fatal("click failed to select CPU16")
 	}
@@ -207,7 +212,7 @@ func TestCPUChartKeyboardAndMouse(t *testing.T) {
 	n.monitorView()
 	_, sy, _ := n.visibleWidgetPlacement(dashboardPanelCPU)
 	card, _ = n.metricWidgetCard(dashboardPanelCPU)
-	layout := newCPUChartLayout(128, usableWidth(n.width)-4, n.height, 0)
+	layout = newCPUChartLayout(128, usableWidth(n.width)-4, n.height, 0)
 	y = sy + 1 + len(n.cpuMetricHeaderLines(card, usableWidth(n.width))) + layout.barHeight + 1
 	if !n.handleCPUChartClick(6, y) || n.cpuCoreSelected != fmt.Sprintf("cpu%d", layout.columns) {
 		t.Fatal("second-band hit test failed")
@@ -218,8 +223,9 @@ func TestCPUChartEndpointLabels(t *testing.T) {
 	for _, count := range []int{1, 2, 16, 17, 18, 32, 33, 65, 128, 256} {
 		m := cpuChartTestModel(count, 180, 45)
 		cores := m.cpuChartCores()
-		labels := cpuChartLabels(cores)
 		width := count + (count-1)/16
+		layout := cpuChartLayout{columns: count, plotWidth: width}
+		labels := layout.labels(cores)
 		if lipgloss.Width(labels) != width {
 			t.Fatalf("%d CPUs label width %d, want %d", count, lipgloss.Width(labels), width)
 		}
@@ -247,7 +253,8 @@ func TestCPUChartEndpointLabels(t *testing.T) {
 	// Labels refer to actual CPU IDs, not positions in the sample array.
 	cores := cpuChartTestModel(33, 80, 45).cpuChartCores()
 	cores[32].CPU = "cpu999"
-	if !strings.HasSuffix(cpuChartLabels(cores), "cpu999") {
+	layout := cpuChartLayout{columns: len(cores), plotWidth: 35}
+	if !strings.HasSuffix(layout.labels(cores), "cpu999") {
 		t.Fatal("sparse final CPU ID was replaced by its array index")
 	}
 }
@@ -268,7 +275,7 @@ func TestCPUChartSideHistory(t *testing.T) {
 		if len(lines) != layout.barHeight+2 {
 			t.Fatal("side history added panel height")
 		}
-		occupied := 4 + 128 + 127/16
+		occupied := 4 + layout.plotWidth
 		if strings.Index(ansi.Strip(lines[0]), "HIST") <= occupied || !strings.Contains(ansi.Strip(lines[layout.barHeight]), "cpu127") {
 			t.Fatal("history not separated from cores or endpoint lost")
 		}
@@ -314,5 +321,98 @@ func TestCPUChartSideHistory(t *testing.T) {
 	m.cpuHistory = nil
 	if got := ansi.Strip(m.cpuChartHistory(14, 4)[3]); !strings.Contains(got, "awaiting") {
 		t.Fatalf("warm-up history is not explicit: %q", got)
+	}
+}
+
+func TestCPUChartAdaptivePlotWidth(t *testing.T) {
+	for _, count := range []int{33, 40, 64, 128, 256} {
+		for _, width := range []int{36, 56, 96, 146, 196, 316} {
+			m := cpuChartTestModel(count, width+4, 45)
+			layout := newCPUChartLayout(count, width, 45, 0)
+			lastEnd := 0
+			for index := 0; index < layout.columns; index++ {
+				left, right := layout.barSpan(index)
+				gap := 0
+				if index > 0 && index%16 == 0 {
+					gap = 1
+				}
+				if left != lastEnd+gap || right <= left {
+					t.Fatalf("count=%d width=%d: invalid bar %d span %d–%d", count, width, index, left, right)
+				}
+				lastEnd = right
+			}
+			if lastEnd != layout.plotWidth || layout.historyWidth > 40 {
+				t.Fatalf("count=%d width=%d: unbalanced layout %+v", count, width, layout)
+			}
+			occupied := 4 + layout.plotWidth
+			if layout.historyWidth > 0 {
+				occupied += 3 + layout.historyWidth
+			}
+			if occupied != width {
+				t.Fatalf("plot left %d columns unused", width-occupied)
+			}
+			for _, mode := range []colorMode{colorModeDark, colorModeLight} {
+				m.colorMode = mode
+				lines := m.renderCPUChart(width)
+				for _, line := range lines {
+					if lipgloss.Width(line) > width {
+						t.Fatalf("%s count=%d width=%d: chart overflow", mode, count, width)
+					}
+				}
+				if layout.historyWidth > 0 {
+					plain := ansi.Strip(lines[0])
+					index := strings.Index(plain, "HIST")
+					if index < 0 || lipgloss.Width(plain[:index]) != width-layout.historyWidth+2 {
+						t.Fatalf("history sidebar is not anchored to the right: %s", plain)
+					}
+				}
+			}
+		}
+	}
+	m := cpuChartTestModel(40, 150, 45)
+	layout := newCPUChartLayout(40, 146, 45, 0)
+	if layout.columns != 40 || layout.start != 0 || layout.end != 40 || layout.plotWidth < 90 {
+		t.Fatalf("40-core plot remains compressed: %+v", layout)
+	}
+	for index := 0; index < 40; index++ {
+		left, right := layout.barSpan(index)
+		if right-left < 2 {
+			t.Fatalf("CPU%d was not widened", index)
+		}
+	}
+	lines := m.renderCPUChart(146)
+	if len(lines) != 6 || !strings.Contains(ansi.Strip(lines[4]), "cpu39") || strings.Contains(lines[5], "f focus") {
+		t.Fatal("40-core panel grew, lost its endpoint, or repeated its shortcuts")
+	}
+}
+
+func TestCPUChartExpandedBarHitTesting(t *testing.T) {
+	for _, width := range []int{80, 150, 240} {
+		m := cpuChartTestModel(40, width, 45)
+		m.monitorView()
+		placement, screenY, ok := m.visibleWidgetPlacement(dashboardPanelCPU)
+		if !ok {
+			t.Fatal("missing CPU placement")
+		}
+		card, _ := m.metricWidgetCard(dashboardPanelCPU)
+		y := screenY + 1 + len(m.cpuMetricHeaderLines(card, placement.Width))
+		layout := newCPUChartLayout(40, placement.Width-4, m.height, 0)
+		origin := placement.X + 2 + 4
+		for index := 0; index < 40; index++ {
+			left, right := layout.barSpan(index)
+			for x := left; x < right; x++ {
+				if !m.handleCPUChartClick(origin+x, y) || m.cpuCoreSelected != fmt.Sprintf("cpu%d", index) {
+					t.Fatalf("width=%d: CPU%d column %d selected %s", width, index, x, m.cpuCoreSelected)
+				}
+			}
+			if index > 0 && index%16 == 0 && m.handleCPUChartClick(origin+left-1, y) {
+				t.Fatal("expanded group separator selected a CPU")
+			}
+		}
+		for x := layout.plotWidth; x < placement.Width-8; x++ {
+			if m.handleCPUChartClick(origin+x, y) {
+				t.Fatal("history sidebar or gap selected a CPU")
+			}
+		}
 	}
 }

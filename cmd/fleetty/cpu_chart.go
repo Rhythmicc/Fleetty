@@ -40,7 +40,10 @@ func (m *monitorModel) cpuChartSelection(cores []cpuCoreUsage) int {
 	return 0
 }
 
-type cpuChartLayout struct{ columns, barHeight, start, end int }
+type cpuChartLayout struct {
+	columns, barHeight, start, end int
+	plotWidth, historyWidth        int
+}
 
 func newCPUChartLayout(count, width, terminalHeight, selected int) cpuChartLayout {
 	plotWidth := max(1, width-4) // Left-hand axis.
@@ -63,7 +66,23 @@ func newCPUChartLayout(count, width, terminalHeight, selected int) cpuChartLayou
 	if terminalHeight > 0 && terminalHeight < 32 {
 		height = 2
 	}
-	return cpuChartLayout{columns: columns, barHeight: height, start: start, end: end}
+	minimumPlot := columns + (columns-1)/16
+	historyWidth := 0
+	if spare := plotWidth - minimumPlot - 3; spare >= 14 {
+		historyWidth = min(spare, min(40, max(14, width/4)))
+		plotWidth -= historyWidth + 3
+	}
+	return cpuChartLayout{columns: columns, barHeight: height, start: start, end: end,
+		plotWidth: plotWidth, historyWidth: historyWidth}
+}
+
+// Distribute whole terminal cells across equal logical columns. Rendering,
+// labels and hit testing share the same rounded boundaries, including gaps.
+func (layout cpuChartLayout) barSpan(index int) (start, end int) {
+	usable := layout.plotWidth - (layout.columns-1)/16
+	start = index*usable/layout.columns + index/16
+	end = (index+1)*usable/layout.columns + index/16
+	return start, end
 }
 
 // A column is a real 0–100% bar: each terminal cell has eight vertical levels.
@@ -74,12 +93,12 @@ func cpuVerticalGlyph(core cpuCoreUsage, row, height int) string {
 
 // Anchor the last label to the final bar, dropping nearby ticks rather than
 // overlapping labels. The detail line always retains the full selected CPU ID.
-func cpuChartLabels(cores []cpuCoreUsage) string {
+func (layout cpuChartLayout) labels(cores []cpuCoreUsage) string {
 	count := len(cores)
 	if count == 0 {
 		return ""
 	}
-	width := count + (count-1)/16
+	_, width := layout.barSpan(count - 1)
 	labels := []rune(strings.Repeat(" ", width))
 	label := func(index int) []rune {
 		text := sanitizeTerminalText(cores[index].CPU)
@@ -93,7 +112,7 @@ func cpuChartLabels(cores []cpuCoreUsage) string {
 	copy(labels[lastColumn:], last)
 	occupied := -1
 	for index := 0; index < count-1; index += 16 {
-		column := index + index/16
+		column, _ := layout.barSpan(index)
 		tick := label(index)
 		if column <= occupied || column+len(tick) >= lastColumn {
 			continue
@@ -104,11 +123,11 @@ func cpuChartLabels(cores []cpuCoreUsage) string {
 	return string(labels)
 }
 
-// History occupies only otherwise unused columns. Resample the whole retained
-// time window into buckets; left-padding distinguishes warm-up from idle CPU.
+// Resample the whole retained time window into buckets; left-padding
+// distinguishes warm-up from idle CPU. The layout bounds its sidebar width.
 func (m *monitorModel) cpuChartHistory(width, height int) []string {
 	_, style := gpuLoadStatus(m.snapshot.CPUPercent)
-	return renderHistoryChart(m.cpuHistory, min(width, 60), height-1, "CPU %", 100, style)
+	return renderHistoryChart(m.cpuHistory, width, height-1, "CPU %", 100, style)
 }
 
 func (m *monitorModel) renderCPUChart(width int) []string {
@@ -145,17 +164,17 @@ func (m *monitorModel) renderCPUChart(width int) []string {
 						style = style.Underline(true)
 					}
 				}
-				line.WriteString(style.Render(glyph))
+				left, right := layout.barSpan(index - start)
+				line.WriteString(style.Render(strings.Repeat(glyph, right-left)))
 			}
 			lines = append(lines, line.String())
 		}
-		lines = append(lines, dimStyle.Render("CPU│"+cpuChartLabels(cores[start:end])))
-		occupiedWidth := 4 + end - start + (end-start-1)/16
-		if spare := width - occupiedWidth - 3; start == layout.start && spare >= 14 {
-			for row, history := range m.cpuChartHistory(spare, layout.barHeight) {
+		lines = append(lines, dimStyle.Render("CPU│"+layout.labels(cores[start:end])))
+		if start == layout.start && layout.historyWidth > 0 {
+			historyX := width - layout.historyWidth
+			for row, history := range m.cpuChartHistory(layout.historyWidth, layout.barHeight) {
 				index := bandStart + row
-				lines[index] += strings.Repeat(" ", occupiedWidth-lipgloss.Width(lines[index])) +
-					"   " + history
+				lines[index] += strings.Repeat(" ", historyX-lipgloss.Width(lines[index])) + history
 			}
 		}
 	}
@@ -175,13 +194,10 @@ func (m *monitorModel) renderCPUChart(width int) []string {
 	if layout.end-layout.start < len(cores) {
 		detail += fmt.Sprintf(" · %d–%d/%d", layout.start+1, layout.end, len(cores))
 	}
-	// Keep discovery in the panel instead of adding another permanent row.
-	hint := "  f focus · v detail"
 	if m.cpuCoreFocused {
-		hint = "  ←→↑↓ core · esc back"
-	}
-	if lipgloss.Width(detail+hint) <= width {
-		detail += hint
+		if hint := "  ←→↑↓ core · esc back"; lipgloss.Width(detail+hint) <= width {
+			detail += hint
+		}
 	}
 	lines = append(lines, accentStyle.Render(truncate(detail, width)))
 	return lines
@@ -263,15 +279,20 @@ func (m *monitorModel) handleCPUChartClick(x, y int) bool {
 		return false
 	}
 	band := row / (layout.barHeight + 1)
-	// Gaps between groups are not cores and must not select a neighbour.
-	if column%17 == 16 {
+	if band >= 2 || column >= layout.plotWidth {
 		return false
 	}
-	within := column - column/17
-	index := layout.start + band*layout.columns + within
-	if band >= 2 || within >= layout.columns || index >= layout.end {
-		return false
+	for within := 0; within < layout.columns; within++ {
+		left, right := layout.barSpan(within)
+		if column < left || column >= right {
+			continue
+		}
+		index := layout.start + band*layout.columns + within
+		if index >= layout.end {
+			return false
+		}
+		m.cpuCoreSelected, m.cpuCoreFocused = cores[index].CPU, true
+		return true
 	}
-	m.cpuCoreSelected, m.cpuCoreFocused = cores[index].CPU, true
-	return true
+	return false
 }

@@ -10,7 +10,8 @@ palette = 0=#24283b
 palette = 1=#ff8a80
 palette = 2=#9ee493
 palette = 3=#f6c177
-palette = 4=#9fc3ff
+# Normal blue also serves as a prompt background; bright blue stays light.
+palette = 4=#284d76
 palette = 5=#c4a7e7
 palette = 6=#70d6ff
 palette = 7=#c9ceda
