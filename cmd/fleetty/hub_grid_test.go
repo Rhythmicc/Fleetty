@@ -400,6 +400,13 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	if idle != "▁▁▁▁" {
 		t.Fatalf("idle samples lost the baseline or were scaled up: %q", idle)
 	}
+	if strings.Contains(hubFixedSparkline([]float64{0, 1, 2, 3}, 4), "38;2;158;228;147") {
+		t.Fatal("idle baseline was painted ok-green")
+	}
+	healthy := hubFixedSparkline([]float64{50}, 1)
+	if !strings.Contains(healthy, "38;2;158;228;147") {
+		t.Fatalf("healthy column stayed gray: %q", healthy)
+	}
 	hot := hubFixedSparkline([]float64{4, 100}, 4)
 	plain := ansi.Strip(hot)
 	if !strings.HasPrefix(plain, "··") || !strings.Contains(plain, "█") || !strings.Contains(plain, "▁") {
@@ -414,6 +421,19 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	}
 	if len(busy) != hubSparkCap || busy[len(busy)-1].CPU != float64(hubSparkCap+4) {
 		t.Fatalf("spark ring = %d last %.0f", len(busy), busy[len(busy)-1].CPU)
+	}
+	if hubThroughputLevel(400<<20, 0) != stateOK || hubThroughputLevel(500<<20, 0) != stateWarn || hubThroughputLevel(1<<30, 0) != stateCrit {
+		t.Fatal("absolute throughput fallback thresholds drifted")
+	}
+	link := uint64(10000) * 1000 * 1000 / 8
+	if hubThroughputLevel(link*8/10, link) != stateWarn || hubThroughputLevel(link*95/100, link) != stateCrit {
+		t.Fatal("link-speed throughput scale drifted")
+	}
+	if hubVRAMLevel(59, 96) != stateOK || hubVRAMLevel(80, 100) != stateWarn || hubVRAMLevel(95, 100) != stateCrit {
+		t.Fatal("VRAM ratio scale drifted")
+	}
+	if temperatureLevel(74) != stateOK || temperatureLevel(75) != stateWarn || temperatureLevel(85) != stateCrit {
+		t.Fatal("temperature scale drifted")
 	}
 }
 

@@ -205,16 +205,18 @@ func temperatureReading(celsius int, text string) string {
 	return stateStyle(temperatureLevel(celsius)).Render(text)
 }
 
-// hubMeterStyle colors a hub meter. A healthy reading stays gray-white.
-// Only warn and crit introduce yellow or red.
+// hubMeterStyle colors a hub reading. Healthy is the ok green, then yellow
+// and red. Unknown stays dim. Focus does not change the scale.
 func hubMeterStyle(level stateLevel) lipgloss.Style {
 	switch level {
 	case stateWarn:
 		return warningStyle
 	case stateCrit, stateOffline:
 		return dangerStyle
+	case stateUnknown:
+		return dimStyle
 	default:
-		return hubMetricStyle
+		return okStyle
 	}
 }
 

@@ -1620,14 +1620,13 @@ func hubFixedSparkline(values []float64, width int) string {
 		if level >= len(blocks) {
 			level = len(blocks) - 1
 		}
-		style := dimStyle
-		switch usageLevel(value) {
-		case stateWarn:
-			style = warningStyle
-		case stateCrit:
-			style = dangerStyle
+		// The flat baseline stays dim so an idle row is present but quiet.
+		// Taller columns use ok / warn / crit, on every card.
+		if level == 0 {
+			parts[index] = dimStyle.Render(string(blocks[0]))
+			continue
 		}
-		parts[index] = style.Render(string(blocks[level]))
+		parts[index] = hubMeterStyle(usageLevel(value)).Render(string(blocks[level]))
 	}
 	return strings.Join(parts, "")
 }
@@ -1671,22 +1670,66 @@ func hubMetricRows(rows []struct {
 }
 
 func (m *hubModel) hubFacts(index int, snapshot monitorSnapshot, gpu bool, width int) []string {
-	third := hubRateLine("r", "w", snapshot.DiskRead, snapshot.DiskWrite, width)
+	third := hubRateLine("r", "w", snapshot.DiskRead, snapshot.DiskWrite, 0, width)
 	if gpu {
 		_, used, total, _ := hubGPUStats(snapshot.GPUs)
-		third = ansi.Truncate(dimStyle.Render("vram ")+hubMetricStyle.Render(hubVRAM(used, total)), width, "")
+		third = ansi.Truncate(dimStyle.Render("vram ")+hubMeterStyle(hubVRAMLevel(used, total)).Render(hubVRAM(used, total)), width, "")
 	}
 	return []string{
 		m.hubOccupant(index, snapshot, width),
-		hubRateLine("↓", "↑", snapshot.NetworkRX, snapshot.NetworkTX, width),
+		hubRateLine("↓", "↑", snapshot.NetworkRX, snapshot.NetworkTX, hubLinkBytesPerSec(snapshot), width),
 		third,
 	}
 }
 
-func hubRateLine(leftLabel, rightLabel string, left, right uint64, width int) string {
-	line := dimStyle.Render(leftLabel) + hubMetricStyle.Render(hubCompactRate(left)) + " " +
-		dimStyle.Render(rightLabel) + hubMetricStyle.Render(hubCompactRate(right))
+func hubRateLine(leftLabel, rightLabel string, left, right, linkBytesPerSec uint64, width int) string {
+	line := dimStyle.Render(leftLabel) + hubMeterStyle(hubThroughputLevel(left, linkBytesPerSec)).Render(hubCompactRate(left)) + " " +
+		dimStyle.Render(rightLabel) + hubMeterStyle(hubThroughputLevel(right, linkBytesPerSec)).Render(hubCompactRate(right))
 	return ansi.Truncate(line, width, "")
+}
+
+// Absolute throughput colors when a NIC does not report link speed.
+// Warn at 500 MiB/s and crit at 1 GiB/s. Disk read/write uses the same
+// cutoffs. When every interface reports a speed, each direction is colored
+// by its share of that capacity instead (70/90, same as other meters).
+const (
+	hubThroughputWarn = 500 * 1024 * 1024
+	hubThroughputCrit = 1024 * 1024 * 1024
+)
+
+func hubThroughputLevel(bytesPerSec, linkBytesPerSec uint64) stateLevel {
+	if linkBytesPerSec > 0 {
+		return usageLevel(float64(bytesPerSec) / float64(linkBytesPerSec) * 100)
+	}
+	switch {
+	case bytesPerSec >= hubThroughputCrit:
+		return stateCrit
+	case bytesPerSec >= hubThroughputWarn:
+		return stateWarn
+	default:
+		return stateOK
+	}
+}
+
+func hubLinkBytesPerSec(snapshot monitorSnapshot) uint64 {
+	if len(snapshot.NetworkInterfaces) == 0 {
+		return 0
+	}
+	var mbps uint64
+	for _, iface := range snapshot.NetworkInterfaces {
+		if iface.SpeedMbps == 0 {
+			return 0
+		}
+		mbps += iface.SpeedMbps
+	}
+	return mbps * 1000 * 1000 / 8
+}
+
+func hubVRAMLevel(used, total uint64) stateLevel {
+	if total == 0 {
+		return stateUnknown
+	}
+	return usageLevel(float64(used) / float64(total) * 100)
 }
 
 func hubCompactRate(value uint64) string {
@@ -1790,8 +1833,8 @@ func renderNASHubCard(spark []hubSparkSample, snapshot monitorSnapshot, width in
 	}, leftWidth)
 	left = append(left, dimStyle.Render(truncate(worst.Mount, leftWidth)))
 	lines := hubColumns(left, []string{
-		dimStyle.Render("↓") + hubMetricStyle.Render(hubCompactRate(snapshot.NetworkRX)),
-		dimStyle.Render("↑") + hubMetricStyle.Render(hubCompactRate(snapshot.NetworkTX)),
+		dimStyle.Render("↓") + hubMeterStyle(hubThroughputLevel(snapshot.NetworkRX, hubLinkBytesPerSec(snapshot))).Render(hubCompactRate(snapshot.NetworkRX)),
+		dimStyle.Render("↑") + hubMeterStyle(hubThroughputLevel(snapshot.NetworkTX, hubLinkBytesPerSec(snapshot))).Render(hubCompactRate(snapshot.NetworkTX)),
 	}, width)
 	lines[2] = ansi.Truncate(renderNASServiceLine(snapshot, width), width, "")
 	return lines

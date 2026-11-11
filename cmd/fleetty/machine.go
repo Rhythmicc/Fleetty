@@ -125,6 +125,8 @@ type networkInterfaceInfo struct {
 	RXTotal, TXTotal   uint64
 	RXErrors, TXErrors uint64
 	RXDrops, TXDrops   uint64
+	// SpeedMbps is the NIC link speed. Zero means the host did not report it.
+	SpeedMbps uint64
 }
 
 type filesystemInfo struct {
@@ -161,6 +163,7 @@ type networkDeviceCounters struct {
 	rx, tx             uint64
 	rxErrors, txErrors uint64
 	rxDrops, txDrops   uint64
+	speedMbps          uint64
 }
 
 type processNetworkCounters struct {
@@ -284,6 +287,7 @@ func (c *metricsCollector) collectNetwork(snapshot *monitorSnapshot) error {
 				Name: name, RXTotal: counters.rx, TXTotal: counters.tx,
 				RXErrors: counters.rxErrors, TXErrors: counters.txErrors,
 				RXDrops: counters.rxDrops, TXDrops: counters.txDrops,
+				SpeedMbps: counters.speedMbps,
 			}
 			if previous, ok := c.previousInterfaces[name]; ok && c.haveNet && seconds > 0 {
 				info.RX = uint64(float64(counterDelta(counters.rx, previous.rx)) / seconds)
@@ -341,9 +345,27 @@ func readNetworkDevices() (map[string]networkDeviceCounters, error) {
 		devices[name] = networkDeviceCounters{
 			rx: value(0), rxErrors: value(2), rxDrops: value(3),
 			tx: value(8), txErrors: value(10), txDrops: value(11),
+			speedMbps: readLinkSpeedMbps(name),
 		}
 	}
 	return devices, nil
+}
+
+// readLinkSpeedMbps reads the Linux sysfs NIC speed. Zero means unknown
+// (missing file, down link, or a non-Linux host).
+func readLinkSpeedMbps(name string) uint64 {
+	if runtime.GOOS != "linux" || name == "" || strings.Contains(name, "/") {
+		return 0
+	}
+	data, err := os.ReadFile("/sys/class/net/" + name + "/speed")
+	if err != nil {
+		return 0
+	}
+	speed, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil || speed <= 0 {
+		return 0
+	}
+	return uint64(speed)
 }
 
 func readDefaultNetworkInterface() string {
