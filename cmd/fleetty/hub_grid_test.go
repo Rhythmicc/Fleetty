@@ -404,12 +404,22 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	if strings.Contains(idleColored, "38;2;158;228;147") || !strings.Contains(idleColored, "38;2;52;60;73") {
 		t.Fatalf("idle baseline should be the faint track, not green: %q", idleColored)
 	}
-	healthy := hubFixedSparkline([]float64{50}, 1)
-	if strings.Contains(healthy, "38;2;158;228;147") || !strings.Contains(healthy, "38;2;156;163;188") {
-		t.Fatalf("healthy column should be muted, not green: %q", healthy)
+	neutral := hubFixedSparkline([]float64{20}, 1)
+	if strings.Contains(neutral, "38;2;158;228;147") || !strings.Contains(neutral, "38;2;156;163;188") {
+		t.Fatalf("under-30 column should be muted: %q", neutral)
 	}
-	if !strings.Contains(hubMeterStyle(stateOK).Render("62%"), "38;2;245;247;255") {
-		t.Fatal("healthy percent should use the normal foreground")
+	green := hubFixedSparkline([]float64{50}, 1)
+	if !strings.Contains(green, "38;2;158;228;147") {
+		t.Fatalf("30–70 column should be green: %q", green)
+	}
+	if !strings.Contains(hubFixedSparkline([]float64{75}, 1), "38;2;255;209;128") {
+		t.Fatal("70–90 column should be yellow")
+	}
+	if !strings.Contains(loadBandStyle(percentBand(20), false).Render("20%"), "38;2;245;247;255") {
+		t.Fatal("neutral percent should use the normal foreground")
+	}
+	if !strings.Contains(loadBandStyle(percentBand(50), false).Render("50%"), "38;2;158;228;147") {
+		t.Fatal("green percent should use the ok color")
 	}
 	hot := hubFixedSparkline([]float64{4, 100}, 4)
 	plain := ansi.Strip(hot)
@@ -426,18 +436,18 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	if len(busy) != hubSparkCap || busy[len(busy)-1].CPU != float64(hubSparkCap+4) {
 		t.Fatalf("spark ring = %d last %.0f", len(busy), busy[len(busy)-1].CPU)
 	}
-	if hubThroughputLevel(400<<20, 0) != stateOK || hubThroughputLevel(500<<20, 0) != stateWarn || hubThroughputLevel(1<<30, 0) != stateCrit {
-		t.Fatal("absolute throughput fallback thresholds drifted")
+	if throughputBand(100<<20, 0) != loadNeutral || throughputBand(200<<20, 0) != loadGreen || throughputBand(600<<20, 0) != loadWarn || throughputBand(1<<30, 0) != loadCrit {
+		t.Fatal("absolute throughput bands drifted")
 	}
 	link := uint64(10000) * 1000 * 1000 / 8
-	if hubThroughputLevel(link*8/10, link) != stateWarn || hubThroughputLevel(link*95/100, link) != stateCrit {
-		t.Fatal("link-speed throughput scale drifted")
+	if throughputBand(link*2/10, link) != loadNeutral || throughputBand(link*5/10, link) != loadGreen || throughputBand(link*8/10, link) != loadWarn || throughputBand(link*95/100, link) != loadCrit {
+		t.Fatal("link-speed throughput bands drifted")
 	}
-	if hubVRAMLevel(59, 96) != stateOK || hubVRAMLevel(80, 100) != stateWarn || hubVRAMLevel(95, 100) != stateCrit {
-		t.Fatal("VRAM ratio scale drifted")
+	if vramBand(20, 100) != loadNeutral || vramBand(59, 96) != loadGreen || vramBand(80, 100) != loadWarn || vramBand(95, 100) != loadCrit {
+		t.Fatal("VRAM bands drifted")
 	}
-	if temperatureLevel(74) != stateOK || temperatureLevel(75) != stateWarn || temperatureLevel(85) != stateCrit {
-		t.Fatal("temperature scale drifted")
+	if temperatureBand(42) != loadNeutral || temperatureBand(71) != loadGreen || temperatureBand(78) != loadWarn || temperatureBand(87) != loadCrit {
+		t.Fatal("temperature bands drifted")
 	}
 }
 

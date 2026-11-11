@@ -61,6 +61,88 @@ const (
 	stateUnknown
 )
 
+// loadBand is the hub-card scale. One helper classifies every sparkline
+// column, percent, temperature, VRAM fill, and throughput rate.
+//
+//	percent, VRAM, and link share: <30 neutral, 30–70 green, 70–90 yellow, ≥90 red
+//	temperature: <60 neutral, 60–75 green, 75–85 yellow, ≥85 red
+//	bytes/s with no link speed: <150 MiB/s neutral, 150–500 MiB/s green,
+//	500 MiB/s–1 GiB/s yellow, ≥1 GiB/s red
+type loadBand int
+
+const (
+	loadNeutral loadBand = iota
+	loadGreen
+	loadWarn
+	loadCrit
+)
+
+func percentBand(value float64) loadBand {
+	switch {
+	case math.IsNaN(value) || math.IsInf(value, 0) || value < 30:
+		return loadNeutral
+	case value < 70:
+		return loadGreen
+	case value < 90:
+		return loadWarn
+	default:
+		return loadCrit
+	}
+}
+
+func temperatureBand(celsius int) loadBand {
+	switch {
+	case celsius < 60:
+		return loadNeutral
+	case celsius < 75:
+		return loadGreen
+	case celsius < 85:
+		return loadWarn
+	default:
+		return loadCrit
+	}
+}
+
+func throughputBand(bytesPerSec, linkBytesPerSec uint64) loadBand {
+	if linkBytesPerSec > 0 {
+		return percentBand(float64(bytesPerSec) / float64(linkBytesPerSec) * 100)
+	}
+	const (
+		green = 150 * 1024 * 1024
+		warn  = 500 * 1024 * 1024
+		crit  = 1024 * 1024 * 1024
+	)
+	switch {
+	case bytesPerSec >= crit:
+		return loadCrit
+	case bytesPerSec >= warn:
+		return loadWarn
+	case bytesPerSec >= green:
+		return loadGreen
+	default:
+		return loadNeutral
+	}
+}
+
+// loadBandStyle paints a hub reading. Neutral sparklines use the muted
+// foreground; neutral numbers use the normal text color. Green is the
+// existing ok color (mint in the dark theme, forest green in the light theme).
+func loadBandStyle(band loadBand, spark bool) lipgloss.Style {
+	switch band {
+	case loadCrit:
+		return dangerStyle
+	case loadWarn:
+		return warningStyle
+	case loadGreen:
+		return okStyle
+	default:
+		if spark {
+			return dimStyle
+		}
+		return hubMetricStyle
+	}
+}
+
 func usageLevel(value float64) stateLevel {
 	switch {
 	case math.IsNaN(value) || math.IsInf(value, 0):

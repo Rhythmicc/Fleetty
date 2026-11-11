@@ -1376,7 +1376,7 @@ func hubCardMeta(budget int, address, status string, temp int, warn bool) string
 		core = append(core, dimStyle.Render(status))
 	}
 	if temp > 0 {
-		core = append(core, hubMeterStyle(temperatureLevel(temp)).Render(fmt.Sprintf("%d°C", temp)))
+		core = append(core, loadBandStyle(temperatureBand(temp), false).Render(fmt.Sprintf("%d°C", temp)))
 	}
 	if warn {
 		core = append(core, warningStyle.Render("WARN"))
@@ -1620,20 +1620,12 @@ func hubFixedSparkline(values []float64, width int) string {
 		if level >= len(blocks) {
 			level = len(blocks) - 1
 		}
-		// The flat baseline is fainter than a real healthy column. Healthy
-		// columns are the muted foreground; only warn and crit take color.
+		// The flat baseline stays fainter than a real column.
 		if level == 0 {
 			parts[index] = barTrackStyle.Render(string(blocks[0]))
 			continue
 		}
-		style := dimStyle
-		switch usageLevel(value) {
-		case stateWarn:
-			style = warningStyle
-		case stateCrit:
-			style = dangerStyle
-		}
-		parts[index] = style.Render(string(blocks[level]))
+		parts[index] = loadBandStyle(percentBand(value), true).Render(string(blocks[level]))
 	}
 	return strings.Join(parts, "")
 }
@@ -1666,12 +1658,12 @@ func hubMetricRows(rows []struct {
 		percentText := fmt.Sprintf("%3.0f%%", value)
 		sparkWidth := width - lipgloss.Width(label) - 1 - 1 - lipgloss.Width(percentText)
 		if sparkWidth < 1 {
-			lines[index] = ansi.Truncate(dimStyle.Render(label)+" "+hubMeterStyle(usageLevel(value)).Render(percentText), width, "")
+			lines[index] = ansi.Truncate(dimStyle.Render(label)+" "+loadBandStyle(percentBand(value), false).Render(percentText), width, "")
 			continue
 		}
 		lines[index] = dimStyle.Render(label) + " " +
 			hubFixedSparkline(row.series, sparkWidth) + " " +
-			hubMeterStyle(usageLevel(value)).Render(percentText)
+			loadBandStyle(percentBand(value), false).Render(percentText)
 	}
 	return lines
 }
@@ -1680,7 +1672,7 @@ func (m *hubModel) hubFacts(index int, snapshot monitorSnapshot, gpu bool, width
 	third := hubRateLine("r", "w", snapshot.DiskRead, snapshot.DiskWrite, 0, width)
 	if gpu {
 		_, used, total, _ := hubGPUStats(snapshot.GPUs)
-		third = ansi.Truncate(dimStyle.Render("vram ")+hubMeterStyle(hubVRAMLevel(used, total)).Render(hubVRAM(used, total)), width, "")
+		third = ansi.Truncate(dimStyle.Render("vram ")+loadBandStyle(vramBand(used, total), false).Render(hubVRAM(used, total)), width, "")
 	}
 	return []string{
 		m.hubOccupant(index, snapshot, width),
@@ -1690,32 +1682,16 @@ func (m *hubModel) hubFacts(index int, snapshot monitorSnapshot, gpu bool, width
 }
 
 func hubRateLine(leftLabel, rightLabel string, left, right, linkBytesPerSec uint64, width int) string {
-	line := dimStyle.Render(leftLabel) + hubMeterStyle(hubThroughputLevel(left, linkBytesPerSec)).Render(hubCompactRate(left)) + " " +
-		dimStyle.Render(rightLabel) + hubMeterStyle(hubThroughputLevel(right, linkBytesPerSec)).Render(hubCompactRate(right))
+	line := dimStyle.Render(leftLabel) + loadBandStyle(throughputBand(left, linkBytesPerSec), false).Render(hubCompactRate(left)) + " " +
+		dimStyle.Render(rightLabel) + loadBandStyle(throughputBand(right, linkBytesPerSec), false).Render(hubCompactRate(right))
 	return ansi.Truncate(line, width, "")
 }
 
-// Absolute throughput colors when a NIC does not report link speed.
-// Warn at 500 MiB/s and crit at 1 GiB/s. Disk read/write uses the same
-// cutoffs. When every interface reports a speed, each direction is colored
-// by its share of that capacity instead (70/90, same as other meters).
-const (
-	hubThroughputWarn = 500 * 1024 * 1024
-	hubThroughputCrit = 1024 * 1024 * 1024
-)
-
-func hubThroughputLevel(bytesPerSec, linkBytesPerSec uint64) stateLevel {
-	if linkBytesPerSec > 0 {
-		return usageLevel(float64(bytesPerSec) / float64(linkBytesPerSec) * 100)
+func vramBand(used, total uint64) loadBand {
+	if total == 0 {
+		return loadNeutral
 	}
-	switch {
-	case bytesPerSec >= hubThroughputCrit:
-		return stateCrit
-	case bytesPerSec >= hubThroughputWarn:
-		return stateWarn
-	default:
-		return stateOK
-	}
+	return percentBand(float64(used) / float64(total) * 100)
 }
 
 func hubLinkBytesPerSec(snapshot monitorSnapshot) uint64 {
@@ -1730,13 +1706,6 @@ func hubLinkBytesPerSec(snapshot monitorSnapshot) uint64 {
 		mbps += iface.SpeedMbps
 	}
 	return mbps * 1000 * 1000 / 8
-}
-
-func hubVRAMLevel(used, total uint64) stateLevel {
-	if total == 0 {
-		return stateUnknown
-	}
-	return usageLevel(float64(used) / float64(total) * 100)
 }
 
 func hubCompactRate(value uint64) string {
@@ -1840,8 +1809,8 @@ func renderNASHubCard(spark []hubSparkSample, snapshot monitorSnapshot, width in
 	}, leftWidth)
 	left = append(left, dimStyle.Render(truncate(worst.Mount, leftWidth)))
 	lines := hubColumns(left, []string{
-		dimStyle.Render("↓") + hubMeterStyle(hubThroughputLevel(snapshot.NetworkRX, hubLinkBytesPerSec(snapshot))).Render(hubCompactRate(snapshot.NetworkRX)),
-		dimStyle.Render("↑") + hubMeterStyle(hubThroughputLevel(snapshot.NetworkTX, hubLinkBytesPerSec(snapshot))).Render(hubCompactRate(snapshot.NetworkTX)),
+		dimStyle.Render("↓") + loadBandStyle(throughputBand(snapshot.NetworkRX, hubLinkBytesPerSec(snapshot)), false).Render(hubCompactRate(snapshot.NetworkRX)),
+		dimStyle.Render("↑") + loadBandStyle(throughputBand(snapshot.NetworkTX, hubLinkBytesPerSec(snapshot)), false).Render(hubCompactRate(snapshot.NetworkTX)),
 	}, width)
 	lines[2] = ansi.Truncate(renderNASServiceLine(snapshot, width), width, "")
 	return lines

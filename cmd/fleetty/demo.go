@@ -213,6 +213,10 @@ func demoHubStates(now time.Time) []hubNodeState {
 			state.Snapshot.Processes = []processInfo{{
 				PID: 4812, User: "alice", State: "R", Command: "train.py", CPU: 186, Elapsed: 5*3600 + 12*60,
 			}}
+			// 2 Gbps puts 86 MiB/s in the green band and leaves 14 MiB/s neutral.
+			state.Snapshot.NetworkInterfaces = []networkInterfaceInfo{{
+				Name: "eth0", RX: state.Snapshot.NetworkRX, TX: state.Snapshot.NetworkTX, SpeedMbps: 2000,
+			}}
 			return state
 		}(),
 		gpu("gpu-a02", 24*time.Millisecond, 11, 22, 18, 4, 1, 42),
