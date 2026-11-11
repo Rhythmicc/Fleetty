@@ -1,31 +1,37 @@
+English | [简体中文](README.zh-CN.md)
+
+<div align="center">
+
 # Fleetty
 
-<p align="center">
-  <img src="docs/images/fleetty-hero.webp" alt="Fleetty 统一连接 GPU 计算节点、存储节点和集群队列" width="100%">
-</p>
+Local top, and a remote dashboard for hosts, GPUs, storage, and Slurm.
 
-Fleetty 是一个面向个人电脑、计算服务器、存储节点和 Slurm 集群的终端监控控制台。它既可以作为本地 `top` 使用，也可以通过专用 SSH 端口提供不会暴露服务器 shell 的远程仪表盘。
+[![CI](https://img.shields.io/github/actions/workflow/status/Rhythmicc/Fleetty/ci.yml?branch=main&label=CI)](https://github.com/Rhythmicc/Fleetty/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Rhythmicc/Fleetty)](https://github.com/Rhythmicc/Fleetty/releases/latest)
+[![Go](https://img.shields.io/github/go-mod/go-version/Rhythmicc/Fleetty)](go.mod)
+[![License](https://img.shields.io/github/license/Rhythmicc/Fleetty)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Rhythmicc/fleetty)](https://goreportcard.com/report/github.com/Rhythmicc/fleetty)
 
-它以单一可执行文件运行，适合为运维人员或服务器使用者提供统一、受控的主机状态入口。
+<img src="docs/images/fleetty-hero.webp" alt="Fleetty — terminal fleet monitor" width="100%">
 
-[快速开始](#快速开始) · [Ghostty 主题](#ghostty-与主题) · [操作指南](#常用操作) · [更新](#更新) · [详细文档](#详细文档)
+</div>
 
-## 能做什么
+Fleetty is a terminal console for a workstation, a compute server, a storage node, or a Slurm cluster. One binary runs locally, like `top`, or serves a dashboard on its own SSH port. That port never opens a system shell. Read-only monitoring and management are separate, and each session keeps its own layout and theme.
 
-- **本地 top**：Linux／macOS 的 CPU、逐核负载、工作频率、内存、网络和进程监控。
-- **GPU 监控**：Linux NVIDIA GPU 与 Apple Silicon GPU；按硬件能力显示指标。
-- **多机 Hub**：统一查看节点负载、温度、网络和 IP，直接进入节点详情。
-- **Slurm 队列**：多个集群、节点作业与候选顺序，窄屏保留用户、运行时间和作业名。
-- **本地存储地图**：交互式浏览空间占用、查重、压缩和删除，写操作需要明确确认。
-- **服务与运维**：NAS、Docker、PM2、HTTP 健康检查，以及安装器、健康检查和分层批量更新。
+## Features
 
-一个二进制既能本地运行，也能提供专用 SSH 仪表盘。远程连接不开放系统 shell；监控与管理权限分离。界面布局和主题按会话独立。
+- **Local top.** CPU, per-core load, clock, memory, network, and processes on Linux and macOS.
+- **GPUs.** NVIDIA on Linux and Apple Silicon on macOS. A card appears only when the machine can actually report it.
+- **Hub.** One view of load, temperature, network, and address across many nodes, with a keypress into any node.
+- **Slurm.** Several clusters at once, including jobs on a node and the next eligible candidate. Narrow terminals still show the user, elapsed time, and job name.
+- **Storage map.** Browse space, find duplicates, archive, and delete on the local machine. Every write asks for an explicit confirmation.
+- **Services.** NAS mounts, Docker, PM2, and HTTP checks, plus an installer, a health check, and staged fleet updates.
 
-## 快速开始
+## Quick start
 
-### 本地监控
+### Local monitoring
 
-支持 Linux／macOS 的 `amd64`、`arm64`。以下命令下载最新正式版、验证 SHA-256，并安装到当前用户目录：
+Linux and macOS, `amd64` and `arm64`. This downloads the latest release, checks SHA-256, and installs it for the current user:
 
 ```bash
 case "$(uname -s):$(uname -m)" in
@@ -51,126 +57,126 @@ mkdir -p "$HOME/.local/bin" &&
 install -m 0755 "$fleetty_download_dir/$fleetty_asset" "$HOME/.local/bin/fleetty"
 ```
 
-启动本地监控，不需要 root，也不会监听网络端口：
+Local monitoring does not need root and does not listen on the network:
 
 ```bash
 "$HOME/.local/bin/fleetty" top
 ```
 
-将 `~/.local/bin` 加入 `PATH` 后可直接使用 `fleetty top`。裸命令 `fleetty` 打开启动菜单，只有显式执行 `fleetty serve` 或选择 SSH Server 才会启动远程服务。
+Add `~/.local/bin` to `PATH` and the command is `fleetty top`. `fleetty` with no arguments opens a launcher. The SSH server starts only when you run `fleetty serve`, or choose SSH Server in that launcher.
 
-### 远程节点与 Hub
+### A remote node and a Hub
 
-在服务器上按[安装指南](docs/installation.md#linux-ssh-节点)登记客户端公钥并启动服务，再从客户端连接：
+Install on the server, register a client public key, and start the service as described in [Install a Linux node](docs/en/installation.md#linux-ssh-nodes). Then connect:
 
 ```bash
-ssh -p 23234 monitor@node-host    # 单节点
-ssh -p 23235 monitor@hub-host     # 多服务器 Hub
+ssh -p 23234 monitor@node-host    # one node
+ssh -p 23235 monitor@hub-host     # a Hub of many servers
 ```
 
-SSH 用户名用于标记会话，并不登录系统账户。服务只接受登记的公钥；普通监控无需管理密码，写操作另行认证。
+The SSH user name labels the session. It does not log into a system account. The service accepts only registered public keys. Read-only monitoring does not need the management password; writes are authenticated separately.
 
-- [安装 Linux 节点：普通用户或系统服务](docs/installation.md#linux-ssh-节点)
-- [配置多服务器 Hub](docs/hub.md)
-- [接入 Slurm 队列](docs/slurm.md)
-- [由 Hub 分发更新，包括登录节点后的计算节点](docs/deployment.md#由-hub-自动更新节点)
+- [Install a Linux node, as a user or as a system service](docs/en/installation.md#linux-ssh-nodes)
+- [Configure a Hub](docs/en/hub.md)
+- [Attach a Slurm queue](docs/en/slurm.md)
+- [Have the Hub update nodes, including compute nodes behind a login node](docs/en/deployment.md#updating-nodes-from-a-hub)
 
-## Ghostty 与主题
+## Ghostty and themes
 
-我们强烈建议使用 [Ghostty](https://ghostty.org/) 作为 Fleetty 的终端客户端。仓库提供 [Fleetty Dark](themes/ghostty/Fleetty%20Dark) 和 [Fleetty Light](themes/ghostty/Fleetty%20Light)，分别使用炭黑和暖纸背景，浅色光标为纯黑。
+[Ghostty](https://ghostty.org/) is the terminal we recommend. The repository includes [Fleetty Dark](themes/ghostty/Fleetty%20Dark) and [Fleetty Light](themes/ghostty/Fleetty%20Light): charcoal and warm paper, with a black cursor in the light theme.
 
-在**客户端电脑**安装主题后，将 Ghostty 的 `theme` 设置替换为：
+Install the themes on the **client**, then set Ghostty's `theme`:
 
 ```ini
 theme = dark:Fleetty Dark,light:Fleetty Light
 ```
 
-Ghostty 跟随系统外观切换，Fleetty 默认的 `auto` 主题可在本地与 SSH 会话中跟随终端，无需转发主题环境变量。按 `t` 后，当前会话改为手动选择。
+Ghostty follows the system appearance, and Fleetty's default `auto` theme follows the terminal, locally and over SSH. No theme variable has to be forwarded. Press `t` and the current session switches by hand instead.
 
-[主题下载、安装与 Powerlevel10k 配置](docs/themes.md)。为了保持稳定的对比度，建议 Ghostty 使用 `background-opacity = 1`；透明度、字体和快捷键由用户配置决定。
+[Download, install, and Powerlevel10k colors](docs/en/themes.md). `background-opacity = 1` keeps contrast stable. Transparency, fonts, and keybindings stay yours to set.
 
-## 界面预览
+## Screenshots
 
-以下截图来自 Fleetty 的实际运行界面。
+These are captured from a running Fleetty.
 
-按机器类型集中展示在线状态和核心指标，节点离线时保留最后在线时间并自动重试。
+The Hub groups machines by type and keeps the last-seen time when a node drops offline. It keeps retrying on its own.
 
 <a href="docs/images/fleetty-hub.webp">
-  <img src="docs/images/fleetty-hub.webp" alt="Fleetty Machine Hub 总览" width="100%">
+  <img src="docs/images/fleetty-hub.webp" alt="Fleetty Hub overview" width="100%">
 </a>
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <strong>GPU 计算节点</strong><br>
-      CPU、内存、磁盘、网络、GPU、Slurm 节点队列和进程统一呈现。<br><br>
+      <strong>GPU compute node</strong><br>
+      CPU, memory, disk, network, GPU, the Slurm node queue, and processes on one screen.<br><br>
       <a href="docs/images/fleetty-gpu.webp">
-        <img src="docs/images/fleetty-gpu.webp" alt="Fleetty GPU 计算节点监控页面">
+        <img src="docs/images/fleetty-gpu.webp" alt="Fleetty GPU compute node">
       </a>
     </td>
     <td width="50%" valign="top">
-      <strong>NAS 与服务节点</strong><br>
-      突出网络、挂载点、Docker、PM2 和 HTTP 服务健康状态。<br><br>
+      <strong>NAS and service node</strong><br>
+      Network, mounts, Docker, PM2, and HTTP health, in front of the rest of the host.<br><br>
       <a href="docs/images/fleetty-nas.webp">
-        <img src="docs/images/fleetty-nas.webp" alt="Fleetty NAS 节点监控页面">
+        <img src="docs/images/fleetty-nas.webp" alt="Fleetty NAS node">
       </a>
     </td>
   </tr>
 </table>
 
-## 常用操作
+## Keys
 
-| 按键 | 功能 |
+| Key | Action |
 | --- | --- |
 | `1` / `2` / `3` | Overview / Compute / Network |
-| `4` | 本地 Storage Map |
-| `Tab` / `Shift+Tab` | 切换页面 |
-| `↑` / `↓`、单击 | 选择进程或节点 |
-| `Enter` / `Esc` | 详情 / 返回 |
-| `/` / `c` | 过滤 / 清除过滤 |
-| `o` / `O` | 切换排序字段 / 反转顺序 |
-| `l` / `t` / `r` / `q` | 布局 / 主题 / 刷新 / 退出 |
+| `4` | Local Storage Map |
+| `Tab` / `Shift+Tab` | Next / previous page |
+| `↑` / `↓`, click | Select a process or a node |
+| `Enter` / `Esc` | Details / back |
+| `/` / `c` | Filter / clear the filter |
+| `o` / `O` | Next sort field / reverse the order |
+| `l` / `t` / `r` / `q` | Layout / theme / refresh / quit |
 
-Compute 页在 32 核及以下使用逐核横条，更多核心使用紧凑纵向柱图：柱宽自适应，历史图放在右侧窄栏；按 `f` 聚焦核心、`v` 切换完整明细。
+On Compute, 32 logical CPUs or fewer use a horizontal bar per core. More than 32 use a compact column chart: the columns size themselves to the terminal, and the history sits in a narrow column on the right. `f` focuses a core. `v` switches to the full per-core list.
 
-Network 页显示上下行和累计流量；Linux TCP 连接按 `DOWN + UP` 实时速率排序，并显示所属用户。不支持流量计数或权限不足时显示缺失提示，不将未知数据当作零。
+Network shows live rates and cumulative traffic. On Linux, TCP connections are ordered by live `DOWN + UP` and include the owning user. Missing counters stay missing. They are not drawn as zero.
 
-Storage Map 仅在本地 `fleetty top` 提供。删除、压缩和去重都有独立确认；远程监控不会获得文件删除权限。
+The Storage Map exists only in local `fleetty top`. Delete, archive, and dedupe each have their own confirmation. A remote session cannot delete files.
 
-[完整操作与指标说明](docs/usage.md) · [管理模式与权限边界](docs/security.md)
+[The full tour](docs/en/usage.md) · [Management and what it is allowed to do](docs/en/security.md)
 
-## 更新
+## Updates
 
 ```bash
-fleetty update --check             # 只检查
-fleetty update                     # 最新正式 Release
-fleetty update --version v0.1.11    # 指定版本
+fleetty update --check             # report only
+fleetty update                     # latest stable release
+fleetty update --version v0.1.4    # a specific tag
 ```
 
-更新会校验安装包并原子替换当前程序，保留旧版备份；不会修改配置、密钥或自动重启服务。服务运行者需要重启对应 unit，客户端重新连接后使用新版。系统安装由有写权限的管理员执行。
+An update checks the archive, replaces the binary in place, and leaves the previous binary as a backup. It does not touch configuration or keys, and it does not restart the service. Restart the unit yourself. Clients pick up the new build on the next connection. A system install is updated by someone who can write that directory.
 
-多机更新使用 `fleettyctl update`，可由 Hub 缓存一次安装包后分层分发。
+`fleettyctl update` updates many machines. The Hub downloads each archive once and pushes it outward, including through a login node.
 
-[单机安装与升级](docs/installation.md) · [批量部署与定时更新](docs/deployment.md)
+[Install and upgrade one machine](docs/en/installation.md) · [Fleet rollout and scheduled updates](docs/en/deployment.md)
 
-## 详细文档
+## Documentation
 
-| 主题 | 文档 |
+| Topic | Guide |
 | --- | --- |
-| 平台要求、安装、自更新与卸载 | [安装与升级](docs/installation.md) |
-| 页面、逐核 CPU、频率、网络与存储地图 | [使用指南](docs/usage.md) |
-| 终端主题、自动跟随与 prompt 配色 | [Ghostty 与主题](docs/themes.md) |
-| 多服务器与节点认证配置 | [Hub](docs/hub.md) |
-| 多集群、作业状态、QOS 与窄屏队列 | [Slurm](docs/slurm.md) |
-| Docker、PM2、挂载点与 HTTP 健康检查 | [NAS](docs/nas.md) |
-| 幂等安装、fleet manifest 与分层更新 | [部署与运维](docs/deployment.md) |
-| 管理密码、公钥和特权助手 | [安全与管理](docs/security.md) |
-| 配置项、服务日志与常见问题 | [配置与故障排查](docs/configuration.md) |
-| 采集频率、连接复用与历史数据 | [采集与性能](docs/performance.md) |
+| Requirements, install, self-update, uninstall | [Install and upgrade](docs/en/installation.md) |
+| Pages, per-core CPU, clocks, network, storage map | [Using Fleetty](docs/en/usage.md) |
+| Terminal theme, automatic appearance, prompt colors | [Ghostty and themes](docs/en/themes.md) |
+| Many servers, and how nodes authenticate the Hub | [Hub](docs/en/hub.md) |
+| Several clusters, job state, QOS, narrow queues | [Slurm](docs/en/slurm.md) |
+| Docker, PM2, mounts, HTTP checks | [NAS and service checks](docs/en/nas.md) |
+| Idempotent install, fleet manifest, staged updates | [Deployment](docs/en/deployment.md) |
+| Management password, public keys, privileged helper | [Authentication and management](docs/en/security.md) |
+| Settings, service logs, common failures | [Configuration](docs/en/configuration.md) |
+| Sample rates, connection reuse, retained history | [Collection and performance](docs/en/performance.md) |
 
-## 从源码构建
+## Build from source
 
-Go 版本以 [go.mod](go.mod) 为准。
+Use the Go version declared in [go.mod](go.mod).
 
 ```bash
 go test -race ./...
@@ -178,3 +184,11 @@ go vet ./...
 go build -o fleetty ./cmd/fleetty
 go build -o fleettyctl ./cmd/fleettyctl
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and pull requests are welcome. Please update the English and Chinese docs together when a flag, a config key, or a visible behavior changes.
+
+## License
+
+[MIT](LICENSE)
