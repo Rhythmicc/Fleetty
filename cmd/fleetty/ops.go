@@ -145,6 +145,9 @@ func runOperationsWithInput(args []string, stdin io.Reader, stdout, stderr io.Wr
 		}
 		return false, nil
 	}
+	if handled, err := dispatchDemo(args, stdout, stderr); handled {
+		return true, err
+	}
 	switch args[0] {
 	case "top":
 		return true, runTopCommand(args[1:], stdin, stdout, stderr)
