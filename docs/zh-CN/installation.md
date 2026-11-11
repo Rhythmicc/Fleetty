@@ -19,14 +19,21 @@ macOS 上不带机器配置文件的 `fleetty top` 使用 `general` profile。�
 
 ## 下载与本地运行
 
-安装脚本会核对 `checksums.txt`，再把本机对应的二进制复制到 `~/.local/bin/fleetty`。它不创建服务。`FLEETTY_VERSION` 默认为 `latest`。`FLEETTY_INSTALL_DIR` 默认为 `~/.local/bin`。
+安装脚本会核对 `checksums.txt`，执行 `fleetty version` 自检，再把本机对应的二进制复制到 `~/.local/bin/fleetty`。它不创建服务。`FLEETTY_VERSION` 用于选择版本标签，默认为 `latest`。`FLEETTY_INSTALL_DIR` 用于选择安装目录，默认为 `~/.local/bin`（若该目录不在 `PATH` 中，脚本会输出添加提示）。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/install.sh | sh
 "$HOME/.local/bin/fleetty" top
 ```
 
-`go install` 和手动下载见 [快速开始](../../README.zh-CN.md#快速开始)。
+已有 Go 工具链时（版本以 [go.mod](../../go.mod) 为准）：
+
+```bash
+go install github.com/Rhythmicc/fleetty/cmd/fleetty@latest
+go install github.com/Rhythmicc/fleetty/cmd/fleettyctl@latest
+```
+
+也可以从 [Releases](https://github.com/Rhythmicc/Fleetty/releases) 下载 `fleetty_linux_amd64`、`fleetty_linux_arm64`、`fleetty_darwin_amd64` 或 `fleetty_darwin_arm64`（以及对应的 `fleettyctl_*` 二进制、systemd 单元、JSON 配置示例与 Ghostty 主题），并与同一发布中的 `checksums.txt` 比对 SHA-256 哈希。
 
 把 `~/.local/bin` 加入 `PATH` 后可以直接运行 `fleetty top`。单独执行 `fleetty` 会打开启动菜单，可以开始本地监控，或查看 SSH 服务的配置和密钥。只有执行 `fleetty serve`，或在菜单里选择 SSH Server，监听才会开始。它不会在后台悄悄打开匿名端口。
 

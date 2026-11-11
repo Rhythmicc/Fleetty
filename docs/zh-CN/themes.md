@@ -33,6 +33,10 @@ theme = dark:Fleetty Dark,light:Fleetty Light
 
 `fleetty top` 默认是 `--theme auto`。启动时读取终端背景和深浅色报告，并在运行中订阅变化。直接 SSH 到 Fleetty 监控端口时，同样根据客户端终端决定。不转发环境变量。`--theme dark`、`--theme light`，或 `DEFAULT_THEME=dark` / `light`，会固定配色。按过 `t` 之后，这个会话改为手动，不再跟随系统。不回答查询的终端从深色开始，`t` 仍然可以切换。
 
+<img src="../images/fleetty-themes.gif" alt="Fleetty Hub 在深色和浅色主题之间切换" width="100%">
+
+`docs/images/` 中的演示截图由真实 TUI 使用虚构集群数据生成，可通过 `sh docs/demo/render.sh` 重新生成。
+
 ## Powerlevel10k
 
 蓝底上的 Python 或 Conda 段需要浅色文字。不要在那里保留深色前景。下面的内容放进 `~/.p10k.zsh`，两种 Fleetty 主题都适用：

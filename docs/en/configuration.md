@@ -6,7 +6,28 @@ English | [简体中文](../zh-CN/configuration.md)
 
 ## Configuration
 
-User scope keeps configuration in `~/.config/fleetty` and the systemd unit in `~/.config/systemd/user`. System scope uses `/etc/fleetty` and `/etc/systemd/system`. The paths in the table are the system-scope defaults. A user unit substitutes the home directory.
+`fleetty top` runs without a configuration file. Optional flags override the defaults:
+
+```bash
+fleetty top --config machine.json --theme auto --layout layout.json
+```
+
+`--theme` accepts `auto`, `dark`, or `light`, and overrides `DEFAULT_THEME`. `--layout` overrides `FLEETTY_LAYOUT_FILE`; with neither set, the layout file is `fleetty/layout.json` under the user configuration directory (`~/.config` or `$XDG_CONFIG_HOME` on Linux, and `~/Library/Application Support` on macOS).
+
+For `fleetty install`, user scope keeps configuration in `~/.config/fleetty` and the systemd unit in `~/.config/systemd/user`. System scope uses `/etc/fleetty` and `/etc/systemd/system`:
+
+| Item | User scope (`--scope user`) | System scope (`--scope system`) |
+| --- | --- | --- |
+| Binary | `~/.local/bin/fleetty` | `/opt/fleetty/fleetty` |
+| Configuration directory (`0700`) | `~/.config/fleetty` | `/etc/fleetty` |
+| systemd unit directory | `~/.config/systemd/user` | `/etc/systemd/system` |
+| Node / Hub unit names | `fleetty.service` / `fleetty-hub.service` | `fleetty.service` / `fleetty-hub.service` |
+| SSH host keys | `ssh_host_ed25519` / `hub_host_ed25519` | `ssh_host_ed25519` / `hub_host_ed25519` |
+| Node / Hub config files | `machine.json` / `nodes.json` | `machine.json` / `nodes.json` |
+| Client / Hub RPC authorized keys | `authorized_keys` / `hub_authorized_keys` | `authorized_keys` / `hub_authorized_keys` |
+| Management credentials | `admin.env` (`ADMIN_PASSWORD_HASH`) | `admin.env` (`ADMIN_PASSWORD_HASH`) |
+
+The paths in the environment table below are the system-scope defaults. A user unit substitutes the home directory.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
