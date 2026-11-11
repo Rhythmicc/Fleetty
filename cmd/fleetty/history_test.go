@@ -148,8 +148,11 @@ func TestHubCardKeepsBlockLoadBarWhenHistoryExists(t *testing.T) {
 	if strings.Contains(rendered, "cpu ") || strings.Contains(rendered, "━") {
 		t.Fatalf("hub card kept the separate meter:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "10%") || !strings.Contains(rendered, "vram") || !strings.Contains(rendered, "up ") {
+	if !strings.Contains(rendered, "10%") || !strings.Contains(rendered, "vram") || !strings.Contains(rendered, "↓") {
 		t.Fatalf("hub card lost sparkline row or facts:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "up ") {
+		t.Fatalf("hub card still shows uptime:\n%s", rendered)
 	}
 }
 

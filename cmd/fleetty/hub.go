@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +36,9 @@ const (
 	hubHistoryRefreshInterval = time.Minute
 	// One sparkline column is one hub refresh. Keep enough samples for the
 	// widest card; a narrower card draws the newest tail.
-	hubSparkCap            = 48
+	hubSparkCap            = 96
+	hubSparkTarget         = 20
+	hubFactColumnWidth     = 26
 	hubOfflineRetryInitial = 5 * time.Second
 	hubOfflineRetryMaximum = 30 * time.Second
 )
@@ -866,7 +867,27 @@ func (m *hubModel) columns() int {
 	// Pick the nearest column count, rather than leaving almost a whole card
 	// empty when the terminal is just below a fixed-width breakpoint.
 	preferred := max(1, (width+1+stride/2)/stride)
-	return min(preferred, max(1, (width+1)/(hubMinimumCardWidth+1)))
+	columns := min(preferred, max(1, (width+1)/(hubMinimumCardWidth+1)))
+	// A ~20-column sparkline needs a wider card. Drop a column (140 → 2)
+	// before drawing a window only a few seconds long.
+	for columns > 1 && hubSparkColumns(hubContentWidth(width, columns)) < hubSparkTarget {
+		columns--
+	}
+	return columns
+}
+
+func hubContentWidth(termWidth, columns int) int {
+	return (termWidth-columns+1)/columns - 4
+}
+
+func hubSparkColumns(contentWidth int) int {
+	left, _ := hubColumnWidths(contentWidth)
+	// "GPU×99", a space, the sparkline, a space, and "100%".
+	width := left - 6 - 2 - 4
+	if width < 0 {
+		return 0
+	}
+	return width
 }
 
 func (m *hubModel) cardWidth() int {
@@ -1443,10 +1464,17 @@ func hubColumnWidths(width int) (left, right int) {
 	if width < 16 {
 		return max(1, width/2), max(1, width-width/2)
 	}
-	// Wide enough for "HTTP 1/2 CTR 2/3 PM2 1/2" and a job name.
-	right = 24
+	// Right column stays narrow: "↓ 12.3 MiB/s ↑ 1.2 MiB/s" or a short job name.
+	// Below that, keep the NAS service line ("HTTP 1/2 CTR 2/3 PM2 1/2").
+	right = hubFactColumnWidth
+	if width < 48 {
+		right = 24
+	}
 	if width < 36 {
 		right = max(10, width*2/5)
+	}
+	if right >= width-8 {
+		right = max(8, width/3)
 	}
 	left = max(1, width-right-1)
 	return left, right
@@ -1519,13 +1547,13 @@ func sparkSeries(samples []hubSparkSample, field sparkField) []float64 {
 }
 
 // hubFixedSparkline draws one column per sample on a fixed 0–100 scale.
-// Missing samples stay blank on the left. A column is gray until its own
-// sample crosses warn or crit.
+// Samples not collected yet are a faint dot on the left. A real sample is at
+// least a dim baseline, so an idle row still reads as present.
 func hubFixedSparkline(values []float64, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	blocks := []rune(" ▁▂▃▄▅▆▇█")
+	blocks := []rune("▁▂▃▄▅▆▇█")
 	if len(values) > width {
 		values = values[len(values)-width:]
 	}
@@ -1533,7 +1561,7 @@ func hubFixedSparkline(values []float64, width int) string {
 	missing := width - len(values)
 	for index := 0; index < width; index++ {
 		if index < missing {
-			parts[index] = dimStyle.Render(" ")
+			parts[index] = dimStyle.Render("·")
 			continue
 		}
 		value := values[index-missing]
@@ -1543,7 +1571,7 @@ func hubFixedSparkline(values []float64, width int) string {
 		if value > 100 {
 			value = 100
 		}
-		level := int(value / 100 * float64(len(blocks)-1))
+		level := int(value / 100 * float64(len(blocks)))
 		if level < 0 {
 			level = 0
 		}
@@ -1601,33 +1629,41 @@ func hubMetricRows(rows []struct {
 }
 
 func (m *hubModel) hubFacts(index int, snapshot monitorSnapshot, gpu bool, width int) []string {
-	second := dimStyle.Render("load ") + hubMetricStyle.Render(truncate(hubLoadText(snapshot.LoadAverage), max(1, width-5)))
+	third := hubRateLine("r", "w", snapshot.DiskRead, snapshot.DiskWrite, width)
 	if gpu {
 		_, used, total, _ := hubGPUStats(snapshot.GPUs)
-		second = dimStyle.Render("vram ") + hubMetricStyle.Render(truncate(hubMemPair(used, total), max(1, width-5)))
+		third = ansi.Truncate(dimStyle.Render("vram ")+hubMetricStyle.Render(hubMemPair(used, total)), width, "")
 	}
 	return []string{
 		m.hubOccupant(index, snapshot, width),
-		ansi.Truncate(second, width, ""),
-		ansi.Truncate(dimStyle.Render("up ")+hubMetricStyle.Render(hubUptime(snapshot.Uptime)), width, ""),
+		hubRateLine("↓", "↑", snapshot.NetworkRX, snapshot.NetworkTX, width),
+		third,
 	}
 }
 
-func hubLoadText(raw string) string {
-	raw = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "load"))
-	var parts []string
-	for _, field := range strings.Fields(raw) {
-		field = strings.Trim(field, "·")
-		value, err := strconv.ParseFloat(field, 64)
-		if err != nil {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%.1f", value))
+func hubRateLine(leftLabel, rightLabel string, left, right uint64, width int) string {
+	leftText, rightText := bytes(left)+"/s", bytes(right)+"/s"
+	if lipgloss.Width(leftLabel+" "+leftText+" "+rightLabel+" "+rightText) > width {
+		leftText, rightText = hubShortRate(left), hubShortRate(right)
 	}
-	if len(parts) == 0 {
-		return "—"
+	line := dimStyle.Render(leftLabel+" ") + hubMetricStyle.Render(leftText) + " " +
+		dimStyle.Render(rightLabel+" ") + hubMetricStyle.Render(rightText)
+	return ansi.Truncate(line, width, "")
+}
+
+func hubShortRate(value uint64) string {
+	const unit = 1024.0
+	if value < 1024 {
+		return fmt.Sprintf("%d B/s", value)
 	}
-	return strings.Join(parts, " ")
+	f := float64(value)
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	index := 0
+	for f >= unit && index < len(units)-1 {
+		f /= unit
+		index++
+	}
+	return fmt.Sprintf("%.0f %s/s", math.Round(f), units[index])
 }
 
 func hubMemPair(used, total uint64) string {
@@ -1651,22 +1687,6 @@ func hubMemPair(used, total uint64) string {
 		totalText = fmt.Sprintf("%.0f", math.Round(totalValue))
 	}
 	return usedText + "/" + totalText + " " + unit
-}
-
-func hubUptime(seconds uint64) string {
-	if seconds == 0 {
-		return "—"
-	}
-	days := seconds / 86400
-	hours := (seconds % 86400) / 3600
-	minutes := (seconds % 3600) / 60
-	if days > 0 {
-		return fmt.Sprintf("%dd %dh", days, hours)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm", hours, minutes)
-	}
-	return fmt.Sprintf("%dm", minutes)
 }
 
 func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) string {

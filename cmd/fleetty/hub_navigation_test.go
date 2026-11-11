@@ -51,8 +51,8 @@ func TestHubUpFromCPUNodeFollowsVisualGrid(t *testing.T) {
 		t.Fatalf("up from intel9462 selected index %d, want n4 (6)", model.cursor)
 	}
 	model.moveCursorVertical(-1)
-	if model.cursor != 3 {
-		t.Fatalf("up from n4 selected index %d, want n1 (3)", model.cursor)
+	if model.cursor != 4 {
+		t.Fatalf("up from n4 selected index %d, want n2 (4)", model.cursor)
 	}
 }
 

@@ -27,33 +27,38 @@ func wideTestHub(width, height int) *hubModel {
 }
 
 func TestHubAdaptiveCardsAndClickTargets(t *testing.T) {
-	for _, test := range []struct{ width, columns, cardWidth int }{
-		{36, 1, 36}, {48, 1, 48}, {60, 1, 60}, {72, 1, 72}, {73, 2, 36}, {80, 2, 39},
-		{92, 2, 45}, {93, 2, 46}, {116, 2, 57}, {117, 3, 38}, {139, 3, 45}, {140, 3, 46},
-		{160, 3, 52}, {186, 4, 45}, {187, 4, 46}, {233, 5, 45}, {234, 5, 46}, {238, 5, 46}, {244, 5, 48},
-		{300, 6, 49}, {512, 11, 45}, {1024, 22, 45},
+	for _, width := range []int{
+		36, 48, 60, 72, 73, 80, 92, 93, 116, 117, 139, 140, 160, 186, 187, 220,
+		233, 234, 238, 244, 300, 512, 1024,
 	} {
-		t.Run(fmt.Sprint(test.width), func(t *testing.T) {
-			m := wideTestHub(test.width, 24)
-			if m.columns() != test.columns {
-				t.Fatalf("columns = %d, want %d", m.columns(), test.columns)
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			m := wideTestHub(width, 24)
+			columns, cardWidth := m.columns(), m.cardWidth()
+			if width == 140 && columns != 2 {
+				t.Fatalf("columns = %d, want 2 so the sparkline can reach ~20", columns)
 			}
-			if gap := test.width - (m.columns()*(m.cardWidth()+1) - 1); gap < 0 || gap >= m.columns() {
+			if width == 220 && columns != 3 {
+				t.Fatalf("columns = %d, want 3", columns)
+			}
+			if columns > 1 && hubSparkColumns(cardWidth-4) < hubSparkTarget {
+				t.Fatalf("spark columns = %d, want at least %d", hubSparkColumns(cardWidth-4), hubSparkTarget)
+			}
+			if gap := width - (columns*(cardWidth+1) - 1); gap < 0 || gap >= columns {
 				t.Fatalf("unused grid width = %d, want less than column count", gap)
 			}
-			if got := lipgloss.Width(m.renderNodeCard(0, m.cardWidth())); got != test.cardWidth {
-				t.Fatalf("rendered card width = %d, want %d", got, test.cardWidth)
+			if got := lipgloss.Width(m.renderNodeCard(0, cardWidth)); got != cardWidth {
+				t.Fatalf("rendered card width = %d, want %d", got, cardWidth)
 			}
 			view := m.hubView()
 			lines := strings.Split(ansi.Strip(view), "\n")
-			if got := strings.Count(lines[2], "╭"); got != test.columns {
-				t.Fatalf("visible first-row cards = %d, want %d", got, test.columns)
+			if got := strings.Count(lines[2], "╭"); got != columns {
+				t.Fatalf("visible first-row cards = %d, want %d", got, columns)
 			}
 			if lipgloss.Height(view) != 24 {
 				t.Fatal("view changed terminal height")
 			}
 			for _, line := range lines {
-				if lipgloss.Width(line) > test.width {
+				if lipgloss.Width(line) > width {
 					t.Fatalf("view overflows: %q", line)
 				}
 			}
@@ -71,18 +76,18 @@ func TestHubAdaptiveCardsAndClickTargets(t *testing.T) {
 						continue
 					}
 					for col, index := range row.nodes {
-						x := col * (test.cardWidth + 1)
-						for _, dx := range []int{0, test.cardWidth - 1} {
+						x := col * (cardWidth + 1)
+						for _, dx := range []int{0, cardWidth - 1} {
 							if got, ok := m.nodeAt(x+dx, y); !ok || got != index {
 								t.Fatalf("click (%d,%d) = %d,%v, want %d", x+dx, y, got, ok, index)
 							}
 						}
-						if _, ok := m.nodeAt(x+test.cardWidth, y); ok {
+						if _, ok := m.nodeAt(x+cardWidth, y); ok {
 							t.Fatal("gap is clickable")
 						}
 						seen[index] = true
 					}
-					if _, ok := m.nodeAt(len(row.nodes)*(test.cardWidth+1), y); ok {
+					if _, ok := m.nodeAt(len(row.nodes)*(cardWidth+1), y); ok {
 						t.Fatal("unused row space is clickable")
 					}
 					if _, ok := m.nodeAt(-1, y); ok {
@@ -102,8 +107,8 @@ func TestHubWideGridNavigationAndResize(t *testing.T) {
 	m := wideTestHub(244, 24)
 	m.cursor = 4
 	m.moveCursorVertical(1)
-	if m.cursor != 9 {
-		t.Fatalf("down from column 5 selected %d, want 9", m.cursor)
+	if m.cursor != 7 {
+		t.Fatalf("down from the second column selected %d, want 7", m.cursor)
 	}
 	m.moveCursorVertical(-1)
 	m.moveCursorHorizontal(1)
@@ -247,11 +252,18 @@ func TestHubPackedGroupsAndPagination(t *testing.T) {
 			}
 		}
 	}
-	// A wrapped GPU tail stays on its own row. CPU and services share the next
-	// row, and each group header is printed once.
-	for _, width := range []int{140, 187, 238} {
+	// A wrapped GPU tail stays on its own row. Each group header is printed once
+	// per page, and two headers never share a line.
+	for _, width := range []int{140, 187, 220, 238} {
 		m := compactTestHub(width, 48)
-		plain := ansi.Strip(m.hubView())
+		var plain string
+		for pageIndex := range m.pages() {
+			m.offset = pageIndex
+			plain += ansi.Strip(m.hubView()) + "\n"
+			if err := hubRowsAreContiguous(m.pageNodeRows(m.pages()[pageIndex]), m.nodeGroups()); err != nil {
+				t.Fatalf("width %d page %d: %v", width, pageIndex, err)
+			}
+		}
 		if strings.Count(plain, "GPU COMPUTE") != 1 {
 			t.Fatalf("width %d repeated the GPU header:\n%s", width, plain)
 		}
@@ -262,10 +274,6 @@ func TestHubPackedGroupsAndPagination(t *testing.T) {
 			if strings.Contains(line, "CPU COMPUTE") && strings.Contains(line, "CLUSTER SERVICES") {
 				t.Fatalf("width %d put two group headers on one row: %s", width, line)
 			}
-		}
-		rows := m.pageNodeRows(m.pages()[0])
-		if err := hubRowsAreContiguous(rows, m.nodeGroups()); err != nil {
-			t.Fatalf("width %d: %v", width, err)
 		}
 	}
 }
@@ -399,12 +407,12 @@ func meterMatches(line string, value float64) bool {
 
 func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	idle := ansi.Strip(hubFixedSparkline([]float64{0, 1, 2, 3}, 4))
-	if strings.ContainsAny(idle, "▃▄▅▆▇█") {
-		t.Fatalf("idle samples were scaled up: %q", idle)
+	if idle != "▁▁▁▁" {
+		t.Fatalf("idle samples lost the baseline or were scaled up: %q", idle)
 	}
 	hot := hubFixedSparkline([]float64{4, 100}, 4)
 	plain := ansi.Strip(hot)
-	if !strings.HasPrefix(plain, "  ") || !strings.Contains(plain, "█") {
+	if !strings.HasPrefix(plain, "··") || !strings.Contains(plain, "█") || !strings.Contains(plain, "▁") {
 		t.Fatalf("short history should pad on the left and keep 100%% tall: %q", plain)
 	}
 	if !strings.Contains(hot, "38;2;255;138;128") {
@@ -417,4 +425,83 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	if len(busy) != hubSparkCap || busy[len(busy)-1].CPU != float64(hubSparkCap+4) {
 		t.Fatalf("spark ring = %d last %.0f", len(busy), busy[len(busy)-1].CPU)
 	}
+}
+
+func TestHubFactsFollowTheirMetricRow(t *testing.T) {
+	rate := func(mib float64) uint64 { return uint64(mib * 1024 * 1024) }
+	spark := make([]hubSparkSample, 30)
+	for index := range spark {
+		spark[index] = hubSparkSample{CPU: 1, Mem: 40, Disk: 12, GPU: 2}
+	}
+	gpu := &hubModel{
+		width: 140, height: 48,
+		config: hubConfig{Nodes: []hubNodeConfig{{Name: "gpu-a01", Profile: machineProfileGPU}}},
+		states: []hubNodeState{{
+			Spark: spark,
+			Snapshot: monitorSnapshot{
+				CollectedAt: time.Now(), Profile: machineProfileGPU,
+				CPUPercent: 62, MemoryUsed: 71, MemoryTotal: 100,
+				NetworkRX: rate(12.3), NetworkTX: rate(1.2),
+				GPUs: []gpuInfo{
+					{Utilization: 91, MemoryUsed: 30 << 30, MemoryTotal: 48 << 30},
+					{Utilization: 47, MemoryUsed: 29 << 30, MemoryTotal: 48 << 30},
+				},
+				Processes: []processInfo{{User: "alice", Command: "protein-fold", CPU: 40}},
+			},
+		}},
+	}
+	if gpu.columns() != 2 {
+		t.Fatalf("140-col hub uses %d columns, want 2", gpu.columns())
+	}
+	plain := ansi.Strip(gpu.renderNodeCard(0, gpu.cardWidth()))
+	cpuLine, memLine, gpuLine := hubMeterLine(plain, "CPU"), hubMeterLine(plain, "MEM"), hubMeterLine(plain, "GPU")
+	if !strings.Contains(cpuLine, "alice · protein-fold") || strings.Contains(cpuLine, "vram") {
+		t.Fatalf("CPU row: %s", cpuLine)
+	}
+	if sparkGlyphs(cpuLine) < hubSparkTarget {
+		t.Fatalf("CPU sparkline is %d columns:\n%s", sparkGlyphs(cpuLine), cpuLine)
+	}
+	if !strings.Contains(memLine, "↓ 12.3 MiB/s") || !strings.Contains(memLine, "↑ 1.2 MiB/s") {
+		t.Fatalf("MEM row: %s", memLine)
+	}
+	if !strings.Contains(gpuLine, "vram 59.0/96 GiB") {
+		t.Fatalf("GPU row: %s", gpuLine)
+	}
+	if strings.Contains(plain, "up ") || strings.Contains(plain, "load ") {
+		t.Fatalf("hub card still shows uptime or load:\n%s", plain)
+	}
+
+	cpu := &hubModel{
+		width: 140, height: 48,
+		config: hubConfig{Nodes: []hubNodeConfig{{Name: "cpu-01", Profile: machineProfileCPU}}},
+		states: []hubNodeState{{
+			Spark: spark,
+			Snapshot: monitorSnapshot{
+				CollectedAt: time.Now(), Profile: machineProfileCPU,
+				CPUPercent: 18, MemoryUsed: 30, MemoryTotal: 100, DiskUsed: 20, DiskTotal: 100,
+				DiskRead: rate(40), DiskWrite: rate(8),
+				NetworkRX: rate(12.3), NetworkTX: rate(1.2),
+			},
+		}},
+	}
+	cpuPlain := ansi.Strip(cpu.renderNodeCard(0, cpu.cardWidth()))
+	dsk := hubMeterLine(cpuPlain, "DSK")
+	if !strings.Contains(dsk, "r 40.0 MiB/s") || !strings.Contains(dsk, "w 8.0 MiB/s") {
+		t.Fatalf("DSK row: %s", dsk)
+	}
+	idle := ansi.Strip(hubFixedSparkline([]float64{0, 0, 0}, 8))
+	if idle != "·····▁▁▁" {
+		t.Fatalf("missing samples should stay faint and zeros should baseline: %q", idle)
+	}
+}
+
+func sparkGlyphs(line string) int {
+	count := 0
+	for _, glyph := range line {
+		switch glyph {
+		case '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '·':
+			count++
+		}
+	}
+	return count
 }

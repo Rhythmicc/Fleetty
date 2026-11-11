@@ -2175,25 +2175,28 @@ type monitorSnapshot struct {
 	LoadAverage             string
 	MemoryUsed, MemoryTotal uint64
 	DiskUsed, DiskTotal     uint64
-	NetworkRX, NetworkTX    uint64
-	NetworkRXTotal          uint64
-	NetworkTXTotal          uint64
-	NetworkProcesses        []processNetworkInfo
-	NetworkConnections      []networkConnectionInfo
-	NetworkConnectionMode   bool
-	NetworkProcessError     string
-	Battery                 *batteryInfo
-	NetworkInterfaces       []networkInterfaceInfo
-	Filesystems             []filesystemInfo
-	Services                []serviceHealth
-	Containers              []containerInfo
-	DockerError             string
-	PM2Processes            []pm2ProcessInfo
-	PM2Error                string
-	GPUs                    []gpuInfo
-	GPUError                string
-	Processes               []processInfo
-	ManagementActions       []managementActionInfo
+	// DiskRead and DiskWrite are host block-device bytes per second. Older
+	// nodes omit them; a zero pair means the rate is not available yet.
+	DiskRead, DiskWrite   uint64
+	NetworkRX, NetworkTX  uint64
+	NetworkRXTotal        uint64
+	NetworkTXTotal        uint64
+	NetworkProcesses      []processNetworkInfo
+	NetworkConnections    []networkConnectionInfo
+	NetworkConnectionMode bool
+	NetworkProcessError   string
+	Battery               *batteryInfo
+	NetworkInterfaces     []networkInterfaceInfo
+	Filesystems           []filesystemInfo
+	Services              []serviceHealth
+	Containers            []containerInfo
+	DockerError           string
+	PM2Processes          []pm2ProcessInfo
+	PM2Error              string
+	GPUs                  []gpuInfo
+	GPUError              string
+	Processes             []processInfo
+	ManagementActions     []managementActionInfo
 }
 
 type batteryInfo struct {
@@ -2268,6 +2271,10 @@ type metricsCollector struct {
 	cpuFrequencyReader         cpuFrequencyReader
 	cpuFrequencyInitialized    bool
 	previousNet                netCounters
+	previousDiskRead           uint64
+	previousDiskWrite          uint64
+	haveDiskIO                 bool
+	lastDiskIOAt               time.Time
 	previousInterfaces         map[string]networkDeviceCounters
 	previousProcessNet         map[int]processNetworkCounters
 	previousConnectionNet      map[string]connectionNetworkCounters
@@ -2351,6 +2358,7 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 	} else {
 		s.DiskUsed, s.DiskTotal = used, total
 	}
+	c.collectDiskIO(&s)
 	if err := c.collectNetwork(&s); err != nil {
 		errs = append(errs, "network: "+err.Error())
 	}
