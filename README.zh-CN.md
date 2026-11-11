@@ -4,7 +4,7 @@
 
 # Fleetty
 
-本地 top，以及面向主机、GPU、存储和 Slurm 的远程仪表盘。
+一台机器，或一整组机器，都在终端里。
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Rhythmicc/Fleetty/ci.yml?branch=main&label=CI)](https://github.com/Rhythmicc/Fleetty/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Rhythmicc/Fleetty)](https://github.com/Rhythmicc/Fleetty/releases/latest)
@@ -16,157 +16,180 @@
 
 </div>
 
-Fleetty 是面向个人电脑、计算服务器、存储节点和 Slurm 集群的终端控制台。它既可以当作本地 `top`，也可以在专用 SSH 端口上提供远程仪表盘。这个端口不会开放系统 shell。只读监控与管理权限分开，每个会话各自保留布局和主题。
+Fleetty 是一个 Go 二进制。在你面前的机器上，它像 `top`：CPU、内存、磁盘、网络、进程，以及硬件确实能报出数据时的 GPU。指向一台服务器时，同一块界面由 Fleetty 自己的 SSH 端口提供。这个端口不开放 shell。监控保持只读，直到有人为管理操作另行认证。每个会话各自保留页面、排序和主题。
 
-## 能做什么
+## 功能
 
-- **本地 top。** Linux 和 macOS 上的 CPU、逐核负载、工作频率、内存、网络和进程。
-- **GPU。** Linux 上的 NVIDIA，以及 Apple Silicon。只有机器确实能报出指标时才显示对应卡片。
-- **Hub。** 在同一页查看多台机器的负载、温度、网络和地址，按键即可进入某一节点。
-- **Slurm。** 同时查看多个集群、节点上的作业和下一份合资格候选。窄终端仍保留用户、已运行时间和作业名。
-- **存储地图。** 在本机浏览占用、查重、压缩和删除。每次写操作都要明确确认。
-- **服务。** NAS 挂载、Docker、PM2 和 HTTP 检查，以及安装器、健康检查和分层批量更新。
+- **本地 top。** Linux 和 macOS 上的逐核负载、频率、内存、磁盘、网络和进程。
+- **GPU。** Linux 上的 NVIDIA，macOS 上的 Apple Silicon。只有采到样本才出现对应卡片。
+- **Hub。** 在一屏上看多台机器的负载、温度、流量和地址。Enter 进入节点。离线节点保留最后在线时间，并自行重试。
+- **Slurm。** 同时看多个集群，包括某台节点上的作业和下一份合资格作业。窄终端仍保留用户、已运行时间和作业名。
+- **存储地图。** 只在本地 `fleetty top` 中浏览占用、查重、压缩和删除。每次写操作都要确认。
+- **服务。** NAS profile 下的挂载点、Docker、PM2 和 HTTP 检查。`fleettyctl` 用一份清单安装和更新多台机器，包括经过登录节点才能到达的节点。
+- **主题。** 深色和浅色。`t` 切换当前会话。默认的 `auto` 跟随终端，本地和 SSH 都一样，不必转发主题变量。仓库里的 [Fleetty Dark](themes/ghostty/Fleetty%20Dark) 和 [Fleetty Light](themes/ghostty/Fleetty%20Light) 是可选的 [Ghostty](https://ghostty.org/) 客户端主题。见 [Ghostty 与主题](docs/zh-CN/themes.md)。
 
 ## 快速开始
 
-### 本地监控
+### 安装
 
-支持 Linux 和 macOS 的 `amd64`、`arm64`。下面的命令下载最新正式版、校验 SHA-256，并安装到当前用户目录：
-
-```bash
-case "$(uname -s):$(uname -m)" in
-  Linux:x86_64)  fleetty_asset=fleetty_linux_amd64 ;;
-  Linux:aarch64|Linux:arm64) fleetty_asset=fleetty_linux_arm64 ;;
-  Darwin:x86_64) fleetty_asset=fleetty_darwin_amd64 ;;
-  Darwin:arm64)  fleetty_asset=fleetty_darwin_arm64 ;;
-  *) echo "Unsupported platform" >&2; exit 1 ;;
-esac
-
-fleetty_download_dir="$(mktemp -d)"
-fleetty_release_base="https://github.com/Rhythmicc/Fleetty/releases/latest/download"
-curl -fL "$fleetty_release_base/$fleetty_asset" -o "$fleetty_download_dir/$fleetty_asset" &&
-curl -fL "$fleetty_release_base/checksums.txt" -o "$fleetty_download_dir/checksums.txt" &&
-fleetty_expected="$(awk -v asset="$fleetty_asset" '$2 == asset { print $1 }' "$fleetty_download_dir/checksums.txt")" &&
-if command -v sha256sum >/dev/null 2>&1; then
-  fleetty_actual="$(sha256sum "$fleetty_download_dir/$fleetty_asset" | awk '{ print $1 }')"
-else
-  fleetty_actual="$(shasum -a 256 "$fleetty_download_dir/$fleetty_asset" | awk '{ print $1 }')"
-fi &&
-test -n "$fleetty_expected" && test "$fleetty_expected" = "$fleetty_actual" &&
-mkdir -p "$HOME/.local/bin" &&
-install -m 0755 "$fleetty_download_dir/$fleetty_asset" "$HOME/.local/bin/fleetty"
-```
-
-本地监控不需要 root，也不会监听网络端口：
+支持 Linux 和 macOS 的 `amd64`、`arm64`。脚本会用发布包里的 `checksums.txt` 校验下载内容。
 
 ```bash
-"$HOME/.local/bin/fleetty" top
+curl -fsSL https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/install.sh | sh
 ```
 
-将 `~/.local/bin` 加入 `PATH` 后可直接使用 `fleetty top`。裸命令 `fleetty` 打开启动菜单。只有执行 `fleetty serve`，或在菜单里选择 SSH Server，才会启动远程服务。
+`FLEETTY_VERSION` 选择版本标签，默认 `latest`。`FLEETTY_INSTALL_DIR` 选择安装目录，默认 `~/.local/bin`。该目录不在 `PATH` 中时，脚本会提示。
 
-### 远程节点与 Hub
-
-按[安装 Linux 节点](docs/zh-CN/installation.md#linux-ssh-节点)登记客户端公钥并启动服务，再从客户端连接：
+已有 Go 工具链时，版本以 [go.mod](go.mod) 为准：
 
 ```bash
-ssh -p 23234 monitor@node-host    # one node
-ssh -p 23235 monitor@hub-host     # a Hub of many servers
+go install github.com/Rhythmicc/fleetty/cmd/fleetty@latest
 ```
 
-SSH 用户名只用来标记会话，并不登录系统账户。服务只接受已登记的公钥。普通监控不需要管理密码；写操作另行认证。
+也可以从 [Releases](https://github.com/Rhythmicc/Fleetty/releases) 下载 `fleetty_linux_amd64`、`fleetty_linux_arm64`、`fleetty_darwin_amd64` 或 `fleetty_darwin_arm64`，并与同一发布中的 `checksums.txt` 对照。
+
+### 在本地运行
+
+```bash
+fleetty top
+```
+
+本地监控不需要 root，也不监听端口。终端可交互时，不带参数的 `fleetty` 会打开启动菜单。只有执行 `fleetty serve`，或在菜单里选择 SSH Server，才会启动 SSH 服务。
+
+### 打开远程仪表盘
+
+先在服务器上安装，登记客户端公钥并启动服务，步骤见 [安装 Linux 节点](docs/zh-CN/installation.md#linux-ssh-节点)。然后：
+
+```bash
+ssh -p 23234 monitor@node.example    # one node
+ssh -p 23235 monitor@hub.example     # a Hub
+```
+
+SSH 用户名只用来标记会话，并不是登录某个系统账户。服务只接受 `authorized_keys` 里的公钥。只读监控不询问管理密码。
 
 - [安装 Linux 节点：普通用户或系统服务](docs/zh-CN/installation.md#linux-ssh-节点)
-- [配置多服务器 Hub](docs/zh-CN/hub.md)
+- [配置 Hub](docs/zh-CN/hub.md)
 - [接入 Slurm 队列](docs/zh-CN/slurm.md)
-- [由 Hub 分发更新，包括登录节点后面的计算节点](docs/zh-CN/deployment.md#由-hub-自动更新节点)
+- [由 Hub 更新节点，包括登录节点后面的节点](docs/zh-CN/deployment.md#由-hub-自动更新节点)
 
-## Ghostty 与主题
+## 配置
 
-我们建议使用 [Ghostty](https://ghostty.org/) 作为终端。仓库提供 [Fleetty Dark](themes/ghostty/Fleetty%20Dark) 和 [Fleetty Light](themes/ghostty/Fleetty%20Light)：炭黑与暖纸两种背景，浅色主题的光标为纯黑。
+`fleetty top` 不需要配置文件。下面的标志都是可选的：
 
-在**客户端**安装主题，并把 Ghostty 的 `theme` 设为：
-
-```ini
-theme = dark:Fleetty Dark,light:Fleetty Light
+```bash
+fleetty top --config machine.json --theme auto --layout layout.json
 ```
 
-Ghostty 跟随系统外观，Fleetty 默认的 `auto` 主题会跟随终端，本地和 SSH 会话都一样，不必转发主题环境变量。按 `t` 后，当前会话改为手动选择。
+`--theme` 取 `auto`、`dark` 或 `light`，并覆盖 `DEFAULT_THEME`。`--layout` 覆盖 `FLEETTY_LAYOUT_FILE`。两者都未设置时，布局文件是用户配置目录下的 `fleetty/layout.json`：Linux 为 `~/.config`（或 `$XDG_CONFIG_HOME`），macOS 为 `~/Library/Application Support`。
 
-[主题下载、安装与 Powerlevel10k 配色](docs/zh-CN/themes.md)。建议 Ghostty 使用 `background-opacity = 1`，对比度才稳定。透明度、字体和快捷键由你自己决定。
+机器配置是 JSON。一台 NAS 可以写成：
 
-## 界面预览
+```json
+{
+  "name": "storage-01",
+  "profile": "nas",
+  "network_interfaces": ["bond0"],
+  "mounts": ["/", "/data/shared"],
+  "docker": true,
+  "pm2_user": "alice",
+  "http_checks": [{ "name": "Files", "url": "https://files.example/" }]
+}
+```
 
-以下截图来自正在运行的 Fleetty。
+`profile` 为 `gpu`、`cpu`、`nas` 或 `general`。`storage` 即 `nas`，`server` 即 `general`。macOS 上不带文件的 `fleetty top` 使用 `general`。没有文件的 Linux 服务使用 `gpu`。卡片仍然只在采集成功时出现。
 
-Hub 按机器类型分组。节点离线时保留最后在线时间，并自动重试。
+用户安装把二进制放在 `~/.local/bin/fleetty`，配置放在 `~/.config/fleetty`，并使用 systemd 用户单元。系统安装使用 `/opt/fleetty` 和 `/etc/fleetty`。节点监听 `0.0.0.0:23234`。Hub 监听 `23235`。
+
+设置了 `MACHINE_CONFIG_FILE` 时，历史记录是机器文件旁边的 `history.jsonl`，否则是 `~/.config/fleetty/history.jsonl`。`FLEETTY_HISTORY_FILE` 可以指定其他路径。Hub 读取 `HUB_NODES_FILE`。
+
+包括密钥、超时和管理密码在内的全部配置项见 [配置与故障排查](docs/zh-CN/configuration.md)。
+
+## 使用
+
+在节点仪表盘上：
+
+| 按键 | 功能 |
+| --- | --- |
+| `1` / `2` / `3` | Overview / Compute / Network |
+| `4` | 存储地图。仅本地 `fleetty top` |
+| `Tab` / `Shift+Tab` | 下一页 / 上一页。左右方向键相同，存储地图除外 |
+| `↑` / `↓`、单击 | 选择进程 |
+| `Enter` / `Esc` | 进程详情 / 返回 |
+| `/` / `c` | 过滤 / 清除过滤 |
+| `o` / `O` | 下一个排序字段 / 反转顺序 |
+| `l` | 布局编辑器。NAS profile 没有自定义布局 |
+| `m` | 管理模式。需要已设置 `ADMIN_PASSWORD_HASH` |
+| `t` | 为当前会话切换深色和浅色 |
+| `r` / `q` | 刷新 / 退出 |
+
+Compute 页在 32 个逻辑 CPU 及以下为每个核画一条横条，超过 32 个则使用随终端变宽的柱图，历史图放在右侧窄栏。`f` 聚焦某个核。`v` 在柱图和完整逐核列表之间切换。这个选择只在当前会话有效。
+
+在 Linux 上，Network 页按实时 `DOWN + UP` 排列 TCP 连接，并显示所属用户。内核没有提供的计数保持空白，不会画成零。
+
+存储地图只在本地 `fleetty top` 中提供。`d` 删除，`z` 先写成 `.7z` 再删除原文件。两者分别要求输入 `DELETE` 或 `ARCHIVE`。`u` 扫描重复文件。在该视图里，`c` 选择要保留的那一份。远程会话不能删除文件。`q` 和 `Esc` 返回上一级目录；在扫描根目录时则退出。
+
+在 Hub 上，方向键在服务器之间移动，Enter 打开选中的服务器，配置了 Slurm 时 `s` 打开队列。`t` 和 `r` 是主题和刷新。在队列里按 `q` 回到服务器列表；在服务器列表里按 `q` 退出。
+
+[完整操作说明](docs/zh-CN/usage.md) · [管理模式可以做什么](docs/zh-CN/security.md)
+
+## 截图
+
+这些画面是真实 TUI 用一套虚构演示数据画出来的。用 `sh docs/demo/render.sh` 可以重新生成。
 
 <a href="docs/images/fleetty-hub.webp">
-  <img src="docs/images/fleetty-hub.webp" alt="Fleetty Hub 总览" width="100%">
+  <img src="docs/images/fleetty-hub.webp" alt="Fleetty 中的 Acme Research Cluster，含一台离线节点和一块高温 GPU" width="100%">
 </a>
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <strong>GPU 计算节点</strong><br>
-      CPU、内存、磁盘、网络、GPU、Slurm 节点队列和进程在同一页。<br><br>
+      <strong>GPU 节点</strong><br>
+      主机、GPU、该节点的 Slurm 队列和进程。<br><br>
       <a href="docs/images/fleetty-gpu.webp">
-        <img src="docs/images/fleetty-gpu.webp" alt="Fleetty GPU 计算节点">
+        <img src="docs/images/fleetty-gpu.webp" alt="虚构节点 gpu-a01 的 Fleetty 总览">
       </a>
     </td>
     <td width="50%" valign="top">
-      <strong>NAS 与服务节点</strong><br>
-      把网络、挂载点、Docker、PM2 和 HTTP 健康状态放在前面。<br><br>
+      <strong>存储节点</strong><br>
+      挂载点、Docker、PM2 和 HTTP 检查，其中有一项不健康。<br><br>
       <a href="docs/images/fleetty-nas.webp">
-        <img src="docs/images/fleetty-nas.webp" alt="Fleetty NAS 节点">
+        <img src="docs/images/fleetty-nas.webp" alt="虚构节点 storage-01 的 Fleetty 总览">
       </a>
     </td>
   </tr>
 </table>
 
-## 常用操作
+### 主题
 
-| 按键 | 功能 |
-| --- | --- |
-| `1` / `2` / `3` | Overview / Compute / Network |
-| `4` | 本地 Storage Map |
-| `Tab` / `Shift+Tab` | 下一页 / 上一页 |
-| `↑` / `↓`、单击 | 选择进程或节点 |
-| `Enter` / `Esc` | 详情 / 返回 |
-| `/` / `c` | 过滤 / 清除过滤 |
-| `o` / `O` | 下一个排序字段 / 反转顺序 |
-| `l` / `t` / `r` / `q` | 布局 / 主题 / 刷新 / 退出 |
+`t` 在当前会话的深色和浅色之间切换。下面是同一份 Hub 数据的两种主题。
 
-Compute 页在 32 个逻辑 CPU 及以下使用逐核横条，超过 32 个使用紧凑纵向柱图：柱宽随终端自适应，历史图放在右侧窄栏。`f` 聚焦核心，`v` 切换到完整逐核明细。
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <strong>深色</strong><br><br>
+      <a href="docs/images/fleetty-hub.webp">
+        <img src="docs/images/fleetty-hub.webp" alt="深色主题下的 Fleetty Hub">
+      </a>
+    </td>
+    <td width="50%" valign="top">
+      <strong>浅色</strong><br><br>
+      <a href="docs/images/fleetty-hub-light.webp">
+        <img src="docs/images/fleetty-hub-light.webp" alt="浅色主题下的 Fleetty Hub">
+      </a>
+    </td>
+  </tr>
+</table>
 
-Network 页显示实时速率和累计流量。Linux 上的 TCP 连接按实时 `DOWN + UP` 排序，并显示所属用户。缺失的计数保持缺失，不会画成零。
+<img src="docs/images/fleetty-themes.gif" alt="Fleetty Hub 在深色和浅色主题之间切换" width="100%">
 
-Storage Map 只在本地 `fleetty top` 中提供。删除、压缩和去重各自确认。远程会话不能删除文件。
-
-[完整操作说明](docs/zh-CN/usage.md) · [管理模式与权限边界](docs/zh-CN/security.md)
-
-## 更新
-
-```bash
-fleetty update --check             # report only
-fleetty update                     # latest stable release
-fleetty update --version v0.1.4    # a specific tag
-```
-
-更新会校验安装包并原地替换二进制，旧版留在备份路径。它不修改配置和密钥，也不会自动重启服务。请自行重启对应 unit。客户端下次连接时使用新版本。系统安装由对该目录有写权限的人执行。
-
-多机更新使用 `fleettyctl update`。Hub 把每个安装包下载一次，再向外分发，包括经过登录节点转发。
-
-[单机安装与升级](docs/zh-CN/installation.md) · [批量部署与定时更新](docs/zh-CN/deployment.md)
-
-## 详细文档
+## 文档
 
 | 主题 | 文档 |
 | --- | --- |
 | 平台要求、安装、自更新与卸载 | [安装与升级](docs/zh-CN/installation.md) |
 | 页面、逐核 CPU、频率、网络与存储地图 | [使用指南](docs/zh-CN/usage.md) |
 | 终端主题、自动跟随与 prompt 配色 | [Ghostty 与主题](docs/zh-CN/themes.md) |
-| 多服务器与节点认证 | [Hub](docs/zh-CN/hub.md) |
+| 多服务器，以及节点如何认证 Hub | [Hub](docs/zh-CN/hub.md) |
 | 多集群、作业状态、QOS 与窄屏队列 | [Slurm](docs/zh-CN/slurm.md) |
 | Docker、PM2、挂载点与 HTTP 检查 | [NAS 与服务监控](docs/zh-CN/nas.md) |
 | 幂等安装、fleet manifest 与分层更新 | [部署与运维](docs/zh-CN/deployment.md) |
@@ -174,9 +197,9 @@ fleetty update --version v0.1.4    # a specific tag
 | 配置项、服务日志与常见问题 | [配置与故障排查](docs/zh-CN/configuration.md) |
 | 采集频率、连接复用与历史数据 | [采集与性能](docs/zh-CN/performance.md) |
 
-## 从源码构建
+## 参与贡献
 
-Go 版本以 [go.mod](go.mod) 为准。
+欢迎报告问题，也欢迎拉取请求。见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。标志、配置项或可见行为有变化时，请在同一个拉取请求里同时更新英文和中文文档。
 
 ```bash
 go test -race ./...
@@ -185,9 +208,7 @@ go build -o fleetty ./cmd/fleetty
 go build -o fleettyctl ./cmd/fleettyctl
 ```
 
-## 参与贡献
-
-见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。欢迎报告问题和提交拉取请求。标志、配置项或可见行为有变化时，请同时更新英文和中文文档。
+Go 版本以 [go.mod](go.mod) 为准。
 
 ## 许可证
 
