@@ -282,16 +282,15 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 				}
 			}
 			gpuCardY := 2
-			nasHeadingY := gpuCardY + hubCardHeight
-			nasCardY := nasHeadingY + 1
+			cardWidth := model.cardWidth()
 			if index, ok := model.nodeAt(0, gpuCardY); !ok || index != 0 {
 				t.Fatalf("GPU card click resolved to index=%d ok=%t", index, ok)
 			}
-			if index, ok := model.nodeAt(0, nasCardY); !ok || index != 1 {
+			if index, ok := model.nodeAt(2*(cardWidth+1), gpuCardY); !ok || index != 1 {
 				t.Fatalf("NAS card click resolved to index=%d ok=%t", index, ok)
 			}
-			if _, ok := model.nodeAt(0, nasHeadingY); ok {
-				t.Fatal("NAS section heading should not be clickable")
+			if _, ok := model.nodeAt(0, gpuCardY-1); ok {
+				t.Fatal("group label should not be clickable")
 			}
 		}
 		if got := lipgloss.Height(rendered); got > size.height {

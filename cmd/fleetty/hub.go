@@ -571,8 +571,10 @@ type hubDisplayRow struct {
 }
 
 type hubGroupSpan struct {
-	group int
-	span  int
+	group  int
+	column int
+	span   int
+	label  bool
 }
 
 type hubPage struct {
@@ -1046,31 +1048,7 @@ func (m *hubModel) moveCursorHorizontal(delta int) {
 
 func (m *hubModel) pages() []hubPage {
 	columns := m.columns()
-	// Each group owns its rows. A new group always starts on the next row, so
-	// two headers never share a line and a wrapped tail is not mixed in.
-	var grid []hubDisplayRow
-	row := hubDisplayRow{}
-	flushRow := func() {
-		if len(row.nodes) == 0 {
-			return
-		}
-		grid = append(grid, row)
-		row = hubDisplayRow{}
-	}
-	for groupIndex, group := range m.nodeGroups() {
-		nodes := group.nodes
-		if len(nodes) == 0 {
-			continue
-		}
-		flushRow()
-		for len(nodes) > 0 {
-			take := min(columns, len(nodes))
-			row.headings = append(row.headings, hubGroupSpan{group: groupIndex, span: take})
-			row.nodes = append(row.nodes, nodes[:take]...)
-			nodes = nodes[take:]
-			flushRow()
-		}
-	}
+	grid := m.packedRows(columns)
 	heightBudget := max(hubCardHeight+1, max(10, m.height)-2)
 	var pages []hubPage
 	current := hubPage{}
@@ -1083,31 +1061,80 @@ func (m *hubModel) pages() []hubPage {
 		current = hubPage{}
 		usedHeight = 0
 	}
-
-	var previous []hubGroupSpan
 	for _, row := range grid {
-		heading := len(current.rows) == 0 || len(row.headings) > 1 || len(previous) != 1 || previous[0].group != row.headings[0].group
+		labels := rowGroupLabels(row, len(current.rows) == 0)
 		needed := hubCardHeight
-		if heading {
+		if len(labels) > 0 {
 			needed++
 		}
-		if usedHeight+needed > heightBudget {
+		if len(current.rows) > 0 && usedHeight+needed > heightBudget {
 			flush()
-			heading = true
+			labels = rowGroupLabels(row, true)
+			needed = hubCardHeight
+			if len(labels) > 0 {
+				needed++
+			}
 		}
-		if heading {
-			current.rows = append(current.rows, hubDisplayRow{headings: row.headings})
+		if len(labels) > 0 {
+			current.rows = append(current.rows, hubDisplayRow{headings: labels})
 			usedHeight++
 		}
-		current.rows = append(current.rows, hubDisplayRow{nodes: row.nodes})
+		current.rows = append(current.rows, hubDisplayRow{nodes: append([]int(nil), row.nodes...)})
 		usedHeight += hubCardHeight
-		previous = row.headings
 	}
 	flush()
 	if len(pages) == 0 {
 		pages = []hubPage{{}}
 	}
 	return pages
+}
+
+// packedRows fills each row left to right. A group continues in the next
+// group's slots, so a group's last row has no empty card.
+func (m *hubModel) packedRows(columns int) []hubDisplayRow {
+	if columns < 1 {
+		columns = 1
+	}
+	type item struct {
+		node, group int
+		origin      bool
+	}
+	var items []item
+	for groupIndex, group := range m.nodeGroups() {
+		for index, node := range group.nodes {
+			items = append(items, item{node: node, group: groupIndex, origin: index == 0})
+		}
+	}
+	var grid []hubDisplayRow
+	for start := 0; start < len(items); start += columns {
+		end := min(start+columns, len(items))
+		chunk := items[start:end]
+		row := hubDisplayRow{nodes: make([]int, len(chunk))}
+		for index, item := range chunk {
+			row.nodes[index] = item.node
+			if len(row.headings) == 0 || row.headings[len(row.headings)-1].group != item.group {
+				row.headings = append(row.headings, hubGroupSpan{
+					group: item.group, column: index, span: 1, label: item.origin,
+				})
+				continue
+			}
+			row.headings[len(row.headings)-1].span++
+		}
+		grid = append(grid, row)
+	}
+	return grid
+}
+
+func rowGroupLabels(row hubDisplayRow, pageStart bool) []hubGroupSpan {
+	var labels []hubGroupSpan
+	for _, span := range row.headings {
+		if !span.label && !(pageStart && span.column == 0) {
+			continue
+		}
+		span.label = true
+		labels = append(labels, span)
+	}
+	return labels
 }
 
 func (m *hubModel) clampCursor() {
@@ -1221,12 +1248,7 @@ func (m *hubModel) hubView() string {
 	groups := m.nodeGroups()
 	for _, row := range pages[pageIndex].rows {
 		if len(row.headings) > 0 {
-			var headings []string
-			for _, section := range row.headings {
-				group := groups[section.group]
-				headings = append(headings, renderHubSectionTitle(group.title, group.style, len(group.nodes), section.span*(cardWidth+1)-1))
-			}
-			rows = append(rows, strings.Join(headings, " "))
+			rows = append(rows, renderHubGroupLabels(groups, row.headings, cardWidth))
 			continue
 		}
 		var cards []string
@@ -1267,18 +1289,32 @@ func (m *hubModel) hubView() string {
 	return terminalFrame(body, footer, width, m.height)
 }
 
-func renderHubSectionTitle(title, _ string, count, width int) string {
-	unit := "NODES"
-	if count == 1 {
-		unit = "NODE"
+// renderHubGroupLabels places each new group's name above its first card.
+// Slots are one card wide, so two names on the same row cannot run together.
+func renderHubGroupLabels(groups []hubNodeGroup, spans []hubGroupSpan, cardWidth int) string {
+	last := 0
+	for _, span := range spans {
+		if span.column > last {
+			last = span.column
+		}
 	}
-	label := sectionStyle.Render(truncate(strings.TrimSpace(title), max(1, width)))
-	countLabel := dimStyle.Render(fmt.Sprintf("%d %s", count, unit))
-	if lipgloss.Width(label)+1+lipgloss.Width(countLabel) > width {
-		return ansi.Truncate(label, width, "")
+	slots := make([]string, last+1)
+	for index := range slots {
+		slots[index] = strings.Repeat(" ", cardWidth)
 	}
-	gap := strings.Repeat(" ", width-lipgloss.Width(label)-lipgloss.Width(countLabel))
-	return label + gap + countLabel
+	for _, span := range spans {
+		if span.column < 0 || span.column >= len(slots) || span.group < 0 || span.group >= len(groups) {
+			continue
+		}
+		plain := truncate(strings.TrimSpace(groups[span.group].title), cardWidth)
+		styled := sectionStyle.Render(plain)
+		pad := cardWidth - lipgloss.Width(styled)
+		if pad < 0 {
+			pad = 0
+		}
+		slots[span.column] = styled + strings.Repeat(" ", pad)
+	}
+	return strings.Join(slots, " ")
 }
 
 func (m *hubModel) renderNodeCard(index, width int) string {

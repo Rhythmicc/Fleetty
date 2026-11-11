@@ -249,63 +249,56 @@ func TestHubPackedGroupsAndPagination(t *testing.T) {
 			}
 		}
 	}
-	// A wrapped GPU tail stays on its own row. Each group header is printed once
-	// per page, and two headers never share a line.
+	// Cards pack left to right across groups. A label stays inside its card
+	// column, so two group names can share a row without running together.
 	for _, width := range []int{140, 187, 220, 238} {
 		m := compactTestHub(width, 48)
+		var rows [][]int
 		var plain string
-		for pageIndex := range m.pages() {
+		for pageIndex, page := range m.pages() {
 			m.offset = pageIndex
 			plain += ansi.Strip(m.hubView()) + "\n"
-			if err := hubRowsAreContiguous(m.pageNodeRows(m.pages()[pageIndex]), m.nodeGroups()); err != nil {
-				t.Fatalf("width %d page %d: %v", width, pageIndex, err)
-			}
+			rows = append(rows, m.pageNodeRows(page)...)
 		}
-		if strings.Count(plain, "GPU COMPUTE") != 1 {
-			t.Fatalf("width %d repeated the GPU header:\n%s", width, plain)
+		if err := hubRowsArePacked(rows, m.nodeGroups(), m.columns()); err != nil {
+			t.Fatalf("width %d: %v", width, err)
 		}
-		if strings.Count(plain, "CPU COMPUTE") != 1 || strings.Count(plain, "CLUSTER SERVICES") != 1 {
-			t.Fatalf("width %d lost a group header:\n%s", width, plain)
+		if strings.Count(plain, "GPU COMPUTE") != 1 || strings.Count(plain, "CPU COMPUTE") != 1 || strings.Count(plain, "CLUSTER SERVICES") != 1 {
+			t.Fatalf("width %d lost or repeated a group label:\n%s", width, plain)
 		}
 		for _, line := range strings.Split(plain, "\n") {
-			if strings.Contains(line, "CPU COMPUTE") && strings.Contains(line, "CLUSTER SERVICES") {
-				t.Fatalf("width %d put two group headers on one row: %s", width, line)
+			cpu := strings.Index(line, "CPU COMPUTE")
+			services := strings.Index(line, "CLUSTER SERVICES")
+			if cpu >= 0 && services >= 0 && services-cpu < len("CPU COMPUTE")+2 {
+				t.Fatalf("width %d jammed two group labels: %s", width, line)
 			}
+		}
+		if width == 140 && (m.columns() != 3 || len(m.pages()) != 1) {
+			t.Fatalf("140x48 columns=%d pages=%d", m.columns(), len(m.pages()))
 		}
 	}
 }
 
-func hubRowsAreContiguous(rows [][]int, groups []hubNodeGroup) error {
-	groupOf := map[int]int{}
-	for index, group := range groups {
-		for _, node := range group.nodes {
-			groupOf[node] = index
-		}
-	}
-	appeared := map[int]bool{}
-	last := -1
-	for _, row := range rows {
+func hubRowsArePacked(rows [][]int, groups []hubNodeGroup, columns int) error {
+	var got, want []int
+	for index, row := range rows {
 		if len(row) == 0 {
 			return fmt.Errorf("empty card row")
 		}
-		present := map[int]bool{}
-		for _, node := range row {
-			group := groupOf[node]
-			if group < last && !present[group] {
-				return fmt.Errorf("node %d returns to an earlier group", node)
-			}
-			present[group] = true
-			last = group
+		if index < len(rows)-1 && len(row) != columns {
+			return fmt.Errorf("row %d left a hole: %v", index, row)
 		}
-		if len(present) > 1 {
-			for group := range present {
-				if appeared[group] {
-					return fmt.Errorf("group %d continues into a mixed row", group)
-				}
-			}
-		}
-		for group := range present {
-			appeared[group] = true
+		got = append(got, row...)
+	}
+	for _, group := range groups {
+		want = append(want, group.nodes...)
+	}
+	if len(got) != len(want) {
+		return fmt.Errorf("packed %d nodes, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			return fmt.Errorf("packed order %v, want %v", got, want)
 		}
 	}
 	return nil
