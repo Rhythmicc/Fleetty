@@ -1695,7 +1695,7 @@ func (m *hubModel) renderSlurmClusterCard(index, width, contentLines int) string
 	border := colorGPUBorder
 	if index == m.slurmFilter {
 		titleForCard = accentStyle
-		border = lipgloss.Color("#B9A4FF")
+		border = colorBorderFocus
 	}
 	meta := "CHECKING"
 	content := fitSlurmClusterCardLines([]string{
@@ -2060,7 +2060,7 @@ func (m *monitorModel) slurmNodePanel(width, rowLimit int) string {
 	border := colorProcessBorder
 	if m.monitorFocus == monitorFocusQueue {
 		titleForPanel = accentStyle
-		border = lipgloss.Color("#B9A4FF")
+		border = colorBorderFocus
 	}
 	return btopPanel(width, "NODE QUEUE", meta, strings.Join(lines, "\n"), titleForPanel, border)
 }

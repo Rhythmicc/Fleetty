@@ -230,26 +230,16 @@ func networkConnectionHeader(width int) string {
 
 // These are absolute traffic levels, not link saturation or health alarms:
 // the speed of a socket's underlying link is not known here.
-func networkRateStyle(rate uint64, available bool, direction lipgloss.Style) lipgloss.Style {
-	switch {
-	case !available || rate < 1024:
+func networkRateStyle(rate uint64, available bool, _ lipgloss.Style) lipgloss.Style {
+	// A fast socket is not a fault. Only a missing sample stays muted.
+	if !available || rate < 1024 {
 		return dimStyle
-	case rate >= 10*1024*1024:
-		return diskTitleStyle
-	case rate >= 1024*1024:
-		return warningStyle
-	case rate >= 100*1024:
-		return cpuTitleStyle
-	default:
-		return direction
 	}
+	return valueStyle
 }
 
 func networkConnectionRateLegend(width int) string {
-	return ansi.Truncate(dimStyle.Render("↓ DOWN+UP · RATE/s ")+
-		dimStyle.Render("<1KiB ")+networkRXStyle.Render("1KiB+ ")+
-		cpuTitleStyle.Render("100KiB+ ")+warningStyle.Render("1MiB+ ")+
-		diskTitleStyle.Render("10MiB+"), width, "")
+	return ansi.Truncate(dimStyle.Render("↓ DOWN+UP · rates are per second"), width, "")
 }
 
 func renderNetworkConnectionRow(connection networkConnectionInfo, width int) string {

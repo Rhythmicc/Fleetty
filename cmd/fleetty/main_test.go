@@ -127,14 +127,14 @@ func TestThemeSelectionIsSessionLocal(t *testing.T) {
 	}
 }
 
-func TestProcessHeaderHasHighContrastInBothThemes(t *testing.T) {
+func TestProcessHeaderIsMutedInBothThemes(t *testing.T) {
 	dark := processTableHeader("PID  USER  CPU  COMMAND", 50)
-	if !strings.Contains(dark, "38;2;16;19;26") || !strings.Contains(dark, "48;2;159;195;255") {
-		t.Fatalf("dark process header should use dark text on a bright background: %q", dark)
+	if !strings.Contains(dark, "38;2;156;163;188") || strings.Contains(dark, "48;2;") {
+		t.Fatalf("dark process header should be muted text without a filled background: %q", dark)
 	}
 	light := applyLightTheme(dark)
-	if !strings.Contains(light, "38;2;248;250;252") || !strings.Contains(light, "48;2;49;93;145") {
-		t.Fatalf("light process header should use light text on a dark background: %q", light)
+	if !strings.Contains(light, "38;2;91;100;117") {
+		t.Fatalf("light process header should stay muted: %q", light)
 	}
 }
 
@@ -281,14 +281,16 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 					t.Fatalf("%dx%d Hub missing section %q\n%s", size.width, size.height, section, rendered)
 				}
 			}
-			if index, ok := model.nodeAt(0, 2); !ok || index != 0 {
+			gpuCardY := 2
+			cardWidth := model.cardWidth()
+			if index, ok := model.nodeAt(0, gpuCardY); !ok || index != 0 {
 				t.Fatalf("GPU card click resolved to index=%d ok=%t", index, ok)
 			}
-			if index, ok := model.nodeAt(0, 10); !ok || index != 1 {
+			if index, ok := model.nodeAt(2*(cardWidth+1), gpuCardY); !ok || index != 1 {
 				t.Fatalf("NAS card click resolved to index=%d ok=%t", index, ok)
 			}
-			if _, ok := model.nodeAt(0, 9); ok {
-				t.Fatal("NAS section heading should not be clickable")
+			if _, ok := model.nodeAt(0, gpuCardY-1); ok {
+				t.Fatal("group label should not be clickable")
 			}
 		}
 		if got := lipgloss.Height(rendered); got > size.height {
@@ -1037,8 +1039,8 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 		}
 	}
 
-	hubCard := strings.Join(renderNASHubCard(model.snapshot), "\n")
-	for _, expected := range []string{"TOTAL", "DISK", "HTTP", "CTR", "PM2"} {
+	hubCard := ansi.Strip(strings.Join(renderNASHubCard(nil, model.snapshot, 42), "\n"))
+	for _, expected := range []string{"DSK", "HTTP 1/1", "CTR 1/1", "PM2 1/1", "↓", "↑"} {
 		if !strings.Contains(hubCard, expected) {
 			t.Fatalf("NAS Hub card missing %q: %s", expected, hubCard)
 		}
@@ -1420,6 +1422,7 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 		},
 	}
 	rendered := model.monitorView()
+	plain := ansi.Strip(rendered)
 	for _, expected := range []string{
 		"1 OVERVIEW", "2 COMPUTE", "3 NETWORK",
 		"BAT 80% AC", "Caps: ", "GPU,Metal,UMA", "macOS 15.5",
@@ -1428,8 +1431,8 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [2 COMPUTE]",
 		"12 logical CPUs", "(1m 5m 15m)", "HIST · RX B/s", "PEAK",
 	} {
-		if !strings.Contains(rendered, expected) {
-			t.Fatalf("designed overview missing %q:\n%s", expected, rendered)
+		if !strings.Contains(plain, expected) {
+			t.Fatalf("designed overview missing %q:\n%s", expected, plain)
 		}
 	}
 	for _, duplicate := range []string{"SYSTEM TIMELINE", "GPU / COMPUTE SUMMARY"} {
@@ -2814,8 +2817,8 @@ func TestGPUComputeColumnsStayAlignedAndLiveSignalsChangeColor(t *testing.T) {
 	if len(workloadRows) != 2 || strings.Index(workloadRows[0], "JOB") != strings.Index(workloadRows[1], "JOB") {
 		t.Fatalf("GPU workload rows are not aligned: %#v", workloadRows)
 	}
-	if gpuClockStyle(345).Render("CLK") == gpuClockStyle(1980).Render("CLK") {
-		t.Fatal("low and high GPU clocks should use different colors")
+	if gpuClockStyle(345).Render("CLK") != gpuClockStyle(1980).Render("CLK") {
+		t.Fatal("clock speed should stay neutral instead of implying a health state")
 	}
 	if gpuTemperatureStyle(40).Render("TEMP") == gpuTemperatureStyle(85).Render("TEMP") {
 		t.Fatal("cool and hot GPU temperatures should use different colors")

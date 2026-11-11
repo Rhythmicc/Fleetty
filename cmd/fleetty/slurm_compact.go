@@ -1,7 +1,6 @@
 package main
 
 import (
-	"hash/fnv"
 	"sort"
 	"strings"
 
@@ -65,25 +64,13 @@ func (f compactSlurmFormat) render(display slurmDisplayJob, header bool, base li
 }
 
 func slurmQOSStyle(qos string) lipgloss.Style {
-	name := strings.ToLower(slurmQOSLabel(qos))
-	switch name {
-	case "-", "low":
-		return dimStyle
-	case "normal":
-		return networkRXStyle
+	switch strings.ToLower(slurmQOSLabel(qos)) {
 	case "high":
 		return warningStyle
 	case "urgent":
 		return dangerStyle
-	case "long":
-		return gpuTitleStyle
 	default:
-		// Arbitrary site-defined QOS names get stable colors, independent of
-		// queue order, filtering, and which jobs are currently visible.
-		palette := []lipgloss.Style{cpuTitleStyle, memoryTitleStyle, diskTitleStyle, networkTXStyle, networkRXStyle, warningStyle}
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(name))
-		return palette[int(h.Sum32())%len(palette)]
+		return dimStyle
 	}
 }
 

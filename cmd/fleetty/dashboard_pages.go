@@ -120,14 +120,20 @@ func (m *monitorModel) renderMonitorPageHeader(width int) string {
 	capabilities := m.capabilities()
 	if capabilities.Battery {
 		battery := m.snapshot.Battery
-		batteryText := fmt.Sprintf("BAT %.0f%%", battery.Percent)
+		batteryText := ""
 		if battery.PowerSource != "" {
 			batteryText += " " + compactPowerSource(battery.PowerSource)
 		}
 		if battery.TimeRemaining != "" {
 			batteryText += " " + battery.TimeRemaining
 		}
-		capabilityLabels = append(capabilityLabels, batteryTitleStyle.Render(batteryText))
+		percentStyle := valueStyle
+		if level := batteryLevel(battery.Percent); level != stateOK {
+			percentStyle = stateStyle(level)
+		}
+		capabilityLabels = append(capabilityLabels, dimStyle.Render("BAT ")+
+			percentStyle.Render(fmt.Sprintf("%.0f%%", battery.Percent))+
+			dimStyle.Render(batteryText))
 	}
 	if capabilities.GPU {
 		names := []string{"GPU"}
@@ -168,7 +174,7 @@ func (m *monitorModel) renderMonitorPageHeader(width int) string {
 		label := fmt.Sprintf("%d %s", index+1, page.label())
 		rendered := dimStyle.Render("[" + label + "]")
 		if m.monitorPage == page {
-			rendered = liveBadgeStyle.Render("[" + label + "]")
+			rendered = keycapStyle.Render("[" + label + "]")
 		}
 		if len(tabParts) > 0 {
 			tabParts = append(tabParts, "  ")
@@ -382,7 +388,7 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 	diskFree := counterDelta(m.snapshot.DiskTotal, m.snapshot.DiskUsed)
 	memoryState, memoryStateStyle := healthStatus(memoryUsage)
 	diskState, diskStateStyle := capacityStatus(diskUsage)
-	cpuHistoryLine := strings.Join(renderHistoryChart(m.cpuHistory, max(4, width-4), historyPlotHeight, "CPU %", 100, cpuTitleStyle), "\n")
+	cpuHistoryLine := strings.Join(renderHistoryChart(m.cpuHistory, max(4, width-4), historyPlotHeight, "CPU %", 100, chartStyle), "\n")
 	lines := []string{
 		fmt.Sprintf("%s  %s  %s",
 			cpuTitleStyle.Render("CPU"),
@@ -422,7 +428,7 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 	}
 	return pagePanelSpec{
 		title: "HOST HEALTH", meta: "CURRENT",
-		lines: strings.Split(strings.Join(lines, "\n"), "\n"), titleStyle: processRunningStyle, borderColor: colorPanelBorder,
+		lines: strings.Split(strings.Join(lines, "\n"), "\n"), titleStyle: sectionStyle, borderColor: colorBorder,
 	}
 }
 
@@ -475,7 +481,7 @@ func (m *monitorModel) overviewCPUHeader(width int) []string {
 	}
 	lines := []string{hardware, ansi.Truncate(readings, width, "…"), ansi.Truncate(trend, width, "…")}
 	if historyWidth > 0 {
-		history := renderHistoryChart(m.cpuHistory, historyWidth, historyPlotHeight, "CPU %", 100, cpuTitleStyle)
+		history := renderHistoryChart(m.cpuHistory, historyWidth, historyPlotHeight, "CPU %", 100, chartStyle)
 		return historyColumns(lines, history, width)
 	}
 	return lines
@@ -511,16 +517,7 @@ func pageRule(width int) string {
 }
 
 func healthStatus(usage float64) (string, lipgloss.Style) {
-	switch {
-	case usage >= 90:
-		return "CRITICAL", dangerStyle
-	case usage >= 80:
-		return "HIGH", processWaitingStyle
-	case usage >= 70:
-		return "WATCH", warningStyle
-	default:
-		return "HEALTHY", processRunningStyle
-	}
+	return capacityStatus(usage)
 }
 
 func (m *monitorModel) computeActivityPanelSpec(width int) pagePanelSpec {
@@ -630,7 +627,7 @@ func multiGPUOverviewRow(gpu gpuInfo, width int) string {
 	memoryStyle := gpuLoadStyle(memoryUsage)
 	memory := compactByteCount(gpu.MemoryUsed) + "/" + compactByteCount(gpu.MemoryTotal)
 	job := gpuOverviewWorkload(gpu)
-	id := accentStyle.Render(fmt.Sprintf("%d", gpu.Index))
+	id := valueStyle.Render(fmt.Sprintf("%d", gpu.Index))
 	model := shortGPUName(gpu.Name)
 	var row string
 	switch {
@@ -639,15 +636,15 @@ func multiGPUOverviewRow(gpu gpuInfo, width int) string {
 			fixedCell(model, 17, false) + " " +
 			fixedCell(load, 12, false) + " " +
 			memoryStyle.Render(fixedCell(memory, 15, false)) + " " +
-			statusStyle.Render(fixedCell(fmt.Sprintf("%.0fW", gpu.Power), 6, true)) + " " +
-			statusStyle.Render(fixedCell(fmt.Sprintf("%d°C", gpu.Temperature), 5, true)) + " " +
-			gpuTitleStyle.Render(job)
+			valueStyle.Render(fixedCell(fmt.Sprintf("%.0fW", gpu.Power), 6, true)) + " " +
+			gpuTemperatureStyle(gpu.Temperature).Render(fixedCell(fmt.Sprintf("%d°C", gpu.Temperature), 5, true)) + " " +
+			valueStyle.Render(job)
 	case width >= 50:
 		row = fixedCell(id, 3, false) + " " +
 			fixedCell(model, 14, false) + " " +
 			fixedCell(load, 11, false) + " " +
 			memoryStyle.Render(fixedCell(memory, 13, false)) + " " +
-			gpuTitleStyle.Render(job)
+			valueStyle.Render(job)
 	default:
 		left := fixedCell(id, 3, false) + " " + model
 		right := statusStyle.Render(fmt.Sprintf("%.0f%%", gpu.Utilization)) + " " +

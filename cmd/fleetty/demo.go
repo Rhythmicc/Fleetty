@@ -85,7 +85,7 @@ func demoSize(screen string) (int, int) {
 	case "nas":
 		return 184, 33
 	default:
-		return 140, 25
+		return 140, 48
 	}
 }
 
@@ -122,20 +122,10 @@ func demoHub(mode colorMode, width, height int) *hubModel {
 		RefreshSeconds: 1,
 		Groups: []hubGroupConfig{
 			{ID: "gpu", Title: "GPU COMPUTE", Style: hubGroupStyleGPU},
-			{ID: "cpu", Title: "CPU", Style: hubGroupStyleCPU},
-			{ID: "storage", Title: "STORAGE", Style: hubGroupStyleNetwork},
+			{ID: "cpu", Title: "CPU COMPUTE", Style: hubGroupStyleCPU},
+			{ID: "services", Title: "CLUSTER SERVICES", Style: hubGroupStyleNetwork},
 		},
-		Nodes: []hubNodeConfig{
-			{Name: "gpu-a01", Group: "gpu", Address: "192.0.2.11:23234", Profile: machineProfileGPU, Description: "Training"},
-			{Name: "gpu-a02", Group: "gpu", Address: "192.0.2.12:23234", Profile: machineProfileGPU, Description: "Fine-tune"},
-			{Name: "gpu-a03", Group: "gpu", Address: "192.0.2.13:23234", Profile: machineProfileGPU, Description: "Inference"},
-			{Name: "gpu-b01", Group: "gpu", Address: "192.0.2.21:23234", Profile: machineProfileGPU, Description: "Batch jobs"},
-			{Name: "gpu-b02", Group: "gpu", Address: "192.0.2.22:23234", Profile: machineProfileGPU, Description: "Embeddings"},
-			{Name: "gpu-c01", Group: "gpu", Address: "192.0.2.23:23234", Profile: machineProfileGPU, Description: "Pretrain"},
-			{Name: "cpu-01", Group: "cpu", Address: "192.0.2.31:23234", Profile: machineProfileCPU, Description: "Build agents"},
-			{Name: "cpu-02", Group: "cpu", Address: "192.0.2.32:23234", Profile: machineProfileCPU, Description: "Compile"},
-			{Name: "storage-01", Group: "storage", Address: "192.0.2.41:23234", Profile: machineProfileNAS, Description: "Shared data"},
-		},
+		Nodes: demoHubNodes(),
 		SlurmClusters: []slurmClusterConfig{
 			{Name: "Acme GPU"},
 			{Name: "Acme CPU"},
@@ -155,35 +145,214 @@ func demoHub(mode colorMode, width, height int) *hubModel {
 	return model
 }
 
+func demoHubNodes() []hubNodeConfig {
+	names := []struct {
+		name, group, profile string
+	}{
+		{"gpu-a01", "gpu", machineProfileGPU},
+		{"gpu-a02", "gpu", machineProfileGPU},
+		{"gpu-a03", "gpu", machineProfileGPU},
+		{"gpu-b01", "gpu", machineProfileGPU},
+		{"gpu-b02", "gpu", machineProfileGPU},
+		{"gpu-b03", "gpu", machineProfileGPU},
+		{"gpu-c01", "gpu", machineProfileGPU},
+		{"gpu-c02", "gpu", machineProfileGPU},
+		{"gpu-d01", "gpu", machineProfileGPU},
+		{"gpu-d02", "gpu", machineProfileGPU},
+		{"gpu-d03", "gpu", machineProfileGPU},
+		{"gpu-e01", "gpu", machineProfileGPU},
+		{"gpu-e02", "gpu", machineProfileGPU},
+		{"cpu-01", "cpu", machineProfileCPU},
+		{"storage-01", "services", machineProfileNAS},
+		{"edge-01", "services", machineProfileGPU},
+	}
+	nodes := make([]hubNodeConfig, len(names))
+	for index, item := range names {
+		node := hubNodeConfig{
+			Name: item.name, Group: item.group, Profile: item.profile,
+			Address: fmt.Sprintf("192.0.2.%d:23234", 11+index),
+		}
+		if item.name == "gpu-a01" || item.name == "gpu-b03" {
+			node.SlurmCluster = "Acme GPU"
+			node.SlurmNode = item.name
+		}
+		nodes[index] = node
+	}
+	return nodes
+}
+
 func demoHubStates(now time.Time) []hubNodeState {
-	offline := hubNodeState{
-		Error:     "timed out waiting for 192.0.2.23:23234",
-		Checked:   now,
-		LastSeen:  now.Add(-4*time.Minute - 12*time.Second),
-		NextRetry: now.Add(18 * time.Second),
+	offline := func(host string) hubNodeState {
+		return hubNodeState{
+			Error:     "dial tcp " + host + ":23234: i/o timeout",
+			Checked:   now,
+			LastSeen:  now.Add(-2 * time.Minute),
+			NextRetry: now.Add(26 * time.Second),
+		}
+	}
+	gpu := func(name string, latency time.Duration, cpu, mem, disk, util float64, count, temp int) hubNodeState {
+		gpus := make([]gpuInfo, count)
+		for index := range gpus {
+			used := util / 100 * 48
+			gpus[index] = demoGPU(index, "NVIDIA L40S", 48, used, util, temp, 1400, 120, 300, "", "")
+		}
+		if count > 0 && util > 50 {
+			gpus[0].Workloads = []gpuWorkloadInfo{{PID: 4800, User: "alice", Name: "train.py", MemoryUsed: gib(usedOr(util))}}
+		}
+		state := demoOnline(now, latency, demoGPUSnapshot(now, name, cpu, mem, disk, gpus))
+		state.Spark = demoSpark(demoPattern(name), cpu, mem, disk, util)
+		return state
 	}
 	return []hubNodeState{
-		demoOnline(now, 18*time.Millisecond, demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, 86, 14, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
-			demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
-		})),
-		demoOnline(now, 24*time.Millisecond, demoGPUSnapshot(now, "gpu-a02", 81, 64, 38, 42, 9, []gpuInfo{
-			demoGPU(0, "NVIDIA H100 80GB", 80, 74, 98, 88, 1980, 640, 700, "alice", "finetune.py"),
-		})),
-		demoOnline(now, 31*time.Millisecond, demoGPUSnapshot(now, "gpu-a03", 34, 48, 29, 11, 4, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 12, 28, 49, 1410, 120, 300, "bob", "infer.py"),
-		})),
-		demoOnline(now, 44*time.Millisecond, demoGPUSnapshot(now, "gpu-b01", 11, 22, 18, 2.4, 0.8, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 3, 6, 41, 600, 70, 300, "", ""),
-		})),
-		demoOnline(now, 27*time.Millisecond, demoGPUSnapshot(now, "gpu-b02", 46, 55, 33, 19, 7, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 29, 63, 68, 2100, 210, 300, "carol", "embed.py"),
-		})),
-		offline,
-		demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 71, "load 8.42  6.10  4.88", 58, 37, 6.2, 1.4)),
-		demoOnline(now, 15*time.Millisecond, demoCPUSnapshot(now, "cpu-02", 16, 18, "load 1.20  0.94  0.81", 31, 24, 0.4, 0.2)),
-		demoOnline(now, 22*time.Millisecond, demoNASSnapshot(now)),
+		func() hubNodeState {
+			state := demoOnline(now, 18*time.Millisecond, demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, []gpuInfo{
+				demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
+				demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
+			}))
+			state.Spark = demoSpark("busy", 62, 71, 44, 91)
+			state.Snapshot.Processes = []processInfo{{
+				PID: 4812, User: "alice", State: "R", Command: "train.py", CPU: 186, Elapsed: 5*3600 + 12*60,
+			}}
+			// 2 Gbps puts 86 MiB/s in the green band and leaves 14 MiB/s neutral.
+			state.Snapshot.NetworkInterfaces = []networkInterfaceInfo{{
+				Name: "eth0", RX: state.Snapshot.NetworkRX, TX: state.Snapshot.NetworkTX, SpeedMbps: 2000,
+			}}
+			return state
+		}(),
+		gpu("gpu-a02", 24*time.Millisecond, 11, 22, 18, 4, 1, 42),
+		gpu("gpu-a03", 31*time.Millisecond, 8, 19, 21, 0, 2, 39),
+		gpu("gpu-b01", 44*time.Millisecond, 6, 14, 17, 2, 1, 41),
+		func() hubNodeState {
+			state := gpu("gpu-b02", 27*time.Millisecond, 4, 28, 22, 0, 1, 37)
+			// 50 Mbps makes the 6.2 MiB/s transmit a large share of the link.
+			state.Snapshot.NetworkInterfaces = []networkInterfaceInfo{{
+				Name: "eth0", RX: state.Snapshot.NetworkRX, TX: state.Snapshot.NetworkTX, SpeedMbps: 50,
+			}}
+			return state
+		}(),
+		gpu("gpu-b03", 36*time.Millisecond, 15, 33, 26, 67, 4, 87),
+		offline("192.0.2.17"),
+		offline("192.0.2.18"),
+		gpu("gpu-d01", 26*time.Millisecond, 3, 18, 20, 0, 2, 78),
+		gpu("gpu-d02", 19*time.Millisecond, 2, 11, 16, 1, 1, 38),
+		gpu("gpu-d03", 22*time.Millisecond, 5, 16, 19, 0, 1, 40),
+		func() hubNodeState {
+			state := gpu("gpu-e01", 29*time.Millisecond, 9, 21, 24, 3, 1, 44)
+			state.Snapshot.GPUs[0].MemoryUsed = uint64(float64(state.Snapshot.GPUs[0].MemoryTotal) * 0.76)
+			return state
+		}(),
+		gpu("gpu-e02", 33*time.Millisecond, 7, 24, 18, 0, 1, 41),
+		func() hubNodeState {
+			state := demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 18, "load 1.20  0.94  0.81", 31, 24))
+			state.Spark = demoSpark("wave", 18, 31, 24, 0)
+			state.Snapshot.Processes = []processInfo{{
+				PID: 3300, User: "carol", State: "R", Command: "compile", CPU: 18, Elapsed: 2*3600 + 13*60,
+			}}
+			return state
+		}(),
+		func() hubNodeState {
+			state := demoOnline(now, 22*time.Millisecond, demoNASSnapshot(now))
+			state.Spark = demoSpark("disk", 23, 37.5, 87.5, 0)
+			return state
+		}(),
+		gpu("edge-01", 16*time.Millisecond, 7, 61, 12, 0, 1, 41),
 	}
+}
+
+func demoPattern(name string) string {
+	switch name {
+	case "gpu-b01":
+		return "saw"
+	case "gpu-b03":
+		return "burst"
+	case "gpu-d03":
+		return "climb"
+	case "gpu-e01":
+		return "wave"
+	case "gpu-a03", "gpu-d02", "gpu-e02":
+		return "flat"
+	case "edge-01":
+		return "mem"
+	default:
+		return "idle"
+	}
+}
+
+func demoSpark(pattern string, cpu, mem, disk, gpu float64) []hubSparkSample {
+	samples := make([]hubSparkSample, hubSparkCap)
+	for index := range samples {
+		x := float64(index)
+		switch pattern {
+		case "busy":
+			samples[index] = hubSparkSample{
+				CPU:  clampSpark(cpu*0.55 + 16*math.Sin(x/3.1)),
+				Mem:  clampSpark(mem*0.9 + 4*math.Sin(x/4.8)),
+				Disk: disk,
+				GPU:  clampSpark(gpu*0.72 + 10*math.Sin(x/2.6+0.7)),
+			}
+		case "burst":
+			spike := 0.0
+			if index > len(samples)-16 && index < len(samples)-5 {
+				spike = 1
+			}
+			samples[index] = hubSparkSample{
+				CPU: clampSpark(3 + spike*cpu), Mem: mem, Disk: disk,
+				GPU: clampSpark(1 + spike*gpu),
+			}
+		case "climb":
+			fraction := x / float64(len(samples)-1)
+			samples[index] = hubSparkSample{CPU: cpu * fraction, Mem: mem, Disk: disk, GPU: gpu * fraction}
+		case "wave":
+			samples[index] = hubSparkSample{
+				CPU:  clampSpark(cpu*0.35 + cpu*0.65*math.Sin(x/3.4+1.2)),
+				Mem:  mem,
+				Disk: disk,
+				GPU:  clampSpark(6 + 28*math.Sin(x/2.8)),
+			}
+		case "mem":
+			samples[index] = hubSparkSample{
+				CPU: clampSpark(2 + 3*math.Sin(x/5)), Mem: clampSpark(mem*0.75 + 12*math.Sin(x/3.6)),
+				Disk: disk, GPU: clampSpark(0.5 + math.Sin(x/4)),
+			}
+		case "disk":
+			samples[index] = hubSparkSample{
+				CPU: 6, Mem: 28, Disk: clampSpark(disk*0.9 + 5*math.Sin(x/6.5)), GPU: 0,
+			}
+		case "saw":
+			samples[index] = hubSparkSample{
+				CPU: clampSpark(4 + float64(index%18)*2.2), Mem: mem, Disk: disk,
+				GPU: clampSpark(2 + float64(index%24)*1.4),
+			}
+		case "flat":
+			samples[index] = hubSparkSample{CPU: 0.4, Mem: 2, Disk: 1, GPU: 0.3}
+		default:
+			samples[index] = hubSparkSample{
+				CPU:  clampSpark(cpu*0.12 + 0.4*math.Sin(x/2+cpu)),
+				Mem:  mem,
+				Disk: disk,
+				GPU:  clampSpark(gpu*0.15 + 0.3*math.Sin(x/3+mem)),
+			}
+		}
+	}
+	samples[len(samples)-1] = hubSparkSample{CPU: cpu, Mem: mem, Disk: disk, GPU: gpu}
+	return samples
+}
+
+func clampSpark(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func usedOr(util float64) float64 {
+	if util <= 0 {
+		return 1
+	}
+	return util / 100 * 20
 }
 
 func demoOnline(now time.Time, latency time.Duration, snapshot monitorSnapshot) hubNodeState {
@@ -197,14 +366,56 @@ func demoOnline(now time.Time, latency time.Duration, snapshot monitorSnapshot) 
 
 func demoSlurmStates(now time.Time) []slurmClusterState {
 	return []slurmClusterState{
-		{Snapshot: slurmSnapshot{Name: "Acme GPU", CollectedAt: now}, Latency: 40 * time.Millisecond, Checked: now, LastSeen: now},
+		{Snapshot: slurmSnapshot{
+			Name: "Acme GPU", CollectedAt: now,
+			Jobs: []slurmJob{
+				{ID: "18421", Name: "protein-fold", User: "alice", State: "RUNNING", Elapsed: "5:12:08", NodeList: "gpu-a01", Partition: "gpu"},
+				{ID: "18455", Name: "embed-corpus", User: "bob", State: "RUNNING", Elapsed: "2:04:41", NodeList: "gpu-b03", Partition: "gpu"},
+			},
+		}, Latency: 40 * time.Millisecond, Checked: now, LastSeen: now},
 		{Snapshot: slurmSnapshot{Name: "Acme CPU", CollectedAt: now}, Latency: 55 * time.Millisecond, Checked: now, LastSeen: now},
 	}
 }
 
-func demoGPUSnapshot(now time.Time, name string, cpu, memoryPercent, diskPercent, rxMiB, txMiB float64, gpus []gpuInfo) monitorSnapshot {
+func demoIO(name string) (rx, tx, read, write float64) {
+	switch name {
+	case "gpu-a01":
+		return 86, 14, 210, 64
+	case "gpu-a02":
+		return 1.4, 0.3, 6, 1.1
+	case "gpu-a03":
+		return 0.2, 0.08, 0.4, 0.1
+	case "gpu-b01":
+		return 22, 3.4, 40, 8
+	case "gpu-b02":
+		return 0.7, 6.2, 1.5, 19
+	case "gpu-b03":
+		return 48, 9.5, 96, 24
+	case "gpu-d01":
+		return 3.2, 0.6, 12, 2.4
+	case "gpu-d02":
+		return 0.35, 0.15, 0.8, 0.2
+	case "gpu-d03":
+		return 6.8, 1.1, 18, 4.5
+	case "gpu-e01":
+		return 18, 2.6, 33, 7
+	case "gpu-e02":
+		return 0.5, 0.4, 2.2, 0.6
+	case "cpu-01":
+		return 12.3, 1.2, 40, 8
+	case "edge-01":
+		return 2.7, 0.9, 4.4, 1.3
+	case "storage-01":
+		return 116, 18, 180, 42
+	default:
+		return 1, 0.2, 1, 0.2
+	}
+}
+
+func demoGPUSnapshot(now time.Time, name string, cpu, memoryPercent, diskPercent float64, gpus []gpuInfo) monitorSnapshot {
 	memoryTotal := gib(512)
 	diskTotal := gib(3600)
+	rx, tx, read, write := demoIO(name)
 	return monitorSnapshot{
 		CollectedAt:    now,
 		Profile:        machineProfileGPU,
@@ -220,17 +431,20 @@ func demoGPUSnapshot(now time.Time, name string, cpu, memoryPercent, diskPercent
 		MemoryTotal:    memoryTotal,
 		DiskUsed:       uint64(float64(diskTotal) * diskPercent / 100),
 		DiskTotal:      diskTotal,
-		NetworkRX:      mib(rxMiB),
-		NetworkTX:      mib(txMiB),
+		DiskRead:       mib(read),
+		DiskWrite:      mib(write),
+		NetworkRX:      mib(rx),
+		NetworkTX:      mib(tx),
 		NetworkRXTotal: gib(12.4),
 		NetworkTXTotal: gib(3.1),
 		GPUs:           gpus,
 	}
 }
 
-func demoCPUSnapshot(now time.Time, name string, cores int, cpu float64, load string, memoryPercent, diskPercent, rxMiB, txMiB float64) monitorSnapshot {
+func demoCPUSnapshot(now time.Time, name string, cores int, cpu float64, load string, memoryPercent, diskPercent float64) monitorSnapshot {
 	memoryTotal := gib(256)
 	diskTotal := gib(1800)
+	rx, tx, read, write := demoIO(name)
 	return monitorSnapshot{
 		CollectedAt:    now,
 		Profile:        machineProfileCPU,
@@ -245,8 +459,10 @@ func demoCPUSnapshot(now time.Time, name string, cores int, cpu float64, load st
 		MemoryTotal:    memoryTotal,
 		DiskUsed:       uint64(float64(diskTotal) * diskPercent / 100),
 		DiskTotal:      diskTotal,
-		NetworkRX:      mib(rxMiB),
-		NetworkTX:      mib(txMiB),
+		DiskRead:       mib(read),
+		DiskWrite:      mib(write),
+		NetworkRX:      mib(rx),
+		NetworkTX:      mib(tx),
 		NetworkRXTotal: gib(1.8),
 		NetworkTXTotal: gib(0.6),
 	}
@@ -273,6 +489,7 @@ func demoGPU(index int, name string, totalGiB, usedGiB, utilization float64, tem
 }
 
 func demoNASSnapshot(now time.Time) monitorSnapshot {
+	rx, tx, read, write := demoIO("storage-01")
 	return monitorSnapshot{
 		CollectedAt:    now,
 		Profile:        machineProfileNAS,
@@ -288,8 +505,10 @@ func demoNASSnapshot(now time.Time) monitorSnapshot {
 		MemoryTotal:    gib(128),
 		DiskUsed:       gib(140),
 		DiskTotal:      gib(200),
-		NetworkRX:      mib(116),
-		NetworkTX:      mib(18),
+		DiskRead:       mib(read),
+		DiskWrite:      mib(write),
+		NetworkRX:      mib(rx),
+		NetworkTX:      mib(tx),
 		NetworkRXTotal: gib(84),
 		NetworkTXTotal: gib(21),
 		NetworkInterfaces: []networkInterfaceInfo{{
@@ -318,7 +537,7 @@ func demoNASSnapshot(now time.Time) monitorSnapshot {
 
 func demoGPUNode(mode colorMode, width, height int) *monitorModel {
 	now := time.Now()
-	snapshot := demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, 86, 14, []gpuInfo{
+	snapshot := demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, []gpuInfo{
 		demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
 		demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
 	})

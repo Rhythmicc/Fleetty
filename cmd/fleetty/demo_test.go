@@ -37,10 +37,32 @@ func TestDemoFramesUseFictionalData(t *testing.T) {
 		t.Fatal(err)
 	}
 	hubPlain := ansi.Strip(hub)
-	for _, text := range []string{"Acme Research Cluster", "gpu-a01", "gpu-c01", "cpu-01", "storage-01", "OFFLINE", "8/9"} {
+	for _, text := range []string{
+		"Acme Research Cluster", "gpu-a01", "gpu-c01", "cpu-01", "storage-01", "OFFLINE", "14/16",
+		"i/o timeout", "alice +1", "carol", "idle", "▁",
+		"↓86M ↑14M", "↓12M ↑1M", "r40M w8M", "vram 59/96G", "vram 36/48G",
+		"78°C", "87°C",
+		"HTTP 1/2", "CTR 2/3", "PM2 1/2",
+	} {
 		if !strings.Contains(hubPlain, text) {
 			t.Fatalf("hub frame missing %q", text)
 		}
+	}
+	if strings.Contains(hubPlain, "PAGE ") {
+		t.Fatal("140x48 hub spilled onto a second page")
+	}
+	wide, err := renderDemoFrame("hub", "dark", 220, 48)
+	if err != nil {
+		t.Fatal(err)
+	}
+	widePlain := ansi.Strip(wide)
+	for _, text := range []string{"storage-01", "cpu-01", "gpu-a01", "vram 59/96G", "r40M w8M"} {
+		if !strings.Contains(widePlain, text) {
+			t.Fatalf("220-col hub frame missing %q", text)
+		}
+	}
+	if strings.Contains(widePlain, "PAGE ") {
+		t.Fatal("220-col hub spilled onto a second page")
 	}
 
 	gpu, err := renderDemoFrame("gpu", "dark", 0, 0)

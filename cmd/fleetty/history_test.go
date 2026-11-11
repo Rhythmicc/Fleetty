@@ -143,12 +143,16 @@ func TestHubCardKeepsBlockLoadBarWhenHistoryExists(t *testing.T) {
 		cursor: 0,
 		width:  80, height: 30,
 	}
+	model.states[0].Spark = []hubSparkSample{{CPU: 10}, {CPU: 20}, {CPU: 30}}
 	rendered := model.renderNodeCard(0, 40)
-	if strings.Contains(rendered, "▁") || strings.Contains(rendered, "▂") {
-		t.Fatalf("hub card should not switch to a history sparkline:\n%s", rendered)
+	if strings.Contains(rendered, "cpu ") || strings.Contains(rendered, "━") {
+		t.Fatalf("hub card kept the separate meter:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "█") || !strings.Contains(rendered, "░") || strings.Contains(rendered, "━") {
-		t.Fatalf("hub card should render a block load bar:\n%s", rendered)
+	if !strings.Contains(rendered, "10%") || !strings.Contains(rendered, "vram") || !strings.Contains(rendered, "↓") {
+		t.Fatalf("hub card lost sparkline row or facts:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "up ") {
+		t.Fatalf("hub card still shows uptime:\n%s", rendered)
 	}
 }
 
@@ -173,7 +177,7 @@ func TestHubCPUProfileRendersDedicatedSectionAndCard(t *testing.T) {
 		t.Fatalf("CPU node groups = %#v", groups)
 	}
 	rendered := model.renderNodeCard(0, 48)
-	for _, expected := range []string{"CPU", "CORES", "64", "LOAD", "0.07", "↓", "↑"} {
+	for _, expected := range []string{"CPU", "MEM", "DSK"} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("CPU Hub card missing %q:\n%s", expected, rendered)
 		}

@@ -392,7 +392,7 @@ func renderMetricProcessRow(process processInfo, width int) string {
 		dimStyle.Render(fixedCell(strconv.Itoa(process.PID), 7, false)),
 		processStateStyle(process.State).Render(fixedCell(metricProcessName(process.Command), nameWidth, false)),
 		valueStyle.Render(fixedCell(fmt.Sprintf("%.1f%%", process.CPU), 9, true)),
-		memoryTitleStyle.Render(fixedCell(bytes(process.RSS), 11, true)),
+		valueStyle.Render(fixedCell(bytes(process.RSS), 11, true)),
 	}, " ")
 }
 
@@ -434,15 +434,13 @@ func (m *monitorModel) renderLargeDiskWidget(card metricCard, width int) string 
 }
 
 func capacityStatus(usage float64) (string, lipgloss.Style) {
-	switch {
-	case usage >= 95:
+	switch usageLevel(usage) {
+	case stateCrit:
 		return "CRITICAL", dangerStyle
-	case usage >= 85:
-		return "HIGH", processWaitingStyle
-	case usage >= 70:
-		return "WATCH", warningStyle
+	case stateWarn:
+		return "WARN", warningStyle
 	default:
-		return "HEALTHY", processRunningStyle
+		return "HEALTHY", okStyle
 	}
 }
 

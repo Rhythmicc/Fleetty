@@ -43,8 +43,7 @@ func newTestHubModel(width, height int, cursor int) *hubModel {
 }
 
 func TestHubUpFromCPUNodeFollowsVisualGrid(t *testing.T) {
-	// The last row shares GPU, CPU and services cards. Vertical navigation
-	// follows the visible column, even across a group boundary.
+	// Three columns, packed: [A100 4090 5090] [n1 n2 n3] [n4 intel NAS].
 	model := newTestHubModel(160, 24, 8)
 	model.moveCursorVertical(-1)
 	if model.cursor != 4 {
