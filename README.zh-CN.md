@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/github/license/Rhythmicc/Fleetty)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Rhythmicc/fleetty)](https://goreportcard.com/report/github.com/Rhythmicc/fleetty)
 
-<img src="docs/images/fleetty-hero.webp" alt="Fleetty" width="100%">
+<img src="docs/images/fleetty-hero.webp" alt="Fleetty 终端集群监控" width="100%">
 
 </div>
 

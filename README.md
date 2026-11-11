@@ -12,7 +12,7 @@ Local top, and a remote dashboard for hosts, GPUs, storage, and Slurm.
 [![License](https://img.shields.io/github/license/Rhythmicc/Fleetty)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Rhythmicc/fleetty)](https://goreportcard.com/report/github.com/Rhythmicc/fleetty)
 
-<img src="docs/images/fleetty-hero.webp" alt="Fleetty" width="100%">
+<img src="docs/images/fleetty-hero.webp" alt="Fleetty — terminal fleet monitor" width="100%">
 
 </div>
 
