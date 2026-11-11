@@ -1677,17 +1677,22 @@ func hubVRAM(used, total uint64) string {
 }
 
 func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) string {
+	var users []string
+	seen := map[string]bool{}
+	add := func(user string) {
+		user = strings.TrimSpace(user)
+		if user == "" || seen[user] {
+			return
+		}
+		seen[user] = true
+		users = append(users, user)
+	}
 	if m != nil {
 		if queue := m.nodeSlurmQueue(index); queue != nil {
-			var running []slurmJob
 			for _, display := range queue.Jobs {
 				if isSlurmRunning(display.Job.State) {
-					running = append(running, display.Job)
+					add(display.Job.User)
 				}
-			}
-			if len(running) > 0 {
-				job := running[0]
-				return hubMetricStyle.Render(truncate(hubWho(job.User, hubBaseName(job.Name)), width))
 			}
 		}
 	}
@@ -1697,33 +1702,26 @@ func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) s
 			if name == "" || strings.EqualFold(name, "[No data]") {
 				continue
 			}
-			return hubMetricStyle.Render(truncate(hubWho(workload.User, name), width))
+			add(workload.User)
 		}
 	}
 	for _, process := range topProcesses(snapshot.Processes, 3) {
 		if process.CPU < 5 {
 			continue
 		}
-		name := hubBaseName(process.Command)
-		if name == "" {
+		if hubBaseName(process.Command) == "" {
 			continue
 		}
-		return hubMetricStyle.Render(truncate(hubWho(process.User, name), width))
+		add(process.User)
 	}
-	return dimStyle.Render("idle")
-}
-
-func hubWho(user, name string) string {
-	user = strings.TrimSpace(user)
-	name = strings.TrimSpace(name)
-	switch {
-	case user != "" && name != "":
-		return user + "·" + name
-	case name != "":
-		return name
-	default:
-		return user
+	if len(users) == 0 {
+		return dimStyle.Render("idle")
 	}
+	text := users[0]
+	if extra := len(users) - 1; extra > 0 {
+		text += fmt.Sprintf(" +%d", extra)
+	}
+	return hubMetricStyle.Render(truncate(text, width))
 }
 
 func hubBaseName(value string) string {
@@ -1746,7 +1744,7 @@ func renderNASHubCard(spark []hubSparkSample, snapshot monitorSnapshot, width in
 			worst, worstUsage = filesystem, usage
 		}
 	}
-	leftWidth, rightWidth := hubColumnWidths(width)
+	leftWidth, _ := hubColumnWidths(width)
 	left := hubMetricRows([]struct {
 		label  string
 		series []float64
@@ -1755,11 +1753,12 @@ func renderNASHubCard(spark []hubSparkSample, snapshot monitorSnapshot, width in
 		{"DSK", sparkSeries(spark, sparkDisk), worstUsage},
 	}, leftWidth)
 	left = append(left, dimStyle.Render(truncate(worst.Mount, leftWidth)))
-	return hubColumns(left, []string{
+	lines := hubColumns(left, []string{
 		dimStyle.Render("↓") + hubMetricStyle.Render(hubCompactRate(snapshot.NetworkRX)),
 		dimStyle.Render("↑") + hubMetricStyle.Render(hubCompactRate(snapshot.NetworkTX)),
-		renderNASServiceLine(snapshot, rightWidth),
 	}, width)
+	lines[2] = ansi.Truncate(renderNASServiceLine(snapshot, width), width, "")
+	return lines
 }
 
 func renderNASServiceLine(snapshot monitorSnapshot, width int) string {
@@ -1790,14 +1789,8 @@ func renderNASServiceLine(snapshot monitorSnapshot, width int) string {
 		pm2Health = dangerStyle.Render("ERR")
 	}
 	line := dimStyle.Render("HTTP ") + compactHealthCount(healthyHTTP, len(snapshot.Services)) +
-		dimStyle.Render(" CTR ") + containerHealth +
-		dimStyle.Render(" PM2 ") + pm2Health
-	if lipgloss.Width(line) <= width {
-		return line
-	}
-	line = dimStyle.Render("H") + compactHealthCount(healthyHTTP, len(snapshot.Services)) +
-		dimStyle.Render(" C") + containerHealth +
-		dimStyle.Render(" P") + pm2Health
+		dimStyle.Render("  CTR ") + containerHealth +
+		dimStyle.Render("  PM2 ") + pm2Health
 	return ansi.Truncate(line, width, "")
 }
 

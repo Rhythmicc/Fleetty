@@ -39,8 +39,9 @@ func TestDemoFramesUseFictionalData(t *testing.T) {
 	hubPlain := ansi.Strip(hub)
 	for _, text := range []string{
 		"Acme Research Cluster", "gpu-a01", "gpu-c01", "cpu-01", "storage-01", "OFFLINE", "14/16",
-		"i/o timeout", "alice·protein", "idle", "▁",
+		"i/o timeout", "alice +1", "carol", "idle", "▁",
 		"↓86M ↑14M", "↓12M ↑1M", "r40M w8M", "vram 59/96G",
+		"HTTP 1/2", "CTR 2/3", "PM2 1/2",
 	} {
 		if !strings.Contains(hubPlain, text) {
 			t.Fatalf("hub frame missing %q", text)

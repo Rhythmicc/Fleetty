@@ -452,7 +452,7 @@ func TestHubFactsFollowTheirMetricRow(t *testing.T) {
 	}
 	plain := ansi.Strip(gpu.renderNodeCard(0, gpu.cardWidth()))
 	cpuLine, memLine, gpuLine := hubMeterLine(plain, "CPU"), hubMeterLine(plain, "MEM"), hubMeterLine(plain, "GPU")
-	if !strings.Contains(cpuLine, "alice·protein") || strings.Contains(cpuLine, "vram") {
+	if !strings.Contains(cpuLine, "alice") || strings.Contains(cpuLine, "protein") || strings.Contains(cpuLine, "vram") {
 		t.Fatalf("CPU row: %s", cpuLine)
 	}
 	if glyphs := sparkGlyphs(cpuLine); glyphs < 15 || glyphs > 18 {
@@ -463,6 +463,16 @@ func TestHubFactsFollowTheirMetricRow(t *testing.T) {
 	}
 	if !strings.Contains(gpuLine, "vram 59/96G") {
 		t.Fatalf("GPU row: %s", gpuLine)
+	}
+	gpu.states[0].Snapshot.GPUs = nil
+	gpu.states[0].Snapshot.Processes = []processInfo{
+		{User: "alice", Command: "a", CPU: 40},
+		{User: "bob", Command: "b", CPU: 30},
+		{User: "carol", Command: "c", CPU: 20},
+		{User: "alice", Command: "d", CPU: 10},
+	}
+	if got := ansi.Strip(gpu.hubOccupant(0, gpu.states[0].Snapshot, 20)); got != "alice +2" {
+		t.Fatalf("users = %q", got)
 	}
 	if strings.Contains(plain, "up ") || strings.Contains(plain, "load ") {
 		t.Fatalf("hub card still shows uptime or load:\n%s", plain)
