@@ -85,7 +85,7 @@ func demoSize(screen string) (int, int) {
 	case "nas":
 		return 184, 33
 	default:
-		return 140, 25
+		return 140, 48
 	}
 }
 
@@ -122,20 +122,10 @@ func demoHub(mode colorMode, width, height int) *hubModel {
 		RefreshSeconds: 1,
 		Groups: []hubGroupConfig{
 			{ID: "gpu", Title: "GPU COMPUTE", Style: hubGroupStyleGPU},
-			{ID: "cpu", Title: "CPU", Style: hubGroupStyleCPU},
-			{ID: "storage", Title: "STORAGE", Style: hubGroupStyleNetwork},
+			{ID: "cpu", Title: "CPU COMPUTE", Style: hubGroupStyleCPU},
+			{ID: "services", Title: "CLUSTER SERVICES", Style: hubGroupStyleNetwork},
 		},
-		Nodes: []hubNodeConfig{
-			{Name: "gpu-a01", Group: "gpu", Address: "192.0.2.11:23234", Profile: machineProfileGPU, Description: "Training"},
-			{Name: "gpu-a02", Group: "gpu", Address: "192.0.2.12:23234", Profile: machineProfileGPU, Description: "Fine-tune"},
-			{Name: "gpu-a03", Group: "gpu", Address: "192.0.2.13:23234", Profile: machineProfileGPU, Description: "Inference"},
-			{Name: "gpu-b01", Group: "gpu", Address: "192.0.2.21:23234", Profile: machineProfileGPU, Description: "Batch jobs"},
-			{Name: "gpu-b02", Group: "gpu", Address: "192.0.2.22:23234", Profile: machineProfileGPU, Description: "Embeddings"},
-			{Name: "gpu-c01", Group: "gpu", Address: "192.0.2.23:23234", Profile: machineProfileGPU, Description: "Pretrain"},
-			{Name: "cpu-01", Group: "cpu", Address: "192.0.2.31:23234", Profile: machineProfileCPU, Description: "Build agents"},
-			{Name: "cpu-02", Group: "cpu", Address: "192.0.2.32:23234", Profile: machineProfileCPU, Description: "Compile"},
-			{Name: "storage-01", Group: "storage", Address: "192.0.2.41:23234", Profile: machineProfileNAS, Description: "Shared data"},
-		},
+		Nodes: demoHubNodes(),
 		SlurmClusters: []slurmClusterConfig{
 			{Name: "Acme GPU"},
 			{Name: "Acme CPU"},
@@ -155,35 +145,85 @@ func demoHub(mode colorMode, width, height int) *hubModel {
 	return model
 }
 
+func demoHubNodes() []hubNodeConfig {
+	names := []struct {
+		name, group, profile string
+	}{
+		{"gpu-a01", "gpu", machineProfileGPU},
+		{"gpu-a02", "gpu", machineProfileGPU},
+		{"gpu-a03", "gpu", machineProfileGPU},
+		{"gpu-b01", "gpu", machineProfileGPU},
+		{"gpu-b02", "gpu", machineProfileGPU},
+		{"gpu-b03", "gpu", machineProfileGPU},
+		{"gpu-c01", "gpu", machineProfileGPU},
+		{"gpu-c02", "gpu", machineProfileGPU},
+		{"gpu-d01", "gpu", machineProfileGPU},
+		{"gpu-d02", "gpu", machineProfileGPU},
+		{"gpu-d03", "gpu", machineProfileGPU},
+		{"gpu-e01", "gpu", machineProfileGPU},
+		{"gpu-e02", "gpu", machineProfileGPU},
+		{"cpu-01", "cpu", machineProfileCPU},
+		{"storage-01", "services", machineProfileNAS},
+		{"edge-01", "services", machineProfileGPU},
+	}
+	nodes := make([]hubNodeConfig, len(names))
+	for index, item := range names {
+		nodes[index] = hubNodeConfig{
+			Name: item.name, Group: item.group, Profile: item.profile,
+			Address: fmt.Sprintf("192.0.2.%d:23234", 11+index),
+		}
+	}
+	return nodes
+}
+
 func demoHubStates(now time.Time) []hubNodeState {
-	offline := hubNodeState{
-		Error:     "timed out waiting for 192.0.2.23:23234",
-		Checked:   now,
-		LastSeen:  now.Add(-4*time.Minute - 12*time.Second),
-		NextRetry: now.Add(18 * time.Second),
+	offline := func(host string) hubNodeState {
+		return hubNodeState{
+			Error:     "dial tcp " + host + ":23234: i/o timeout",
+			Checked:   now,
+			LastSeen:  now.Add(-2 * time.Minute),
+			NextRetry: now.Add(26 * time.Second),
+		}
+	}
+	gpu := func(name string, latency time.Duration, cpu, mem, disk, util float64, count, temp int) hubNodeState {
+		gpus := make([]gpuInfo, count)
+		for index := range gpus {
+			used := util / 100 * 48
+			gpus[index] = demoGPU(index, "NVIDIA L40S", 48, used, util, temp, 1400, 120, 300, "", "")
+		}
+		if count > 0 && util > 50 {
+			gpus[0].Workloads = []gpuWorkloadInfo{{PID: 4800, User: "alice", Name: "train.py", MemoryUsed: gib(usedOr(util))}}
+		}
+		return demoOnline(now, latency, demoGPUSnapshot(now, name, cpu, mem, disk, 4, 1, gpus))
 	}
 	return []hubNodeState{
 		demoOnline(now, 18*time.Millisecond, demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, 86, 14, []gpuInfo{
 			demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
 			demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
 		})),
-		demoOnline(now, 24*time.Millisecond, demoGPUSnapshot(now, "gpu-a02", 81, 64, 38, 42, 9, []gpuInfo{
-			demoGPU(0, "NVIDIA H100 80GB", 80, 74, 98, 88, 1980, 640, 700, "alice", "finetune.py"),
-		})),
-		demoOnline(now, 31*time.Millisecond, demoGPUSnapshot(now, "gpu-a03", 34, 48, 29, 11, 4, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 12, 28, 49, 1410, 120, 300, "bob", "infer.py"),
-		})),
-		demoOnline(now, 44*time.Millisecond, demoGPUSnapshot(now, "gpu-b01", 11, 22, 18, 2.4, 0.8, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 3, 6, 41, 600, 70, 300, "", ""),
-		})),
-		demoOnline(now, 27*time.Millisecond, demoGPUSnapshot(now, "gpu-b02", 46, 55, 33, 19, 7, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 29, 63, 68, 2100, 210, 300, "carol", "embed.py"),
-		})),
-		offline,
-		demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 71, "load 8.42  6.10  4.88", 58, 37, 6.2, 1.4)),
-		demoOnline(now, 15*time.Millisecond, demoCPUSnapshot(now, "cpu-02", 16, 18, "load 1.20  0.94  0.81", 31, 24, 0.4, 0.2)),
+		gpu("gpu-a02", 24*time.Millisecond, 11, 22, 18, 4, 1, 42),
+		gpu("gpu-a03", 31*time.Millisecond, 8, 19, 21, 0, 2, 39),
+		gpu("gpu-b01", 44*time.Millisecond, 6, 14, 17, 2, 1, 41),
+		gpu("gpu-b02", 27*time.Millisecond, 4, 28, 22, 0, 1, 37),
+		gpu("gpu-b03", 36*time.Millisecond, 15, 33, 26, 67, 4, 54),
+		offline("192.0.2.17"),
+		offline("192.0.2.18"),
+		gpu("gpu-d01", 26*time.Millisecond, 3, 18, 20, 0, 2, 56),
+		gpu("gpu-d02", 19*time.Millisecond, 2, 11, 16, 1, 1, 38),
+		gpu("gpu-d03", 22*time.Millisecond, 5, 16, 19, 0, 1, 40),
+		gpu("gpu-e01", 29*time.Millisecond, 9, 21, 24, 3, 1, 44),
+		gpu("gpu-e02", 33*time.Millisecond, 7, 24, 18, 0, 1, 41),
+		demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 18, "load 1.20  0.94  0.81", 31, 24, 1.4, 0.4)),
 		demoOnline(now, 22*time.Millisecond, demoNASSnapshot(now)),
+		gpu("edge-01", 16*time.Millisecond, 7, 61, 12, 0, 1, 41),
 	}
+}
+
+func usedOr(util float64) float64 {
+	if util <= 0 {
+		return 1
+	}
+	return util / 100 * 20
 }
 
 func demoOnline(now time.Time, latency time.Duration, snapshot monitorSnapshot) hubNodeState {

@@ -43,16 +43,16 @@ func newTestHubModel(width, height int, cursor int) *hubModel {
 }
 
 func TestHubUpFromCPUNodeFollowsVisualGrid(t *testing.T) {
-	// The last row shares GPU, CPU and services cards. Vertical navigation
-	// follows the visible column, even across a group boundary.
+	// GPU keeps its own tail row. CPU and services share the next row.
+	// Vertical movement follows that column.
 	model := newTestHubModel(160, 24, 8)
 	model.moveCursorVertical(-1)
-	if model.cursor != 4 {
-		t.Fatalf("up from intel9462 selected index %d, want n2 (4)", model.cursor)
+	if model.cursor != 6 {
+		t.Fatalf("up from intel9462 selected index %d, want n4 (6)", model.cursor)
 	}
 	model.moveCursorVertical(-1)
-	if model.cursor != 1 {
-		t.Fatalf("up from n2 selected index %d, want 4090 (1)", model.cursor)
+	if model.cursor != 3 {
+		t.Fatalf("up from n4 selected index %d, want n1 (3)", model.cursor)
 	}
 }
 
@@ -76,8 +76,8 @@ func TestHubUsesDeclarativeGroupMembership(t *testing.T) {
 func TestHubDownFromN3StaysInSameColumn(t *testing.T) {
 	model := newTestHubModel(160, 24, 5)
 	model.moveCursorVertical(1)
-	if model.cursor != 7 {
-		t.Fatalf("down from n3 selected index %d, want NAS (7)", model.cursor)
+	if model.cursor != 6 {
+		t.Fatalf("down from n3 selected index %d, want n4 (6)", model.cursor)
 	}
 }
 

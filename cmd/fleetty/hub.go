@@ -1013,27 +1013,49 @@ func (m *hubModel) pages() []hubPage {
 	// a row. Headings cover only the cards belonging to their group.
 	var grid []hubDisplayRow
 	row := hubDisplayRow{}
-	for groupIndex, group := range m.nodeGroups() {
-		// Keep a small group together instead of stranding its last card on the
-		// next row. Large groups still flow across as many rows as needed.
-		if len(group.nodes) <= columns && len(row.nodes) > 0 && len(group.nodes) > columns-len(row.nodes) {
-			grid = append(grid, row)
-			row = hubDisplayRow{}
+	// continued is set when the open row is the partial tail of a group that
+	// already filled earlier rows. The next group starts below that tail, so
+	// a header is not printed again and the tail is not left with a hole.
+	continued := false
+	flushRow := func() {
+		if len(row.nodes) == 0 {
+			return
 		}
-		for start := 0; start < len(group.nodes); {
-			take := min(columns-len(row.nodes), len(group.nodes)-start)
-			row.headings = append(row.headings, hubGroupSpan{group: groupIndex, span: take})
-			row.nodes = append(row.nodes, group.nodes[start:start+take]...)
-			start += take
-			if len(row.nodes) == columns {
-				grid = append(grid, row)
-				row = hubDisplayRow{}
-			}
-		}
-	}
-	if len(row.nodes) > 0 {
 		grid = append(grid, row)
+		row = hubDisplayRow{}
+		continued = false
 	}
+	for groupIndex, group := range m.nodeGroups() {
+		nodes := group.nodes
+		if len(nodes) == 0 {
+			continue
+		}
+		if continued {
+			flushRow()
+		}
+		if len(row.nodes) > 0 && len(nodes) > columns-len(row.nodes) {
+			flushRow()
+		}
+		wrapped := false
+		first := true
+		for len(nodes) > 0 {
+			if len(row.nodes) == columns || (!first && len(row.nodes) > 0) {
+				flushRow()
+				wrapped = true
+			}
+			take := min(columns-len(row.nodes), len(nodes))
+			row.headings = append(row.headings, hubGroupSpan{group: groupIndex, span: take})
+			row.nodes = append(row.nodes, nodes[:take]...)
+			nodes = nodes[take:]
+			if len(nodes) > 0 && len(row.nodes) == columns {
+				flushRow()
+				wrapped = true
+			}
+			first = false
+		}
+		continued = wrapped && len(row.nodes) > 0
+	}
+	flushRow()
 	heightBudget := max(hubCardHeight+1, max(10, m.height)-2)
 	var pages []hubPage
 	current := hubPage{}
@@ -1231,15 +1253,17 @@ func (m *hubModel) hubView() string {
 }
 
 func renderHubSectionTitle(title, _ string, count, width int) string {
-	style := sectionStyle
 	unit := "NODES"
 	if count == 1 {
 		unit = "NODE"
 	}
-	countLabel := dimStyle.Render(fmt.Sprintf("%d %s ", count, unit))
-	label := style.Render(" " + truncate(title, max(1, width-lipgloss.Width(countLabel)-2)) + " ")
-	line := strings.Repeat("─", max(0, width-lipgloss.Width(label)-lipgloss.Width(countLabel)))
-	return ansi.Truncate(label+lipgloss.NewStyle().Foreground(colorPanelBorder).Render(line)+countLabel, width, "")
+	label := sectionStyle.Render(truncate(strings.TrimSpace(title), max(1, width)))
+	countLabel := dimStyle.Render(fmt.Sprintf("%d %s", count, unit))
+	if lipgloss.Width(label)+1+lipgloss.Width(countLabel) > width {
+		return ansi.Truncate(label, width, "")
+	}
+	gap := strings.Repeat(" ", width-lipgloss.Width(label)-lipgloss.Width(countLabel))
+	return label + gap + countLabel
 }
 
 func (m *hubModel) renderNodeCard(index, width int) string {
@@ -1258,12 +1282,16 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 		border = colorBorderFocus
 	}
 	status := "CHECKING"
+	temp := 0
 	if state.Error != "" {
 		status = "OFFLINE"
 	} else if !state.Snapshot.CollectedAt.IsZero() {
 		status = fmt.Sprintf("%dms", state.Latency.Milliseconds())
+		if len(state.Snapshot.GPUs) > 0 {
+			_, _, _, temp = hubGPUStats(state.Snapshot.GPUs)
+		}
 	}
-	meta := hubCardMeta(hubNodeAddressLabel(node.Address), status, state.Warning != "")
+	meta := hubCardMeta(hubMetaBudget(width, title), hubNodeAddressLabel(node.Address), status, temp, state.Warning != "")
 	contentWidth := max(1, width-4)
 	var content []string
 	switch {
@@ -1282,15 +1310,37 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 	return btopPanel(width, title, meta, strings.Join(content, "\n"), titleStyleForCard, border)
 }
 
-func hubCardMeta(address, status string, warn bool) string {
-	parts := []string{dimStyle.Render(address)}
+func hubMetaBudget(width int, title string) int {
+	inner := max(0, width-2)
+	titleText := " " + truncate(title, max(4, inner-5)) + " "
+	return max(0, inner-lipgloss.Width(titleText)-2)
+}
+
+func hubCardMeta(budget int, address, status string, temp int, warn bool) string {
+	if budget <= 0 {
+		return ""
+	}
+	var core []string
 	if status != "" {
-		parts = append(parts, dimStyle.Render(status))
+		core = append(core, dimStyle.Render(status))
+	}
+	if temp > 0 {
+		core = append(core, hubMeterStyle(temperatureLevel(temp)).Render(fmt.Sprintf("%d°C", temp)))
 	}
 	if warn {
-		parts = append(parts, warningStyle.Render("WARN"))
+		core = append(core, warningStyle.Render("WARN"))
 	}
-	return strings.Join(parts, dimStyle.Render("  "))
+	join := func(parts []string) string {
+		return strings.Join(parts, dimStyle.Render("  "))
+	}
+	withAddress := append([]string{dimStyle.Render(address)}, core...)
+	if full := join(withAddress); lipgloss.Width(full) <= budget {
+		return full
+	}
+	if short := join(core); lipgloss.Width(short) <= budget {
+		return short
+	}
+	return ""
 }
 
 func hubNodeAddressLabel(address string) string {
@@ -1328,8 +1378,34 @@ func renderOfflineHubCard(state hubNodeState, width int) []string {
 	return fitHubLines([]string{
 		dangerStyle.Render(truncate("● OFFLINE / UNREACHABLE", width)),
 		dimStyle.Render(truncate(lastSeen+" · "+retry, width)),
-		dimStyle.Render(truncate(state.Error, width)),
+		dimStyle.Render(hubShortError(state.Error, width)),
 	})
+}
+
+func hubShortError(err string, width int) string {
+	err = strings.TrimSpace(sanitizeTerminalText(err))
+	if err == "" || width <= 0 {
+		return ""
+	}
+	lower := strings.ToLower(err)
+	for _, reason := range []string{
+		"i/o timeout", "connection refused", "connection reset by peer",
+		"no route to host", "network is unreachable", "no such host",
+	} {
+		if strings.Contains(lower, reason) && lipgloss.Width(reason) <= width {
+			return reason
+		}
+	}
+	if lipgloss.Width(err) <= width {
+		return err
+	}
+	if split := strings.LastIndex(err, ": "); split >= 0 {
+		tail := strings.TrimSpace(err[split+2:])
+		if tail != "" && lipgloss.Width(tail) <= width && strings.Trim(tail, "0123456789") != "" {
+			return tail
+		}
+	}
+	return truncate(err, width)
 }
 
 func renderLiveHubCard(snapshot monitorSnapshot, profile string, width int) []string {
@@ -1339,39 +1415,31 @@ func renderLiveHubCard(snapshot monitorSnapshot, profile string, width int) []st
 	memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
 	disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
 	if profile == machineProfileCPU || len(snapshot.GPUs) == 0 {
-		return fitHubLines([]string{
-			labeledMeter("CPU", snapshot.CPUPercent, width),
-			labeledMeter("MEM", memory, width),
-			labeledMeter("DSK", disk, width),
-		})
+		return fitHubLines(hubMeterBlock([]string{"CPU", "MEM", "DSK"}, []float64{
+			snapshot.CPUPercent, memory, disk,
+		}, width))
 	}
-	gpuUtil, _, _, maxTemperature := hubGPUStats(snapshot.GPUs)
-	tail := ""
+	gpuUtil, _, _, _ := hubGPUStats(snapshot.GPUs)
+	label := "GPU"
 	if len(snapshot.GPUs) > 0 {
-		tail = dimStyle.Render(fmt.Sprintf("×%d", len(snapshot.GPUs)))
+		label = fmt.Sprintf("GPU×%d", len(snapshot.GPUs))
 	}
-	if maxTemperature > 0 {
-		temp := temperatureReading(maxTemperature, fmt.Sprintf("%d°C", maxTemperature))
-		if tail != "" {
-			tail += " "
-		}
-		tail += temp
+	return fitHubLines(hubMeterBlock([]string{"CPU", "MEM", label}, []float64{
+		snapshot.CPUPercent, memory, gpuUtil,
+	}, width))
+}
+
+func hubMeterBlock(labels []string, values []float64, width int) []string {
+	labelWidth := 3
+	for _, label := range labels {
+		labelWidth = max(labelWidth, lipgloss.Width(label))
 	}
-	meterWidth := width
-	pad := ""
-	if tail != "" {
-		meterWidth = max(8, width-lipgloss.Width(tail)-1)
-		pad = strings.Repeat(" ", max(0, width-meterWidth))
+	lines := make([]string, len(labels))
+	for index, label := range labels {
+		padded := label + strings.Repeat(" ", labelWidth-lipgloss.Width(label))
+		lines[index] = labeledMeter(padded, values[index], width)
 	}
-	gpu := labeledMeter("GPU", gpuUtil, meterWidth)
-	if tail != "" {
-		gpu += " " + tail
-	}
-	return fitHubLines([]string{
-		labeledMeter("CPU", snapshot.CPUPercent, meterWidth) + pad,
-		labeledMeter("MEM", memory, meterWidth) + pad,
-		gpu,
-	})
+	return lines
 }
 
 func renderNASHubCard(snapshot monitorSnapshot, width int) []string {

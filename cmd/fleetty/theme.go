@@ -205,9 +205,21 @@ func temperatureReading(celsius int, text string) string {
 	return stateStyle(temperatureLevel(celsius)).Render(text)
 }
 
-// labeledMeter is the compact hub meter: "CPU ▕████░░▏  62%".
-// The label is muted. The fill uses the shared scale. The percent stays
-// neutral unless the reading has left the ok band.
+// hubMeterStyle colors a hub meter. A healthy reading stays gray-white.
+// Only warn and crit introduce yellow or red.
+func hubMeterStyle(level stateLevel) lipgloss.Style {
+	switch level {
+	case stateWarn:
+		return warningStyle
+	case stateCrit, stateOffline:
+		return dangerStyle
+	default:
+		return hubMetricStyle
+	}
+}
+
+// labeledMeter is one thin hub row: "CPU ━━━━━──  62%".
+// The empty portion is a faint rule, not a filled block.
 func labeledMeter(label string, value float64, width int) string {
 	if width < 1 {
 		return ""
@@ -218,25 +230,18 @@ func labeledMeter(label string, value float64, width int) string {
 	if value > 100 {
 		value = 100
 	}
-	name := label
-	if lipgloss.Width(name) < 3 {
-		name += strings.Repeat(" ", 3-lipgloss.Width(name))
-	}
-	name = dimStyle.Render(name)
-	percentText := usageReading(value, fmt.Sprintf("%3.0f%%", value))
+	name := dimStyle.Render(label)
 	level := usageLevel(value)
-	used := lipgloss.Width(name) + 1 + 1 + 1 + 1 + lipgloss.Width(percentText)
-	barWidth := max(1, width-used)
+	style := hubMeterStyle(level)
+	percentText := style.Render(fmt.Sprintf("%3.0f%%", value))
+	barWidth := width - lipgloss.Width(name) - 1 - 1 - lipgloss.Width(percentText)
+	if barWidth < 1 {
+		return ansi.Truncate(name+" "+percentText, width, "")
+	}
 	filled := int(value / 100 * float64(barWidth))
 	filled = max(0, min(barWidth, filled))
-	line := name + " " + dimStyle.Render("▕") +
-		stateStyle(level).Render(strings.Repeat("█", filled)) +
-		barTrackStyle.Render(strings.Repeat("░", barWidth-filled)) +
-		dimStyle.Render("▏") + " " + percentText
-	if gap := width - lipgloss.Width(line); gap > 0 {
-		line += strings.Repeat(" ", gap)
-	}
-	return ansi.Truncate(line, width, "")
+	bar := style.Render(strings.Repeat("━", filled)) + dimStyle.Render(strings.Repeat("─", barWidth-filled))
+	return ansi.Truncate(name+" "+bar+" "+percentText, width, "")
 }
 
 // selectedProcessStyle uses explicit xterm indexes. A truecolor accent wash

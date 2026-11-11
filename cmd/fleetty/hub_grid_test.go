@@ -123,6 +123,21 @@ func TestHubWideGridNavigationAndResize(t *testing.T) {
 	}
 }
 
+func TestHubOfflineReasonStaysShort(t *testing.T) {
+	state := hubNodeState{
+		Error:     "connect n3: dial tcp 192.168.31.180:23234: i/o timeout",
+		LastSeen:  time.Now().Add(-time.Minute),
+		NextRetry: time.Now().Add(26 * time.Second),
+	}
+	card := ansi.Strip(strings.Join(renderOfflineHubCard(state, 40), "\n"))
+	if !strings.Contains(card, "i/o timeout") || strings.Contains(card, "dial tcp") || strings.Contains(card, "…") {
+		t.Fatalf("offline reason was not shortened cleanly: %s", card)
+	}
+	if got := hubShortError("connection refused", 40); got != "connection refused" {
+		t.Fatalf("short reason = %q", got)
+	}
+}
+
 func TestHubCardsShowAddressWithoutOpenHint(t *testing.T) {
 	for _, profile := range []string{machineProfileGPU, machineProfileCPU, machineProfileNAS} {
 		for _, status := range []string{"waiting", "live", "offline", "warning"} {
@@ -232,30 +247,73 @@ func TestHubPackedGroupsAndPagination(t *testing.T) {
 			}
 		}
 	}
-	// At four columns, the GPU tail, CPU and services share one complete row.
-	m := compactTestHub(187, 48)
-	rows := m.pageNodeRows(m.pages()[0])
-	if len(rows) != 4 || len(rows[3]) != 4 {
-		t.Fatalf("small groups still leave separate sparse rows: %v", rows)
+	// A wrapped GPU tail stays on its own row. CPU and services share the next
+	// row, and each group header is printed once.
+	for _, width := range []int{140, 187, 238} {
+		m := compactTestHub(width, 48)
+		plain := ansi.Strip(m.hubView())
+		if strings.Count(plain, "GPU COMPUTE") != 1 {
+			t.Fatalf("width %d repeated the GPU header:\n%s", width, plain)
+		}
+		if strings.Count(plain, "CPU COMPUTE") != 1 || strings.Count(plain, "CLUSTER SERVICES") != 1 {
+			t.Fatalf("width %d lost a group header:\n%s", width, plain)
+		}
+		rows := m.pageNodeRows(m.pages()[0])
+		if err := hubRowsAreContiguous(rows, m.nodeGroups()); err != nil {
+			t.Fatalf("width %d: %v", width, err)
+		}
 	}
-	// At five columns, keep the two service cards together, not split over rows.
-	m = compactTestHub(238, 48)
-	rows = m.pageNodeRows(m.pages()[0])
-	if len(rows) != 4 || len(rows[3]) != 2 || rows[3][0] != 14 || rows[3][1] != 15 {
-		t.Fatalf("service group split: %v", rows)
+}
+
+func hubRowsAreContiguous(rows [][]int, groups []hubNodeGroup) error {
+	groupOf := map[int]int{}
+	for index, group := range groups {
+		for _, node := range group.nodes {
+			groupOf[node] = index
+		}
 	}
+	appeared := map[int]bool{}
+	last := -1
+	for _, row := range rows {
+		if len(row) == 0 {
+			return fmt.Errorf("empty card row")
+		}
+		present := map[int]bool{}
+		for _, node := range row {
+			group := groupOf[node]
+			if group < last && !present[group] {
+				return fmt.Errorf("node %d returns to an earlier group", node)
+			}
+			present[group] = true
+			last = group
+		}
+		if len(present) > 1 {
+			for group := range present {
+				if appeared[group] {
+					return fmt.Errorf("group %d continues into a mixed row", group)
+				}
+			}
+		}
+		for group := range present {
+			appeared[group] = true
+		}
+	}
+	return nil
 }
 
 func TestHubLiveCardShowsFullWidthBlockBarWithoutDuplicateLoad(t *testing.T) {
 	m := compactTestHub(238, 48)
 	card := ansi.Strip(m.renderNodeCard(2, hubPreferredCardWidth))
-	for _, want := range []string{"CPU", "MEM", "GPU", "×1", "100%", "IP"} {
+	for _, want := range []string{"CPU", "MEM", "GPU×1", "100%", "IP"} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("missing %s: %s", want, card)
 		}
 	}
-	if strings.Contains(card, "━") || strings.Contains(card, "VRAM") || strings.Contains(card, strings.Repeat("█", hubPreferredCardWidth-4)) {
-		t.Fatalf("hub card kept the unlabeled full-width bar: %s", card)
+	if strings.Contains(card, "█") || strings.Contains(card, "░") || strings.Contains(card, "▕") || strings.Contains(card, "VRAM") {
+		t.Fatalf("hub card kept a chunky meter: %s", card)
+	}
+	if !strings.Contains(card, "━") {
+		t.Fatalf("hub card lost the thin meter: %s", card)
 	}
 	if hubCapacityStyle(96, diskTitleStyle).Render("96%") != dangerStyle.Render("96%") {
 		t.Fatal("real capacity risk lost its warning color")
@@ -279,7 +337,7 @@ func TestHubAdaptiveGridAvoidsWidthCliffs(t *testing.T) {
 	m.states[0].Snapshot.GPUs = make([]gpuInfo, 16)
 	m.states[0].Snapshot.GPUs[0] = gpuInfo{Utilization: 100, Temperature: 100}
 	card := ansi.Strip(m.renderNodeCard(0, m.cardWidth()))
-	if !strings.Contains(card, "GPU") || !strings.Contains(card, "×16") || !strings.Contains(card, "100%") || !strings.Contains(card, "100°C") {
+	if !strings.Contains(card, "GPU×16") || !strings.Contains(card, "100%") || !strings.Contains(card, "100°C") {
 		t.Fatalf("important GPU fields clipped at minimum width: %s", card)
 	}
 }
@@ -326,7 +384,8 @@ func TestHubBlockBarReflectsBusyCPUAndGPUAcrossWidths(t *testing.T) {
 
 func hubMeterLine(card, label string) string {
 	for _, line := range strings.Split(card, "\n") {
-		if strings.Contains(line, label+" ▕") {
+		if strings.Contains(line, label) && strings.Contains(line, "%") &&
+			(strings.Contains(line, "━") || strings.Contains(line, "─")) {
 			return line
 		}
 	}
@@ -334,20 +393,12 @@ func hubMeterLine(card, label string) string {
 }
 
 func meterMatches(line string, value float64) bool {
-	start := strings.Index(line, "▕")
-	end := strings.Index(line, "▏")
-	if start < 0 || end <= start {
+	filled := strings.Count(line, "━")
+	empty := strings.Count(line, "─")
+	width := filled + empty
+	if width == 0 {
 		return false
 	}
-	bar := line[start+len("▕") : end]
-	width := strings.Count(bar, "█") + strings.Count(bar, "░")
-	filled := strings.Count(bar, "█")
 	want := int(value / 100 * float64(width))
-	if want < 0 {
-		want = 0
-	}
-	if want > width {
-		want = width
-	}
-	return filled == want
+	return filled == max(0, min(width, want))
 }
