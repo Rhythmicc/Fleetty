@@ -314,11 +314,8 @@ func TestHubLiveCardShowsFullWidthBlockBarWithoutDuplicateLoad(t *testing.T) {
 			t.Fatalf("missing %s: %s", want, card)
 		}
 	}
-	if strings.Contains(card, "█") || strings.Contains(card, "░") || strings.Contains(card, "▕") || strings.Contains(card, "VRAM") {
-		t.Fatalf("hub card kept a chunky meter: %s", card)
-	}
-	if !strings.Contains(card, "━") {
-		t.Fatalf("hub card lost the thin meter: %s", card)
+	if strings.Contains(card, "░") || strings.Contains(card, "▕") || strings.Contains(card, "cpu ") {
+		t.Fatalf("hub card kept the old meter: %s", card)
 	}
 	if hubCapacityStyle(96, diskTitleStyle).Render("96%") != dangerStyle.Render("96%") {
 		t.Fatal("real capacity risk lost its warning color")
@@ -389,8 +386,7 @@ func TestHubBlockBarReflectsBusyCPUAndGPUAcrossWidths(t *testing.T) {
 
 func hubMeterLine(card, label string) string {
 	for _, line := range strings.Split(card, "\n") {
-		if strings.Contains(line, label) && strings.Contains(line, "%") &&
-			(strings.Contains(line, "━") || strings.Contains(line, "─")) {
+		if strings.Contains(line, label) && strings.Contains(line, "%") {
 			return line
 		}
 	}
@@ -398,12 +394,27 @@ func hubMeterLine(card, label string) string {
 }
 
 func meterMatches(line string, value float64) bool {
-	filled := strings.Count(line, "━")
-	empty := strings.Count(line, "─")
-	width := filled + empty
-	if width == 0 {
-		return false
+	return strings.Contains(line, fmt.Sprintf("%3.0f%%", value))
+}
+
+func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
+	idle := ansi.Strip(hubFixedSparkline([]float64{0, 1, 2, 3}, 4))
+	if strings.ContainsAny(idle, "▃▄▅▆▇█") {
+		t.Fatalf("idle samples were scaled up: %q", idle)
 	}
-	want := int(value / 100 * float64(width))
-	return filled == max(0, min(width, want))
+	hot := hubFixedSparkline([]float64{4, 100}, 4)
+	plain := ansi.Strip(hot)
+	if !strings.HasPrefix(plain, "  ") || !strings.Contains(plain, "█") {
+		t.Fatalf("short history should pad on the left and keep 100%% tall: %q", plain)
+	}
+	if !strings.Contains(hot, "38;2;255;138;128") {
+		t.Fatalf("crit sample stayed gray: %q", hot)
+	}
+	busy := appendSpark(nil, hubSparkSample{CPU: 10})
+	for i := 0; i < hubSparkCap+5; i++ {
+		busy = appendSpark(busy, hubSparkSample{CPU: float64(i)})
+	}
+	if len(busy) != hubSparkCap || busy[len(busy)-1].CPU != float64(hubSparkCap+4) {
+		t.Fatalf("spark ring = %d last %.0f", len(busy), busy[len(busy)-1].CPU)
+	}
 }

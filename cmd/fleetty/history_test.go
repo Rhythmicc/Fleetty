@@ -143,15 +143,13 @@ func TestHubCardKeepsBlockLoadBarWhenHistoryExists(t *testing.T) {
 		cursor: 0,
 		width:  80, height: 30,
 	}
+	model.states[0].Spark = []hubSparkSample{{CPU: 10}, {CPU: 20}, {CPU: 30}}
 	rendered := model.renderNodeCard(0, 40)
-	if strings.Contains(rendered, "█") && strings.Contains(rendered, "░") {
-		t.Fatalf("hub meter regressed to a filled block bar:\n%s", rendered)
+	if strings.Contains(rendered, "cpu ") || strings.Contains(rendered, "━") {
+		t.Fatalf("hub card kept the separate meter:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "━") && !strings.Contains(rendered, "─") {
-		t.Fatalf("hub card lost its meter:\n%s", rendered)
-	}
-	if !strings.Contains(rendered, "cpu ") || !strings.Contains(rendered, "▁") {
-		t.Fatalf("hub card lost the load sparkline:\n%s", rendered)
+	if !strings.Contains(rendered, "10%") || !strings.Contains(rendered, "vram") || !strings.Contains(rendered, "up ") {
+		t.Fatalf("hub card lost sparkline row or facts:\n%s", rendered)
 	}
 }
 

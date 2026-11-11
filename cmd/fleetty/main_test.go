@@ -1040,7 +1040,7 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 		}
 	}
 
-	hubCard := strings.Join(renderNASHubCard(model.snapshot, 42), "\n")
+	hubCard := strings.Join(renderNASHubCard(nil, model.snapshot, 42), "\n")
 	for _, expected := range []string{"DSK", "HTTP", "CTR", "PM2", "↓", "↑"} {
 		if !strings.Contains(hubCard, expected) {
 			t.Fatalf("NAS Hub card missing %q: %s", expected, hubCard)

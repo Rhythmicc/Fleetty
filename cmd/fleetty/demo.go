@@ -200,7 +200,7 @@ func demoHubStates(now time.Time) []hubNodeState {
 			gpus[0].Workloads = []gpuWorkloadInfo{{PID: 4800, User: "alice", Name: "train.py", MemoryUsed: gib(usedOr(util))}}
 		}
 		state := demoOnline(now, latency, demoGPUSnapshot(now, name, cpu, mem, disk, 4, 1, gpus))
-		state.History = demoHistory(now, cpu, util)
+		state.Spark = demoSpark(demoPattern(name), cpu, mem, disk, util)
 		return state
 	}
 	return []hubNodeState{
@@ -209,7 +209,7 @@ func demoHubStates(now time.Time) []hubNodeState {
 				demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
 				demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
 			}))
-			state.History = demoHistory(now, 62, 91)
+			state.Spark = demoSpark("busy", 62, 71, 44, 91)
 			state.Snapshot.Processes = []processInfo{{
 				PID: 4812, User: "alice", State: "R", Command: "train.py", CPU: 186, Elapsed: 5*3600 + 12*60,
 			}}
@@ -229,38 +229,97 @@ func demoHubStates(now time.Time) []hubNodeState {
 		gpu("gpu-e02", 33*time.Millisecond, 7, 24, 18, 0, 1, 41),
 		func() hubNodeState {
 			state := demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 18, "load 1.20  0.94  0.81", 31, 24, 1.4, 0.4))
-			state.History = demoHistory(now, 18, 0)
+			state.Spark = demoSpark("wave", 18, 31, 24, 0)
 			state.Snapshot.Processes = []processInfo{{
 				PID: 3300, User: "carol", State: "R", Command: "compile", CPU: 18, Elapsed: 2*3600 + 13*60,
 			}}
 			return state
 		}(),
-		demoOnline(now, 22*time.Millisecond, demoNASSnapshot(now)),
+		func() hubNodeState {
+			state := demoOnline(now, 22*time.Millisecond, demoNASSnapshot(now))
+			state.Spark = demoSpark("disk", 23, 37.5, 87.5, 0)
+			return state
+		}(),
 		gpu("edge-01", 16*time.Millisecond, 7, 61, 12, 0, 1, 41),
 	}
 }
 
-func demoHistory(now time.Time, cpu, gpu float64) []historySample {
-	samples := make([]historySample, 16)
+func demoPattern(name string) string {
+	switch name {
+	case "gpu-b03":
+		return "burst"
+	case "gpu-d03":
+		return "climb"
+	case "gpu-e01":
+		return "wave"
+	case "edge-01":
+		return "mem"
+	default:
+		return "idle"
+	}
+}
+
+func demoSpark(pattern string, cpu, mem, disk, gpu float64) []hubSparkSample {
+	samples := make([]hubSparkSample, hubSparkCap)
 	for index := range samples {
-		cpuValue := cpu + 14*math.Sin(float64(index)/2.7)
-		gpuValue := gpu + 18*math.Sin(float64(index)/2.2+0.6)
-		if cpuValue < 0 {
-			cpuValue = 0
-		}
-		if gpuValue < 0 {
-			gpuValue = 0
-		}
-		if gpuValue > 100 {
-			gpuValue = 100
-		}
-		samples[index] = historySample{
-			Timestamp:  now.Add(-time.Duration(len(samples)-index) * time.Minute),
-			CPUPercent: cpuValue,
-			GPUs:       []historyGPUSample{{Index: 0, Utilization: gpuValue}},
+		x := float64(index)
+		switch pattern {
+		case "busy":
+			samples[index] = hubSparkSample{
+				CPU:  clampSpark(cpu*0.55 + 16*math.Sin(x/3.1)),
+				Mem:  clampSpark(mem*0.9 + 4*math.Sin(x/4.8)),
+				Disk: disk,
+				GPU:  clampSpark(gpu*0.72 + 10*math.Sin(x/2.6+0.7)),
+			}
+		case "burst":
+			spike := 0.0
+			if index > len(samples)-16 && index < len(samples)-5 {
+				spike = 1
+			}
+			samples[index] = hubSparkSample{
+				CPU: clampSpark(3 + spike*cpu), Mem: mem, Disk: disk,
+				GPU: clampSpark(1 + spike*gpu),
+			}
+		case "climb":
+			fraction := x / float64(len(samples)-1)
+			samples[index] = hubSparkSample{CPU: cpu * fraction, Mem: mem, Disk: disk, GPU: gpu * fraction}
+		case "wave":
+			samples[index] = hubSparkSample{
+				CPU:  clampSpark(cpu*0.35 + cpu*0.65*math.Sin(x/3.4+1.2)),
+				Mem:  mem,
+				Disk: disk,
+				GPU:  clampSpark(6 + 28*math.Sin(x/2.8)),
+			}
+		case "mem":
+			samples[index] = hubSparkSample{
+				CPU: clampSpark(2 + 3*math.Sin(x/5)), Mem: clampSpark(mem*0.75 + 12*math.Sin(x/3.6)),
+				Disk: disk, GPU: clampSpark(0.5 + math.Sin(x/4)),
+			}
+		case "disk":
+			samples[index] = hubSparkSample{
+				CPU: 6, Mem: 28, Disk: clampSpark(disk*0.9 + 5*math.Sin(x/6.5)), GPU: 0,
+			}
+		default:
+			samples[index] = hubSparkSample{
+				CPU:  clampSpark(cpu*0.12 + 0.4*math.Sin(x/2+cpu)),
+				Mem:  mem,
+				Disk: disk,
+				GPU:  clampSpark(gpu*0.15 + 0.3*math.Sin(x/3+mem)),
+			}
 		}
 	}
+	samples[len(samples)-1] = hubSparkSample{CPU: cpu, Mem: mem, Disk: disk, GPU: gpu}
 	return samples
+}
+
+func clampSpark(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
 }
 
 func usedOr(util float64) float64 {
