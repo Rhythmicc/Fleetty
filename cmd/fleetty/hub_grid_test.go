@@ -400,12 +400,16 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	if idle != "▁▁▁▁" {
 		t.Fatalf("idle samples lost the baseline or were scaled up: %q", idle)
 	}
-	if strings.Contains(hubFixedSparkline([]float64{0, 1, 2, 3}, 4), "38;2;158;228;147") {
-		t.Fatal("idle baseline was painted ok-green")
+	idleColored := hubFixedSparkline([]float64{0, 1, 2, 3}, 4)
+	if strings.Contains(idleColored, "38;2;158;228;147") || !strings.Contains(idleColored, "38;2;52;60;73") {
+		t.Fatalf("idle baseline should be the faint track, not green: %q", idleColored)
 	}
 	healthy := hubFixedSparkline([]float64{50}, 1)
-	if !strings.Contains(healthy, "38;2;158;228;147") {
-		t.Fatalf("healthy column stayed gray: %q", healthy)
+	if strings.Contains(healthy, "38;2;158;228;147") || !strings.Contains(healthy, "38;2;156;163;188") {
+		t.Fatalf("healthy column should be muted, not green: %q", healthy)
+	}
+	if !strings.Contains(hubMeterStyle(stateOK).Render("62%"), "38;2;245;247;255") {
+		t.Fatal("healthy percent should use the normal foreground")
 	}
 	hot := hubFixedSparkline([]float64{4, 100}, 4)
 	plain := ansi.Strip(hot)

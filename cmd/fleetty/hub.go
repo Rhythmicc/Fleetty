@@ -1603,7 +1603,7 @@ func hubFixedSparkline(values []float64, width int) string {
 	missing := width - len(values)
 	for index := 0; index < width; index++ {
 		if index < missing {
-			parts[index] = dimStyle.Render("·")
+			parts[index] = barTrackStyle.Render("·")
 			continue
 		}
 		value := values[index-missing]
@@ -1620,13 +1620,20 @@ func hubFixedSparkline(values []float64, width int) string {
 		if level >= len(blocks) {
 			level = len(blocks) - 1
 		}
-		// The flat baseline stays dim so an idle row is present but quiet.
-		// Taller columns use ok / warn / crit, on every card.
+		// The flat baseline is fainter than a real healthy column. Healthy
+		// columns are the muted foreground; only warn and crit take color.
 		if level == 0 {
-			parts[index] = dimStyle.Render(string(blocks[0]))
+			parts[index] = barTrackStyle.Render(string(blocks[0]))
 			continue
 		}
-		parts[index] = hubMeterStyle(usageLevel(value)).Render(string(blocks[level]))
+		style := dimStyle
+		switch usageLevel(value) {
+		case stateWarn:
+			style = warningStyle
+		case stateCrit:
+			style = dangerStyle
+		}
+		parts[index] = style.Render(string(blocks[level]))
 	}
 	return strings.Join(parts, "")
 }

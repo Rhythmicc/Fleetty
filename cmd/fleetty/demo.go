@@ -218,14 +218,25 @@ func demoHubStates(now time.Time) []hubNodeState {
 		gpu("gpu-a02", 24*time.Millisecond, 11, 22, 18, 4, 1, 42),
 		gpu("gpu-a03", 31*time.Millisecond, 8, 19, 21, 0, 2, 39),
 		gpu("gpu-b01", 44*time.Millisecond, 6, 14, 17, 2, 1, 41),
-		gpu("gpu-b02", 27*time.Millisecond, 4, 28, 22, 0, 1, 37),
-		gpu("gpu-b03", 36*time.Millisecond, 15, 33, 26, 67, 4, 54),
+		func() hubNodeState {
+			state := gpu("gpu-b02", 27*time.Millisecond, 4, 28, 22, 0, 1, 37)
+			// 50 Mbps makes the 6.2 MiB/s transmit a large share of the link.
+			state.Snapshot.NetworkInterfaces = []networkInterfaceInfo{{
+				Name: "eth0", RX: state.Snapshot.NetworkRX, TX: state.Snapshot.NetworkTX, SpeedMbps: 50,
+			}}
+			return state
+		}(),
+		gpu("gpu-b03", 36*time.Millisecond, 15, 33, 26, 67, 4, 87),
 		offline("192.0.2.17"),
 		offline("192.0.2.18"),
-		gpu("gpu-d01", 26*time.Millisecond, 3, 18, 20, 0, 2, 56),
+		gpu("gpu-d01", 26*time.Millisecond, 3, 18, 20, 0, 2, 78),
 		gpu("gpu-d02", 19*time.Millisecond, 2, 11, 16, 1, 1, 38),
 		gpu("gpu-d03", 22*time.Millisecond, 5, 16, 19, 0, 1, 40),
-		gpu("gpu-e01", 29*time.Millisecond, 9, 21, 24, 3, 1, 44),
+		func() hubNodeState {
+			state := gpu("gpu-e01", 29*time.Millisecond, 9, 21, 24, 3, 1, 44)
+			state.Snapshot.GPUs[0].MemoryUsed = uint64(float64(state.Snapshot.GPUs[0].MemoryTotal) * 0.76)
+			return state
+		}(),
 		gpu("gpu-e02", 33*time.Millisecond, 7, 24, 18, 0, 1, 41),
 		func() hubNodeState {
 			state := demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 18, "load 1.20  0.94  0.81", 31, 24))

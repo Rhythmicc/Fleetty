@@ -40,7 +40,8 @@ func TestDemoFramesUseFictionalData(t *testing.T) {
 	for _, text := range []string{
 		"Acme Research Cluster", "gpu-a01", "gpu-c01", "cpu-01", "storage-01", "OFFLINE", "14/16",
 		"i/o timeout", "alice +1", "carol", "idle", "▁",
-		"↓86M ↑14M", "↓12M ↑1M", "r40M w8M", "vram 59/96G",
+		"↓86M ↑14M", "↓12M ↑1M", "r40M w8M", "vram 59/96G", "vram 36/48G",
+		"78°C", "87°C",
 		"HTTP 1/2", "CTR 2/3", "PM2 1/2",
 	} {
 		if !strings.Contains(hubPlain, text) {
