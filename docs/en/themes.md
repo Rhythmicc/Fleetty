@@ -33,6 +33,10 @@ Set `background-opacity = 1` if you want contrast to stay put. A transparent bac
 
 `fleetty top` defaults to `--theme auto`. At startup it reads the terminal background and the light/dark report, and it subscribes to changes while it is running. An SSH connection straight to Fleetty's monitor port does the same from the client terminal. No environment variable is forwarded. `--theme dark`, `--theme light`, or `DEFAULT_THEME=dark` or `light` pins the palette. After `t`, this session is manual and no longer follows the system. A terminal that does not answer the query starts dark, and `t` still switches it.
 
+<img src="../images/fleetty-themes.gif" alt="Fleetty hub cycling between the dark and light themes" width="100%">
+
+The demo screenshots in `docs/images/` are rendered from the real TUI using a fictional fleet and can be regenerated with `sh docs/demo/render.sh`.
+
 ## Powerlevel10k
 
 A Python or Conda segment on a blue background needs light text. Do not keep a dark foreground there. This goes in `~/.p10k.zsh` and suits both Fleetty themes:

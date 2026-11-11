@@ -6,7 +6,28 @@
 
 ## 配置
 
-用户范围的配置在 `~/.config/fleetty`，systemd 单元在 `~/.config/systemd/user`。系统范围使用 `/etc/fleetty` 和 `/etc/systemd/system`。表中的路径是系统范围的默认值。用户单元会换成家目录。
+`fleetty top` 不需要配置文件即可运行，以下标志均为可选：
+
+```bash
+fleetty top --config machine.json --theme auto --layout layout.json
+```
+
+`--theme` 取 `auto`、`dark` 或 `light`，并覆盖 `DEFAULT_THEME`。`--layout` 覆盖 `FLEETTY_LAYOUT_FILE`；两者均未设置时，布局文件为用户配置目录下的 `fleetty/layout.json`（Linux 为 `~/.config` 或 `$XDG_CONFIG_HOME`，macOS 为 `~/Library/Application Support`）。
+
+对于 `fleetty install`，用户范围的配置在 `~/.config/fleetty`，systemd 单元在 `~/.config/systemd/user`。系统范围使用 `/etc/fleetty` 和 `/etc/systemd/system`：
+
+| 项目 | 用户范围（`--scope user`） | 系统范围（`--scope system`） |
+| --- | --- | --- |
+| 可执行文件 | `~/.local/bin/fleetty` | `/opt/fleetty/fleetty` |
+| 配置目录（权限 `0700`） | `~/.config/fleetty` | `/etc/fleetty` |
+| systemd 单元目录 | `~/.config/systemd/user` | `/etc/systemd/system` |
+| 节点 / Hub 服务单元 | `fleetty.service` / `fleetty-hub.service` | `fleetty.service` / `fleetty-hub.service` |
+| SSH 主机密钥 | `ssh_host_ed25519` / `hub_host_ed25519` | `ssh_host_ed25519` / `hub_host_ed25519` |
+| 节点 / Hub 配置文件 | `machine.json` / `nodes.json` | `machine.json` / `nodes.json` |
+| 客户端 / Hub RPC 授权公钥 | `authorized_keys` / `hub_authorized_keys` | `authorized_keys` / `hub_authorized_keys` |
+| 管理模式凭据 | `admin.env`（`ADMIN_PASSWORD_HASH`） | `admin.env`（`ADMIN_PASSWORD_HASH`） |
+
+下方环境变量表中的路径是系统范围的默认值。用户单元会换成家目录。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |

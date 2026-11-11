@@ -19,14 +19,21 @@ GPU cards follow the samples that actually came back. The default `gpu` profile 
 
 ## Download and run locally
 
-The install script checks `checksums.txt`, then copies the binary for this machine to `~/.local/bin/fleetty`. It does not create a service. `FLEETTY_VERSION` defaults to `latest`. `FLEETTY_INSTALL_DIR` defaults to `~/.local/bin`.
+The install script checks `checksums.txt`, runs `fleetty version`, and copies the binary for this machine to `~/.local/bin/fleetty`. It does not create a service. `FLEETTY_VERSION` selects a release tag and defaults to `latest`. `FLEETTY_INSTALL_DIR` selects the target directory and defaults to `~/.local/bin` (if that directory is not on `PATH`, the script prints instructions to add it).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/install.sh | sh
 "$HOME/.local/bin/fleetty" top
 ```
 
-`go install` and a manual download are listed in [Quick start](../../README.md#quick-start).
+With a Go toolchain at the version declared in [go.mod](../../go.mod):
+
+```bash
+go install github.com/Rhythmicc/fleetty/cmd/fleetty@latest
+go install github.com/Rhythmicc/fleetty/cmd/fleettyctl@latest
+```
+
+Or download `fleetty_linux_amd64`, `fleetty_linux_arm64`, `fleetty_darwin_amd64`, or `fleetty_darwin_arm64` (along with matching `fleettyctl_*` binaries, systemd units, example JSON manifests, and Ghostty themes) from [Releases](https://github.com/Rhythmicc/Fleetty/releases) and verify the SHA-256 hash against `checksums.txt` in the same release.
 
 Add `~/.local/bin` to `PATH` and you can run `fleetty top`. `fleetty` alone opens the launcher, where you can start local monitoring or inspect the SSH server's configuration and keys. The listener starts only after `fleetty serve`, or after you choose SSH Server. Nothing opens an anonymous port in the background.
 
