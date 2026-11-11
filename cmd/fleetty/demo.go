@@ -1,0 +1,380 @@
+//go:build demo
+
+package main
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"math"
+	"time"
+)
+
+// dispatchDemo renders a screenshot fixture with the real TUI. It is compiled
+// only with -tags demo and is omitted from fleetty help.
+func dispatchDemo(args []string, stdout, stderr io.Writer) (bool, error) {
+	if len(args) == 0 || args[0] != "demo" {
+		return false, nil
+	}
+	return true, runDemoCommand(args[1:], stdout, stderr)
+}
+
+func runDemoCommand(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("demo", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	screen := flags.String("screen", "hub", "hub, gpu, or nas")
+	theme := flags.String("theme", "dark", "dark or light")
+	width := flags.Int("width", 0, "terminal columns (0 uses the screen default)")
+	height := flags.Int("height", 0, "terminal rows (0 uses the screen default)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("demo does not accept positional arguments")
+	}
+	frame, err := renderDemoFrame(*screen, *theme, *width, *height)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(stdout, frame)
+	return err
+}
+
+func renderDemoFrame(screen, theme string, width, height int) (string, error) {
+	mode, err := demoColorMode(theme)
+	if err != nil {
+		return "", err
+	}
+	if width == 0 || height == 0 {
+		defaultWidth, defaultHeight := demoSize(screen)
+		if width == 0 {
+			width = defaultWidth
+		}
+		if height == 0 {
+			height = defaultHeight
+		}
+	}
+	switch screen {
+	case "hub":
+		return demoHub(mode, width, height).View().Content, nil
+	case "gpu":
+		return demoGPUNode(mode, width, height).View().Content, nil
+	case "nas":
+		return demoNASNode(mode, width, height).View().Content, nil
+	default:
+		return "", fmt.Errorf("unknown demo screen %q (hub, gpu, or nas)", screen)
+	}
+}
+
+func demoColorMode(theme string) (colorMode, error) {
+	switch theme {
+	case "dark":
+		return colorModeDark, nil
+	case "light":
+		return colorModeLight, nil
+	default:
+		return colorModeDark, fmt.Errorf("unknown demo theme %q (dark or light)", theme)
+	}
+}
+
+func demoSize(screen string) (int, int) {
+	switch screen {
+	case "gpu":
+		return 184, 40
+	case "nas":
+		return 184, 33
+	default:
+		return 140, 25
+	}
+}
+
+func demoTheme(mode colorMode) terminalTheme {
+	return newTerminalTheme(mode.String())
+}
+
+func gib(value float64) uint64 {
+	return uint64(value * 1024 * 1024 * 1024)
+}
+
+func mib(value float64) uint64 {
+	return uint64(value * 1024 * 1024)
+}
+
+func demoSeries(count int, base, amplitude, phase float64) []float64 {
+	values := make([]float64, count)
+	for index := range values {
+		step := float64(index)
+		value := base + amplitude*math.Sin(step/7+phase) + 0.35*amplitude*math.Sin(step/2.4+phase*1.6)
+		if value < 0 {
+			value = 0
+		}
+		values[index] = value
+	}
+	return values
+}
+
+func demoHub(mode colorMode, width, height int) *hubModel {
+	now := time.Now()
+	config := hubConfig{
+		Version:        hubConfigVersion,
+		Name:           "Acme Research Cluster",
+		RefreshSeconds: 1,
+		Groups: []hubGroupConfig{
+			{ID: "gpu", Title: "GPU COMPUTE", Style: hubGroupStyleGPU},
+			{ID: "cpu", Title: "CPU", Style: hubGroupStyleCPU},
+			{ID: "storage", Title: "STORAGE", Style: hubGroupStyleNetwork},
+		},
+		Nodes: []hubNodeConfig{
+			{Name: "gpu-a01", Group: "gpu", Address: "192.0.2.11:23234", Profile: machineProfileGPU, Description: "Training"},
+			{Name: "gpu-a02", Group: "gpu", Address: "192.0.2.12:23234", Profile: machineProfileGPU, Description: "Fine-tune"},
+			{Name: "gpu-a03", Group: "gpu", Address: "192.0.2.13:23234", Profile: machineProfileGPU, Description: "Inference"},
+			{Name: "gpu-b01", Group: "gpu", Address: "192.0.2.21:23234", Profile: machineProfileGPU, Description: "Batch jobs"},
+			{Name: "gpu-b02", Group: "gpu", Address: "192.0.2.22:23234", Profile: machineProfileGPU, Description: "Embeddings"},
+			{Name: "gpu-c01", Group: "gpu", Address: "192.0.2.23:23234", Profile: machineProfileGPU, Description: "Pretrain"},
+			{Name: "cpu-01", Group: "cpu", Address: "192.0.2.31:23234", Profile: machineProfileCPU, Description: "Build agents"},
+			{Name: "cpu-02", Group: "cpu", Address: "192.0.2.32:23234", Profile: machineProfileCPU, Description: "Compile"},
+			{Name: "storage-01", Group: "storage", Address: "192.0.2.41:23234", Profile: machineProfileNAS, Description: "Shared data"},
+		},
+		SlurmClusters: []slurmClusterConfig{
+			{Name: "Acme GPU"},
+			{Name: "Acme CPU"},
+		},
+	}
+	model := &hubModel{
+		config:      config,
+		states:      demoHubStates(now),
+		slurmStates: demoSlurmStates(now),
+		width:       width,
+		height:      height,
+		colorMode:   mode,
+		theme:       demoTheme(mode),
+		slurmFilter: -1,
+	}
+	model.updateOnlineStatus()
+	return model
+}
+
+func demoHubStates(now time.Time) []hubNodeState {
+	offline := hubNodeState{
+		Error:     "timed out waiting for 192.0.2.23:23234",
+		Checked:   now,
+		LastSeen:  now.Add(-4*time.Minute - 12*time.Second),
+		NextRetry: now.Add(18 * time.Second),
+	}
+	return []hubNodeState{
+		demoOnline(now, 18*time.Millisecond, demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, 86, 14, []gpuInfo{
+			demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
+			demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
+		})),
+		demoOnline(now, 24*time.Millisecond, demoGPUSnapshot(now, "gpu-a02", 81, 64, 38, 42, 9, []gpuInfo{
+			demoGPU(0, "NVIDIA H100 80GB", 80, 74, 98, 88, 1980, 640, 700, "alice", "finetune.py"),
+		})),
+		demoOnline(now, 31*time.Millisecond, demoGPUSnapshot(now, "gpu-a03", 34, 48, 29, 11, 4, []gpuInfo{
+			demoGPU(0, "NVIDIA L40S", 48, 12, 28, 49, 1410, 120, 300, "bob", "infer.py"),
+		})),
+		demoOnline(now, 44*time.Millisecond, demoGPUSnapshot(now, "gpu-b01", 11, 22, 18, 2.4, 0.8, []gpuInfo{
+			demoGPU(0, "NVIDIA L40S", 48, 3, 6, 41, 600, 70, 300, "", ""),
+		})),
+		demoOnline(now, 27*time.Millisecond, demoGPUSnapshot(now, "gpu-b02", 46, 55, 33, 19, 7, []gpuInfo{
+			demoGPU(0, "NVIDIA L40S", 48, 29, 63, 68, 2100, 210, 300, "carol", "embed.py"),
+		})),
+		offline,
+		demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 71, "load 8.42  6.10  4.88", 58, 37, 6.2, 1.4)),
+		demoOnline(now, 15*time.Millisecond, demoCPUSnapshot(now, "cpu-02", 16, 18, "load 1.20  0.94  0.81", 31, 24, 0.4, 0.2)),
+		demoOnline(now, 22*time.Millisecond, demoNASSnapshot(now)),
+	}
+}
+
+func demoOnline(now time.Time, latency time.Duration, snapshot monitorSnapshot) hubNodeState {
+	return hubNodeState{
+		Snapshot: snapshot,
+		Latency:  latency,
+		Checked:  now,
+		LastSeen: now,
+	}
+}
+
+func demoSlurmStates(now time.Time) []slurmClusterState {
+	return []slurmClusterState{
+		{Snapshot: slurmSnapshot{Name: "Acme GPU", CollectedAt: now}, Latency: 40 * time.Millisecond, Checked: now, LastSeen: now},
+		{Snapshot: slurmSnapshot{Name: "Acme CPU", CollectedAt: now}, Latency: 55 * time.Millisecond, Checked: now, LastSeen: now},
+	}
+}
+
+func demoGPUSnapshot(now time.Time, name string, cpu, memoryPercent, diskPercent, rxMiB, txMiB float64, gpus []gpuInfo) monitorSnapshot {
+	memoryTotal := gib(512)
+	diskTotal := gib(3600)
+	return monitorSnapshot{
+		CollectedAt:    now,
+		Profile:        machineProfileGPU,
+		NodeName:       name,
+		OSName:         "Linux",
+		CPUModel:       "Demo EPYC 64-core",
+		CPUCores:       64,
+		Uptime:         18*24*3600 + 6*3600,
+		CPUPercent:     cpu,
+		CPUFrequency:   &cpuFrequencyInfo{AverageMHz: 2850, MinMHz: 1500, MaxMHz: 3700, SampledCores: 64, Source: "demo"},
+		LoadAverage:    fmt.Sprintf("load %.2f  %.2f  %.2f", cpu/12, cpu/16, cpu/20),
+		MemoryUsed:     uint64(float64(memoryTotal) * memoryPercent / 100),
+		MemoryTotal:    memoryTotal,
+		DiskUsed:       uint64(float64(diskTotal) * diskPercent / 100),
+		DiskTotal:      diskTotal,
+		NetworkRX:      mib(rxMiB),
+		NetworkTX:      mib(txMiB),
+		NetworkRXTotal: gib(12.4),
+		NetworkTXTotal: gib(3.1),
+		GPUs:           gpus,
+	}
+}
+
+func demoCPUSnapshot(now time.Time, name string, cores int, cpu float64, load string, memoryPercent, diskPercent, rxMiB, txMiB float64) monitorSnapshot {
+	memoryTotal := gib(256)
+	diskTotal := gib(1800)
+	return monitorSnapshot{
+		CollectedAt:    now,
+		Profile:        machineProfileCPU,
+		NodeName:       name,
+		OSName:         "Linux",
+		CPUModel:       "Demo Xeon",
+		CPUCores:       cores,
+		Uptime:         40 * 24 * 3600,
+		CPUPercent:     cpu,
+		LoadAverage:    load,
+		MemoryUsed:     uint64(float64(memoryTotal) * memoryPercent / 100),
+		MemoryTotal:    memoryTotal,
+		DiskUsed:       uint64(float64(diskTotal) * diskPercent / 100),
+		DiskTotal:      diskTotal,
+		NetworkRX:      mib(rxMiB),
+		NetworkTX:      mib(txMiB),
+		NetworkRXTotal: gib(1.8),
+		NetworkTXTotal: gib(0.6),
+	}
+}
+
+func demoGPU(index int, name string, totalGiB, usedGiB, utilization float64, temperature, clock int, power, limit float64, user, workload string) gpuInfo {
+	info := gpuInfo{
+		Index:       index,
+		Name:        name,
+		Utilization: utilization,
+		MemoryUsed:  gib(usedGiB),
+		MemoryTotal: gib(totalGiB),
+		Temperature: temperature,
+		ClockMHz:    clock,
+		Power:       power,
+		PowerLimit:  limit,
+	}
+	if workload != "" {
+		info.Workloads = []gpuWorkloadInfo{{
+			PID: 4800 + index, User: user, Name: workload, MemoryUsed: gib(usedGiB * 0.9),
+		}}
+	}
+	return info
+}
+
+func demoNASSnapshot(now time.Time) monitorSnapshot {
+	return monitorSnapshot{
+		CollectedAt:    now,
+		Profile:        machineProfileNAS,
+		NodeName:       "storage-01",
+		OSName:         "Linux",
+		CPUModel:       "Demo Xeon",
+		CPUCores:       16,
+		Uptime:         90 * 24 * 3600,
+		CPUPercent:     23,
+		CPUFrequency:   &cpuFrequencyInfo{AverageMHz: 2100, MinMHz: 800, MaxMHz: 3200, SampledCores: 16, Source: "demo"},
+		LoadAverage:    "load 1.84  1.52  1.40",
+		MemoryUsed:     gib(48),
+		MemoryTotal:    gib(128),
+		DiskUsed:       gib(140),
+		DiskTotal:      gib(200),
+		NetworkRX:      mib(116),
+		NetworkTX:      mib(18),
+		NetworkRXTotal: gib(84),
+		NetworkTXTotal: gib(21),
+		NetworkInterfaces: []networkInterfaceInfo{{
+			Name: "bond0", RX: mib(116), TX: mib(18), RXTotal: gib(84), TXTotal: gib(21),
+		}},
+		Filesystems: []filesystemInfo{
+			{Mount: "/", Device: "/dev/nvme0n1p2", Used: gib(42), Total: gib(100)},
+			{Mount: "/data/shared", Device: "/dev/md0", Used: gib(18), Total: gib(80)},
+			{Mount: "/data/vault", Device: "/dev/md1", Used: gib(70), Total: gib(80)},
+		},
+		Services: []serviceHealth{
+			{Name: "Files", Kind: "http", Detail: "https://files.acme.test/health", Healthy: true, Latency: 18 * time.Millisecond},
+			{Name: "Console", Kind: "http", Detail: "https://console.acme.test/", Healthy: false, Latency: 2 * time.Second},
+		},
+		Containers: []containerInfo{
+			{Name: "acme-web", Image: "registry.example/acme/web:1.4.2", State: "running", Health: "healthy", Running: true, CPU: 6, MemoryUsed: gib(1.2), MemoryLimit: gib(4), Ports: "8080", PIDs: 12, Uptime: 14 * 24 * 3600},
+			{Name: "acme-sync", Image: "registry.example/acme/sync:0.9.1", State: "running", Health: "unhealthy", Running: true, CPU: 40, MemoryUsed: gib(2.4), MemoryLimit: gib(4), Ports: "—", PIDs: 4, Restarts: 3, Uptime: 2 * 3600},
+			{Name: "acme-metrics", Image: "registry.example/acme/metrics:2.1.0", State: "running", Health: "healthy", Running: true, CPU: 3, MemoryUsed: mib(480), MemoryLimit: gib(1), Ports: "9090", PIDs: 8, Uptime: 30 * 24 * 3600},
+		},
+		PM2Processes: []pm2ProcessInfo{
+			{ID: 0, PID: 2210, Name: "catalog", Status: "online", Mode: "fork", CPU: 2, Memory: mib(180), Uptime: 20 * 24 * 3600},
+			{ID: 1, PID: 2218, Name: "preview", Status: "errored", Mode: "fork", CPU: 0, Memory: mib(40), Restarts: 6, Uptime: 15 * 60},
+		},
+	}
+}
+
+func demoGPUNode(mode colorMode, width, height int) *monitorModel {
+	now := time.Now()
+	snapshot := demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, 86, 14, []gpuInfo{
+		demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
+		demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
+	})
+	snapshot.Processes = []processInfo{
+		{PID: 4812, User: "alice", State: "R", Command: "train.py", CPU: 186, Memory: 22, RSS: gib(112), Elapsed: 5*3600 + 12*60},
+		{PID: 5104, User: "bob", State: "R", Command: "embed.py", CPU: 74, Memory: 9, RSS: gib(46), Elapsed: 2*3600 + 4*60},
+		{PID: 2201, User: "alice", State: "S", Command: "jupyter-lab", CPU: 8, Memory: 3.2, RSS: gib(16), Elapsed: 26 * 3600},
+		{PID: 904, User: "root", State: "S", Command: "containerd", CPU: 2.1, Memory: 0.8, RSS: gib(4), Elapsed: 18 * 24 * 3600},
+		{PID: 6630, User: "bob", State: "S", Command: "rclone", CPU: 1.4, Memory: 0.4, RSS: gib(2), Elapsed: 40 * 60},
+		{PID: 1188, User: "alice", State: "S", Command: "sshd", CPU: 0.2, Memory: 0.1, RSS: mib(48), Elapsed: 6 * 3600},
+	}
+	model := &monitorModel{
+		user:             "monitor",
+		remote:           "hub",
+		nodeName:         "gpu-a01",
+		profile:          machineProfileGPU,
+		width:            width,
+		height:           height,
+		snapshot:         snapshot,
+		status:           "Connected through the Hub to gpu-a01. Esc returns to the server list.",
+		colorMode:        mode,
+		theme:            demoTheme(mode),
+		cpuHistory:       demoSeries(72, 58, 18, 0.4),
+		networkRXHistory: demoSeries(72, 70*1024*1024, 28*1024*1024, 1.1),
+		networkTXHistory: demoSeries(72, 12*1024*1024, 5*1024*1024, 0.2),
+		slurmQueue: &nodeSlurmQueue{
+			Cluster:     "Acme GPU",
+			Node:        "gpu-a01",
+			CollectedAt: now.Add(-8 * time.Second),
+			Jobs: []slurmDisplayJob{
+				{Job: slurmJob{ID: "18421", Partition: "gpu", Name: "protein-fold", User: "alice", State: "RUNNING", Priority: 24000, QOS: "normal", Elapsed: "5:12:08", TimeLimit: "12:00:00"}},
+				{Job: slurmJob{ID: "18455", Partition: "gpu", Name: "embed-corpus", User: "bob", State: "RUNNING", Priority: 18000, QOS: "normal", Elapsed: "2:04:41", TimeLimit: "8:00:00"}},
+				{Next: true, Job: slurmJob{ID: "18502", Partition: "gpu", Name: "eval-suite", User: "carol", State: "PENDING", Priority: 12000, QOS: "normal", Elapsed: "0:00", TimeLimit: "4:00:00", Reason: "Resources"}},
+			},
+		},
+	}
+	return model
+}
+
+func demoNASNode(mode colorMode, width, height int) *monitorModel {
+	now := time.Now()
+	snapshot := demoNASSnapshot(now)
+	model := &monitorModel{
+		user:             "monitor",
+		remote:           "hub",
+		nodeName:         "storage-01",
+		profile:          machineProfileNAS,
+		width:            width,
+		height:           height,
+		snapshot:         snapshot,
+		status:           "Connected through the Hub to storage-01. Esc returns to the server list.",
+		colorMode:        mode,
+		theme:            demoTheme(mode),
+		cpuHistory:       demoSeries(72, 22, 8, 0.8),
+		networkRXHistory: demoSeries(72, 100*1024*1024, 30*1024*1024, 0.6),
+		networkTXHistory: demoSeries(72, 16*1024*1024, 6*1024*1024, 1.4),
+	}
+	return model
+}

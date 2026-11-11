@@ -19,11 +19,14 @@ GPU cards follow the samples that actually came back. The default `gpu` profile 
 
 ## Download and run locally
 
-Follow [Quick start](../../README.md#quick-start) to download and verify the release for this machine. It installs `~/.local/bin/fleetty` and does not create a service.
+The install script checks `checksums.txt`, then copies the binary for this machine to `~/.local/bin/fleetty`. It does not create a service. `FLEETTY_VERSION` defaults to `latest`. `FLEETTY_INSTALL_DIR` defaults to `~/.local/bin`.
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/install.sh | sh
 "$HOME/.local/bin/fleetty" top
 ```
+
+`go install` and a manual download are listed in [Quick start](../../README.md#quick-start).
 
 Add `~/.local/bin` to `PATH` and you can run `fleetty top`. `fleetty` alone opens the launcher, where you can start local monitoring or inspect the SSH server's configuration and keys. The listener starts only after `fleetty serve`, or after you choose SSH Server. Nothing opens an anonymous port in the background.
 
