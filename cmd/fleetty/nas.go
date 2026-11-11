@@ -93,7 +93,7 @@ func (m *monitorModel) nasNetworkPanel(width int) string {
 	contentWidth := max(4, width-4)
 	lines := []string{
 		fmt.Sprintf("%s  %s  %s",
-			accentStyle.Render(interfaceName),
+			valueStyle.Render(interfaceName),
 			networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s"),
 			networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s")),
 		dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s  ·  ERR/DROP %d",
@@ -104,7 +104,7 @@ func (m *monitorModel) nasNetworkPanel(width int) string {
 		leftWidth := min(42, contentWidth/3)
 		rightWidth := contentWidth - leftWidth - 3
 		left := []string{
-			accentStyle.Render(interfaceName),
+			valueStyle.Render(interfaceName),
 			networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " + networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s"),
 			dimStyle.Render("TOTAL ↓ " + bytes(m.snapshot.NetworkRXTotal)),
 			dimStyle.Render("TOTAL ↑ " + bytes(m.snapshot.NetworkTXTotal)),
@@ -131,11 +131,8 @@ func (m *monitorModel) nasStoragePanel(width, rows int) string {
 		}
 		usage := percent(filesystem.Used, filesystem.Total)
 		usageStyle := valueStyle
-		switch {
-		case usage >= 95:
-			usageStyle = dangerStyle
-		case usage >= 85:
-			usageStyle = warningStyle
+		if level := usageLevel(usage); level != stateOK {
+			usageStyle = stateStyle(level)
 		}
 		label := filesystem.Mount
 		if label == "/" {
@@ -353,14 +350,14 @@ func dockerContainerHealthy(container containerInfo) bool {
 
 func renderDockerContainerRow(container containerInfo, width int) string {
 	state := strings.ToUpper(container.State)
-	style := processStoppedStyle
+	style := dangerStyle
 	switch {
 	case container.Running && strings.EqualFold(container.Health, "unhealthy"):
-		state, style = "BAD", processZombieStyle
+		state, style = "BAD", dangerStyle
 	case container.Running && strings.EqualFold(container.Health, "starting"):
-		state, style = "START", processWaitingStyle
+		state, style = "START", warningStyle
 	case container.Running:
-		state, style = "UP", processRunningStyle
+		state, style = "UP", okStyle
 	case state == "":
 		state = "DOWN"
 	}
@@ -416,11 +413,11 @@ func renderDockerContainerRow(container containerInfo, width int) string {
 
 func renderPM2ProcessRow(process pm2ProcessInfo, width int) string {
 	state := strings.ToUpper(process.Status)
-	style := processStoppedStyle
+	style := dangerStyle
 	if strings.EqualFold(process.Status, "online") {
-		state, style = "ONLINE", processRunningStyle
+		state, style = "ONLINE", okStyle
 	} else if strings.EqualFold(process.Status, "launching") {
-		style = processWaitingStyle
+		style = warningStyle
 	}
 	name := process.Name
 	switch {
@@ -452,9 +449,9 @@ func renderPM2ProcessRow(process pm2ProcessInfo, width int) string {
 }
 
 func renderHTTPServiceRow(service serviceHealth, width int) string {
-	state, style := "DOWN", processStoppedStyle
+	state, style := "DOWN", dangerStyle
 	if service.Healthy {
-		state, style = "UP", processRunningStyle
+		state, style = "UP", okStyle
 	}
 	nameWidth := min(32, max(8, width-21))
 	return style.Render(fixedCell(state, 5, false)) + " " +
@@ -472,7 +469,7 @@ func (m *monitorModel) nasAttentionPanel(width int) string {
 	}
 	volumes := 0
 	for _, filesystem := range m.snapshot.Filesystems {
-		if filesystem.Error != "" || percent(filesystem.Used, filesystem.Total) >= 95 {
+		if filesystem.Error != "" || percent(filesystem.Used, filesystem.Total) >= stateThresholds.Crit {
 			volumes++
 		}
 	}
@@ -513,7 +510,7 @@ func (m *monitorModel) nasAttentionPanel(width int) string {
 		signals = []string{processRunningStyle.Render("No active service alerts")}
 	}
 	return btopPanel(width, "ATTENTION", fmt.Sprintf("%d SIGNALS", len(signals)),
-		strings.Join(signals, dimStyle.Render("  ·  ")), warningStyle, colorDiskBorder)
+		strings.Join(signals, dimStyle.Render("  ·  ")), sectionStyle, colorBorder)
 }
 
 func dockerTableHeader(width int) string {
@@ -566,37 +563,27 @@ func fixedCell(value string, width int, right bool) string {
 }
 
 func percentValue(value float64, width int) string {
-	style := dimStyle
-	switch {
-	case value >= 85:
-		style = dangerStyle
-	case value >= 55:
-		style = warningStyle
-	case value >= 5:
-		style = processRunningStyle
+	style := valueStyle
+	if level := usageLevel(value); level != stateOK {
+		style = stateStyle(level)
 	}
 	return style.Render(fixedCell(fmt.Sprintf("%.1f%%", value), width, true))
 }
 
 func memoryValue(used, total uint64, width int) string {
-	style := dimStyle
-	usage := percent(used, total)
-	switch {
-	case usage >= 90:
-		style = dangerStyle
-	case usage >= 75:
-		style = warningStyle
+	style := valueStyle
+	if level := usageLevel(percent(used, total)); level != stateOK {
+		style = stateStyle(level)
 	}
 	return style.Render(fixedCell(bytes(used)+"/"+bytes(total), width, true))
 }
 
 func restartValue(restarts int, width int) string {
 	style := dimStyle
-	if restarts > 0 {
-		style = warningStyle
-	}
-	if restarts >= 5 {
+	if restarts >= stateThresholds.RestartCrit {
 		style = dangerStyle
+	} else if restarts >= stateThresholds.RestartWarn {
+		style = warningStyle
 	}
 	return style.Render(fixedCell(fmt.Sprintf("%d", restarts), width, true))
 }

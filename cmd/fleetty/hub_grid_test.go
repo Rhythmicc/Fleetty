@@ -249,13 +249,13 @@ func TestHubPackedGroupsAndPagination(t *testing.T) {
 func TestHubLiveCardShowsFullWidthBlockBarWithoutDuplicateLoad(t *testing.T) {
 	m := compactTestHub(238, 48)
 	card := ansi.Strip(m.renderNodeCard(2, hubPreferredCardWidth))
-	for _, want := range []string{"GPU ×1 100%", strings.Repeat("█", hubPreferredCardWidth-4), "VRAM", "↓", "↑", "IP"} {
+	for _, want := range []string{"CPU", "MEM", "GPU", "×1", "100%", "IP"} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("missing %s: %s", want, card)
 		}
 	}
-	if strings.Contains(card, "━") || strings.Contains(card, "MAX") || strings.Contains(card, "LOAD") {
-		t.Fatalf("thin/duplicate GPU load display: %s", card)
+	if strings.Contains(card, "━") || strings.Contains(card, "VRAM") || strings.Contains(card, strings.Repeat("█", hubPreferredCardWidth-4)) {
+		t.Fatalf("hub card kept the unlabeled full-width bar: %s", card)
 	}
 	if hubCapacityStyle(96, diskTitleStyle).Render("96%") != dangerStyle.Render("96%") {
 		t.Fatal("real capacity risk lost its warning color")
@@ -279,7 +279,7 @@ func TestHubAdaptiveGridAvoidsWidthCliffs(t *testing.T) {
 	m.states[0].Snapshot.GPUs = make([]gpuInfo, 16)
 	m.states[0].Snapshot.GPUs[0] = gpuInfo{Utilization: 100, Temperature: 100}
 	card := ansi.Strip(m.renderNodeCard(0, m.cardWidth()))
-	if !strings.Contains(card, "GPU ×16 100%") || !strings.Contains(card, "100°C") {
+	if !strings.Contains(card, "GPU") || !strings.Contains(card, "×16") || !strings.Contains(card, "100%") || !strings.Contains(card, "100°C") {
 		t.Fatalf("important GPU fields clipped at minimum width: %s", card)
 	}
 }
@@ -299,20 +299,55 @@ func TestHubBlockBarReflectsBusyCPUAndGPUAcrossWidths(t *testing.T) {
 					if lipgloss.Width(card) != width || lipgloss.Height(card) != hubCardHeight {
 						t.Fatalf("%s width %d changed card geometry", profile, width)
 					}
-					lines := strings.Split(card, "\n")
-					load := cpu
-					if profile == machineProfileGPU && gpu > load {
-						load = gpu
+					plain := ansi.Strip(card)
+					if !strings.Contains(plain, "CPU") || !strings.Contains(plain, "MEM") {
+						t.Fatalf("%s cpu %.0f gpu %.0f: missing meters: %s", profile, cpu, gpu, plain)
 					}
-					want := "│ " + ansi.Strip(bar(load, width-4)) + " │"
-					if ansi.Strip(lines[4]) != want {
-						t.Fatalf("%s cpu %.0f gpu %.0f: wrong full-width load bar: %s", profile, cpu, gpu, lines[4])
+					if profile == machineProfileGPU && !strings.Contains(plain, "GPU") {
+						t.Fatalf("gpu profile lost the GPU meter: %s", plain)
 					}
-					if !strings.Contains(lines[3], "↑") || !strings.Contains(lines[3], "↓") || strings.Contains(lines[3], "…") {
-						t.Fatalf("%s width %d clipped network directions: %s", profile, width, lines[3])
+					if profile == machineProfileCPU && !strings.Contains(plain, "DSK") {
+						t.Fatalf("cpu profile lost the disk meter: %s", plain)
+					}
+					cpuLine := hubMeterLine(plain, "CPU")
+					if !meterMatches(cpuLine, cpu) {
+						t.Fatalf("%s cpu %.0f: meter %q", profile, cpu, cpuLine)
+					}
+					if profile == machineProfileGPU {
+						if gpuLine := hubMeterLine(plain, "GPU"); !meterMatches(gpuLine, gpu) {
+							t.Fatalf("gpu %.0f: meter %q", gpu, gpuLine)
+						}
 					}
 				}
 			}
 		}
 	}
+}
+
+func hubMeterLine(card, label string) string {
+	for _, line := range strings.Split(card, "\n") {
+		if strings.Contains(line, label+" ▕") {
+			return line
+		}
+	}
+	return ""
+}
+
+func meterMatches(line string, value float64) bool {
+	start := strings.Index(line, "▕")
+	end := strings.Index(line, "▏")
+	if start < 0 || end <= start {
+		return false
+	}
+	bar := line[start+len("▕") : end]
+	width := strings.Count(bar, "█") + strings.Count(bar, "░")
+	filled := strings.Count(bar, "█")
+	want := int(value / 100 * float64(width))
+	if want < 0 {
+		want = 0
+	}
+	if want > width {
+		want = width
+	}
+	return filled == want
 }

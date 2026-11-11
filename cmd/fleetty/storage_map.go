@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"image/color"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -1246,23 +1245,11 @@ func storageRectLabel(rect storageMapRect, row, width int) string {
 	return ""
 }
 
-func storageRectStyle(index int, selected bool, mode colorMode) lipgloss.Style {
+func storageRectStyle(_ int, selected bool, _ colorMode) lipgloss.Style {
 	if selected {
-		return lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#10131A")).
-			Background(lipgloss.Color("#B9A4FF")).
-			Bold(true)
+		return lipgloss.NewStyle().Foreground(colorOnAccent).Background(colorAccent).Bold(true)
 	}
-	backgrounds := []color.Color{
-		colorNetworkBorder, colorMemoryBorder, colorDiskBorder, colorCPUBorder,
-		colorGPUBorder, colorProcessBorder, lipgloss.Color("#5A3E52"), lipgloss.Color("#3E5A55"),
-	}
-	foreground := lipgloss.Color("#F5F7FF")
-	if mode == colorModeLight {
-		foreground = lipgloss.Color("#20242D")
-	}
-	return lipgloss.NewStyle().Foreground(foreground).
-		Background(backgrounds[index%len(backgrounds)]).Bold(true)
+	return lipgloss.NewStyle().Foreground(colorText).Background(colorSurface).Bold(true)
 }
 
 func compactStorageDuration(duration time.Duration) string {

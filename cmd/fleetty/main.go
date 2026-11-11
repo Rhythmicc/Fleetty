@@ -1523,7 +1523,7 @@ func gpuPanelMetricsLine(gpu gpuInfo, width int) string {
 	clockPart := gpuStyledCell(gpuClockStyle(gpu.ClockMHz), clockText, columns.clock, false)
 	temperaturePart := gpuStyledCell(gpuTemperatureStyle(gpu.Temperature), fmt.Sprintf("%d°C", gpu.Temperature), columns.temperature, false)
 	parts := []string{
-		gpuStyledCell(accentStyle, fmt.Sprintf("GPU %-2d", gpu.Index), columns.index, false),
+		gpuStyledCell(valueStyle, fmt.Sprintf("GPU %-2d", gpu.Index), columns.index, false),
 		name,
 		utilPart,
 		memoryPart,
@@ -1616,57 +1616,34 @@ func gpuNameWidth(gpus []gpuInfo, width int) int {
 }
 
 func gpuLoadStatus(utilization float64) (string, lipgloss.Style) {
+	// The words stay so a row can still say IDLE or BUSY. The color is only
+	// the shared ok / warn / crit scale.
+	style := stateStyle(usageLevel(utilization))
 	switch {
 	case utilization < 5:
-		return "IDLE", gpuIdleStyle
+		return "IDLE", style
 	case utilization < 35:
-		return "LIGHT", gpuLightStyle
+		return "LIGHT", style
 	case utilization < 65:
-		return "ACTIVE", gpuActiveStyle
+		return "ACTIVE", style
 	case utilization < 85:
-		return "BUSY", gpuBusyStyle
+		return "BUSY", style
 	case utilization < 95:
-		return "HIGH", gpuHighStyle
+		return "HIGH", style
 	default:
-		return "MAX", gpuMaxStyle
+		return "MAX", style
 	}
 }
 
-// Clock and temperature are shown as live health signals on the Compute page.
-// The bands are intentionally hardware-agnostic: they communicate idle,
-// warming, busy, and hot states without requiring a per-GPU clock database.
-func gpuClockStyle(clockMHz int) lipgloss.Style {
-	switch {
-	case clockMHz <= 500:
-		return gpuIdleStyle
-	case clockMHz <= 1000:
-		return gpuLightStyle
-	case clockMHz <= 1800:
-		return gpuActiveStyle
-	case clockMHz <= 2300:
-		return gpuBusyStyle
-	case clockMHz <= 2700:
-		return gpuHighStyle
-	default:
-		return gpuMaxStyle
-	}
+// Clock speed is informational. Temperature is the health signal, colored
+// with the shared state scale.
+func gpuClockStyle(int) lipgloss.Style {
+	// Clock speed is not a health state. Keep it neutral.
+	return valueStyle
 }
 
 func gpuTemperatureStyle(temperature int) lipgloss.Style {
-	switch {
-	case temperature <= 45:
-		return gpuIdleStyle
-	case temperature <= 60:
-		return gpuLightStyle
-	case temperature <= 72:
-		return gpuActiveStyle
-	case temperature <= 82:
-		return gpuBusyStyle
-	case temperature <= 90:
-		return gpuHighStyle
-	default:
-		return gpuMaxStyle
-	}
+	return stateStyle(temperatureLevel(temperature))
 }
 
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
@@ -1695,7 +1672,7 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	border := colorProcessBorder
 	if m.monitorFocus == monitorFocusProcesses || m.slurmQueue == nil {
 		titleForPanel = accentStyle
-		border = lipgloss.Color("#B9A4FF")
+		border = colorBorderFocus
 	}
 	meta := m.processTableMeta(m.monitorOffset, layout.processRows, w, "PROCESSES")
 	return btopPanel(w, "PROCESSES", meta, strings.Join(lines, "\n"), titleForPanel, border)
@@ -1966,11 +1943,10 @@ func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 			renderMetricVisual(c, contentWidth),
 		}
 		if c.visual == metricVisualCPU && contentWidth >= 58 {
-			_, style := gpuLoadStatus(c.usage)
 			historyWidth := 24
 			leftWidth := contentWidth - historyWidth - 3
 			left := []string{valueStyle.Render(truncate(c.value, leftWidth)), dimStyle.Render(truncate(c.detail, leftWidth))}
-			lines = historyColumns(left, renderHistoryChart(c.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, style), leftWidth)
+			lines = historyColumns(left, renderHistoryChart(c.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, chartStyle), leftWidth)
 		}
 		lines = strings.Split(strings.Join(lines, "\n"), "\n")
 		for len(lines) < minimumRows {
@@ -2000,8 +1976,7 @@ func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 func renderMetricVisual(card metricCard, width int) string {
 	switch card.visual {
 	case metricVisualCPU:
-		_, style := gpuLoadStatus(card.usage)
-		return strings.Join(renderHistoryChart(card.primaryHistory, width, historyPlotHeight, "CPU %", 100, style), "\n")
+		return strings.Join(renderHistoryChart(card.primaryHistory, width, historyPlotHeight, "CPU %", 100, chartStyle), "\n")
 	case metricVisualMeter:
 		return bar(card.usage, width)
 	case metricVisualNetwork:
@@ -2040,8 +2015,8 @@ func processLegend(width int) string {
 		parts = append(parts, processStateStyle(item.state).Render(label))
 	}
 	legend := strings.Join(parts, "  ")
-	load := dimStyle.Render("   LOAD ") + gpuLightStyle.Render("LOW") + " " +
-		gpuActiveStyle.Render("MID") + " " + gpuBusyStyle.Render("HIGH") + " " + gpuMaxStyle.Render("HOT")
+	load := dimStyle.Render("   LOAD ") + okStyle.Render("OK") + " " +
+		warningStyle.Render("WARN") + " " + dangerStyle.Render("CRIT")
 	if lipgloss.Width(legend)+lipgloss.Width(load) <= width {
 		legend += load
 	}
@@ -2070,24 +2045,6 @@ func processStateStyle(state string) lipgloss.Style {
 	default:
 		return processDefaultStyle
 	}
-}
-
-// selectedProcessStyle uses colors that are explicit members of the xterm
-// palette. That keeps SSH terminals which only advertise 256 colors from
-// approximating the selection background as saturated blue. Selection also
-// uses a neutral background. Process-table cells retain their load colors
-// on top of this background, including in the selected row.
-func selectedProcessStyle(mode colorMode) lipgloss.Style {
-	foreground := lipgloss.Color("153") // soft blue
-	background := lipgloss.Color("236") // neutral charcoal
-	if mode == colorModeLight {
-		foreground = lipgloss.Color("17")  // dark navy
-		background = lipgloss.Color("189") // pale blue
-	}
-	return lipgloss.NewStyle().
-		Foreground(foreground).
-		Background(background).
-		Bold(true)
 }
 
 func actionCard(width int, key, title, detail string, dangerous bool) string {
@@ -2753,63 +2710,11 @@ func sanitizeTerminalText(value string) string {
 	return safe.String()
 }
 
-var (
-	colorPanelBorder         = lipgloss.Color("#40516B")
-	colorCPUBorder           = lipgloss.Color("#315F57")
-	colorMemoryBorder        = lipgloss.Color("#514A78")
-	colorDiskBorder          = lipgloss.Color("#6B5438")
-	colorNetworkBorder       = lipgloss.Color("#315B72")
-	colorBatteryBorder       = lipgloss.Color("#615B32")
-	colorGPUBorder           = lipgloss.Color("#53517A")
-	colorProcessBorder       = lipgloss.Color("#465572")
-	titleStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
-	sectionStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
-	valueStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Bold(true)
-	hubMetricStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#D7DAE0"))
-	barTrackStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#343C49"))
-	accentStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
-	cpuTitleStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#7EE2B8")).Bold(true)
-	memoryTitleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A7E7")).Bold(true)
-	diskTitleStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#F6C177")).Bold(true)
-	networkTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
-	batteryTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD166")).Bold(true)
-	gpuTitleStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#B9A4FF")).Bold(true)
-	processTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#9FC3FF")).Bold(true)
-	dangerStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80")).Bold(true)
-	dimStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3BC"))
-	warningStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD180"))
-	helpStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDB4FF")).Bold(true)
-	clockStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F6C177")).Bold(true)
-	liveBadgeStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#7EE2B8")).Bold(true).Padding(0, 1)
-	keycapStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#B9A4FF")).Bold(true).Padding(0, 1)
-	hintLabelStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C9CEDA"))
-	processHeaderStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#10131A")).Background(lipgloss.Color("#9FC3FF")).Bold(true)
-	inputStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#24283B")).Padding(0, 1)
-	networkRXStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
-	networkTXStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A7E7")).Bold(true)
-	processRunningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
-	processSleepingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#9FC3FF"))
-	processWaitingStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C")).Bold(true)
-	processStoppedStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD180"))
-	processZombieStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF7B72")).Bold(true)
-	processIdleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#8C91A8"))
-	processDeadStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5370")).Bold(true)
-	processDefaultStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#D7DAE0"))
-	gpuIdleStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#8C91A8"))
-	gpuLightStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#70D6FF")).Bold(true)
-	gpuActiveStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EE493")).Bold(true)
-	gpuBusyStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD166")).Bold(true)
-	gpuHighStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF9F43")).Bold(true)
-	gpuMaxStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5370")).Bold(true)
-	compactButtonStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5F7FF")).Background(lipgloss.Color("#30374A")).Padding(0, 1)
-	compactDangerButtonStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFF4F2")).Background(lipgloss.Color("#5A3037")).Padding(0, 1)
-)
-
 func panelStyle(width int) lipgloss.Style {
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5B6B8A")).Padding(0, 1).Width(max(20, width-2))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1).Width(max(20, width-2))
 }
 func clickableStyle(width int) lipgloss.Style {
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#B9A4FF")).Padding(0, 1).Width(max(20, width-2))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorderFocus).Padding(0, 1).Width(max(20, width-2))
 }
 
 func btopPanel(width int, title, meta, content string, titleStyle lipgloss.Style, borderColor color.Color) string {
@@ -2821,7 +2726,12 @@ func btopPanel(width int, title, meta, content string, titleStyle lipgloss.Style
 	titleText := " " + truncate(title, max(4, innerWidth-5)) + " "
 	metaText := ""
 	if meta != "" {
-		metaText = " " + meta + " "
+		// Callers may pass a precolored meta (hub address, latency, WARN).
+		if strings.Contains(meta, "\x1b") {
+			metaText = " " + meta + " "
+		} else {
+			metaText = dimStyle.Render(" " + meta + " ")
+		}
 	}
 	fillWidth := innerWidth - 1 - lipgloss.Width(titleText) - lipgloss.Width(metaText)
 	if fillWidth < 1 {
@@ -2831,7 +2741,7 @@ func btopPanel(width int, title, meta, content string, titleStyle lipgloss.Style
 	top := borderStyle.Render("╭─") +
 		titleStyle.Render(titleText) +
 		borderStyle.Render(strings.Repeat("─", fillWidth)) +
-		dimStyle.Render(metaText) +
+		metaText +
 		borderStyle.Render("╮")
 
 	lines := strings.Split(content, "\n")
@@ -2972,79 +2882,6 @@ func (m *monitorModel) toggleColorMode() {
 	m.status = fmt.Sprintf("%s theme enabled for this SSH session.", strings.ToUpper(m.colorMode.String()))
 }
 
-func viewColors(mode colorMode) (background, foreground color.Color) {
-	if mode == colorModeLight {
-		return lipgloss.Color("#F4F1EA"), lipgloss.Color("#263244")
-	}
-	return lipgloss.Color("#0E1117"), lipgloss.Color("#D7DAE0")
-}
-
-type themeColorSwap struct{ dark, light string }
-
-var lightThemeColorSwaps = []themeColorSwap{
-	{"#10131A", "#F8FAFC"},
-	{"#0E1117", "#F4F1EA"},
-	{"#9EE493", "#1F6F50"},
-	{"#F5F7FF", "#172033"},
-	{"#B9A4FF", "#5A3FA3"},
-	{"#7EE2B8", "#166B4B"},
-	{"#C4A7E7", "#704E91"},
-	{"#F6C177", "#945E13"},
-	{"#70D6FF", "#0B668A"},
-	{"#9FC3FF", "#315D91"},
-	{"#FF8A80", "#B42318"},
-	{"#9CA3BC", "#5B6475"},
-	{"#FFD180", "#8A5A00"},
-	{"#CDB4FF", "#664A96"},
-	{"#C9CEDA", "#384252"},
-	{"#B8C0D9", "#334155"},
-	{"#24283B", "#E4E9F0"},
-	{"#FFB86C", "#A94B00"},
-	{"#FF7B72", "#B42318"},
-	{"#8C91A8", "#667085"},
-	{"#FF5370", "#A80F2D"},
-	{"#D7DAE0", "#2E3642"},
-	{"#FFD166", "#8A5A00"},
-	{"#FF9F43", "#B54708"},
-	{"#30374A", "#D9E0EA"},
-	{"#343C49", "#D5D9DF"},
-	{"#FFF4F2", "#8F1D18"},
-	{"#5A3037", "#F4D8D5"},
-	{"#40516B", "#C4CBD4"},
-	{"#315F57", "#AFC6BF"},
-	{"#514A78", "#C2BBD1"},
-	{"#6B5438", "#CEBFA8"},
-	{"#315B72", "#B0C5D1"},
-	{"#615B32", "#C9C4A8"},
-	{"#53517A", "#BFBDD1"},
-	{"#465572", "#B6C1D2"},
-	{"#5B6B8A", "#B6C1D2"},
-}
-
-// Rendering always uses the immutable dark palette. Light mode rewrites only
-// known ANSI RGB sequences in the completed view, keeping theme selection
-// session-local without mutating shared styles across concurrent SSH sessions.
-func applyLightTheme(rendered string) string {
-	for _, swap := range lightThemeColorSwaps {
-		dark := ansiRGB(swap.dark)
-		light := ansiRGB(swap.light)
-		rendered = strings.ReplaceAll(rendered, "38;2;"+dark, "38;2;"+light)
-		rendered = strings.ReplaceAll(rendered, "48;2;"+dark, "48;2;"+light)
-	}
-	return rendered
-}
-
-func ansiRGB(hex string) string {
-	hex = strings.TrimPrefix(hex, "#")
-	if len(hex) != 6 {
-		return ""
-	}
-	red, _ := strconv.ParseUint(hex[0:2], 16, 8)
-	green, _ := strconv.ParseUint(hex[2:4], 16, 8)
-	blue, _ := strconv.ParseUint(hex[4:6], 16, 8)
-	return fmt.Sprintf("%d;%d;%d", red, green, blue)
-}
-
 func usableWidth(width int) int {
 	if width <= 0 {
 		return 80
@@ -3139,23 +2976,13 @@ func bar(value float64, width int) string {
 	if filled > width {
 		filled = width
 	}
-	_, loadStyle := gpuLoadStatus(value)
-	return loadStyle.Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
+	return stateStyle(usageLevel(value)).Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
 }
 
 func batteryBar(value float64, width int) string {
 	filled := int(value / 100 * float64(width))
 	filled = max(0, min(width, filled))
-	style := gpuActiveStyle
-	switch {
-	case value <= 10:
-		style = gpuMaxStyle
-	case value <= 25:
-		style = gpuHighStyle
-	case value <= 50:
-		style = gpuBusyStyle
-	}
-	return style.Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
+	return stateStyle(batteryLevel(value)).Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
 }
 func compactCommandError(err error) string {
 	if errors.Is(err, exec.ErrNotFound) {

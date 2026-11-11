@@ -95,13 +95,14 @@ func TestCompactSlurmStatesArraysAndUnicode(t *testing.T) {
 }
 
 func TestSlurmQOSColorsAndLegend(t *testing.T) {
-	seen := map[string]bool{}
-	for _, name := range []string{"normal", "high", "urgent", "long", "low"} {
-		color := fmt.Sprint(slurmQOSStyle(name).GetForeground())
-		if seen[color] {
-			t.Fatalf("standard QOS %s reused color %s", name, color)
-		}
-		seen[color] = true
+	if slurmQOSStyle("urgent").Render("●") != dangerStyle.Render("●") {
+		t.Fatal("urgent QOS should use the critical state color")
+	}
+	if slurmQOSStyle("high").Render("●") != warningStyle.Render("●") {
+		t.Fatal("high QOS should use the warning state color")
+	}
+	if slurmQOSStyle("normal").Render("●") != dimStyle.Render("●") || slurmQOSStyle("long").Render("●") != dimStyle.Render("●") {
+		t.Fatal("ordinary QOS names should stay neutral")
 	}
 	jobs := []slurmDisplayJob{{Job: slurmJob{QOS: "urgent"}}, {Job: slurmJob{QOS: "normal"}}, {Job: slurmJob{QOS: "urgent"}}}
 	legend := slurmQOSLegend(jobs, 56)

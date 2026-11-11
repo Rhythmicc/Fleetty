@@ -13,9 +13,10 @@ func singleGPUOverviewLines(gpu gpuInfo, width int) []string {
 		name += fmt.Sprintf(" · %d cores", gpu.CoreCount)
 	}
 	var telemetry []string
+	temp := ""
 	if gpu.Platform != "apple" {
 		if gpu.Temperature > 0 {
-			telemetry = append(telemetry, fmt.Sprintf("%d°C", gpu.Temperature))
+			temp = temperatureReading(gpu.Temperature, fmt.Sprintf("%d°C", gpu.Temperature))
 		}
 		if gpu.Power > 0 || gpu.PowerLimit > 0 {
 			telemetry = append(telemetry, fmt.Sprintf("%.0fW", gpu.Power))
@@ -24,7 +25,13 @@ func singleGPUOverviewLines(gpu gpuInfo, width int) []string {
 			telemetry = append(telemetry, fmt.Sprintf("%dMHz", gpu.ClockMHz))
 		}
 	}
-	lines := []string{alignedPageLine(accentStyle.Render(name), dimStyle.Render(strings.Join(telemetry, " · ")), width)}
+	aside := dimStyle.Render(strings.Join(telemetry, " · "))
+	if temp != "" && aside != "" {
+		aside = temp + dimStyle.Render(" · ") + aside
+	} else if temp != "" {
+		aside = temp
+	}
+	lines := []string{alignedPageLine(valueStyle.Render(name), aside, width)}
 	type reading struct {
 		label, value string
 		usage        float64
@@ -52,8 +59,7 @@ func singleGPUOverviewLines(gpu gpuInfo, width int) []string {
 	for start := 0; start < len(readings); start += columns {
 		var labels, bars []string
 		for _, item := range readings[start:min(start+columns, len(readings))] {
-			_, style := gpuLoadStatus(item.usage)
-			label := dimStyle.Render(item.label+" ") + style.Render(item.value)
+			label := dimStyle.Render(item.label+" ") + usageReading(item.usage, item.value)
 			label = ansi.Truncate(label, cellWidth, "…")
 			labels = append(labels, label+strings.Repeat(" ", max(0, cellWidth-ansi.StringWidth(label))))
 			bars = append(bars, bar(item.usage, cellWidth))
@@ -160,7 +166,7 @@ func (card gpuCardComponent) compactPanelSpec(width int) pagePanelSpec {
 			dimStyle.Render(truncate(gpu.Name, max(4, width-4))),
 			bar(gpu.Utilization, max(1, width-4)),
 		},
-		titleStyle: style, borderColor: colorGPUBorder,
+		titleStyle: sectionStyle, borderColor: colorBorder,
 	}
 }
 

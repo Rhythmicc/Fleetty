@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -28,7 +27,7 @@ const (
 	hubGroupStyleNetwork      = "network"
 	hubGroupStyleProcess      = "process"
 	defaultHubRefreshInterval = time.Second
-	hubCardHeight             = 7
+	hubCardHeight             = 5
 	hubPreferredCardWidth     = 46
 	hubMinimumCardWidth       = 36
 	hubOverviewRPCTimeout     = 900 * time.Millisecond
@@ -1167,7 +1166,13 @@ func (m *hubModel) hubView() string {
 			online++
 		}
 	}
-	title := titleStyle.Render(m.config.displayName()) + "  " + liveBadgeStyle.Render(fmt.Sprintf("%d/%d ONLINE", online, len(m.config.Nodes)))
+	badge := liveBadgeStyle
+	if len(m.config.Nodes) > 0 && online == 0 {
+		badge = critBadgeStyle
+	} else if online < len(m.config.Nodes) {
+		badge = warnBadgeStyle
+	}
+	title := titleStyle.Render(m.config.displayName()) + "  " + badge.Render(fmt.Sprintf("%d/%d ONLINE", online, len(m.config.Nodes)))
 	meta := dimStyle.Render(fmt.Sprintf("%ds  ·  %s", int(m.config.refreshInterval().Seconds()), strings.ToUpper(m.colorMode.String())))
 	headerGap := max(2, width-lipgloss.Width(title)-lipgloss.Width(meta))
 	header := ansi.Truncate(title+strings.Repeat(" ", headerGap)+meta, width, "")
@@ -1225,15 +1230,8 @@ func (m *hubModel) hubView() string {
 	return terminalFrame(body, footer, width, m.height)
 }
 
-func renderHubSectionTitle(title, styleName string, count, width int) string {
-	style := gpuTitleStyle
-	if styleName == hubGroupStyleCPU {
-		style = cpuTitleStyle
-	} else if styleName == hubGroupStyleNetwork {
-		style = networkRXStyle
-	} else if styleName == hubGroupStyleProcess {
-		style = processTitleStyle
-	}
+func renderHubSectionTitle(title, _ string, count, width int) string {
+	style := sectionStyle
 	unit := "NODES"
 	if count == 1 {
 		unit = "NODE"
@@ -1252,85 +1250,47 @@ func (m *hubModel) renderNodeCard(index, width int) string {
 	}
 	selected := index == m.cursor
 	title := node.Name
-	titleStyleForCard := processTitleStyle
-	border := colorPanelBorder
+	titleStyleForCard := valueStyle
+	border := colorBorder
 	if selected {
 		title = "▸ " + title
 		titleStyleForCard = accentStyle
-		border = lipgloss.Color("#B9A4FF")
+		border = colorBorderFocus
 	}
-	meta := "CHECKING"
-	renderCard := func(content []string) string {
-		address := dimStyle.Render(hubNodeAddressLabel(node.Address))
-		if state.Warning != "" {
-			meta += " WARN"
-			address += warningStyle.Render(" · " + sanitizeTerminalText(state.Warning))
-		}
-		content = append(content, ansi.Truncate(address, max(1, width-4), "…"))
-		return btopPanel(width, title, meta, strings.Join(content, "\n"), titleStyleForCard, border)
-	}
-	content := []string{
-		dimStyle.Render(truncate(node.Description, width-4)),
-		"Waiting for the first snapshot…",
-		"",
-		dimStyle.Render(strings.Repeat("·", max(1, width-4))),
-	}
+	status := "CHECKING"
 	if state.Error != "" {
-		meta = "OFFLINE"
-		lastSeen := "Never seen online"
-		if !state.LastSeen.IsZero() {
-			lastSeen = "Last seen " + hubAge(time.Since(state.LastSeen)) + " ago"
-		}
-		retry := "retrying now"
-		if remaining := time.Until(state.NextRetry); remaining > 0 {
-			retry = "auto retry in " + hubAge(remaining)
-		}
-		content = []string{
-			dangerStyle.Render("● OFFLINE / UNREACHABLE"),
-			dimStyle.Render(truncate(lastSeen, width-4)),
-			warningStyle.Render(truncate(state.Error, width-4)),
-			dimStyle.Render(truncate("[r] retry now · "+retry, width-4)),
-		}
+		status = "OFFLINE"
 	} else if !state.Snapshot.CollectedAt.IsZero() {
-		meta = fmt.Sprintf("%dms", state.Latency.Milliseconds())
+		status = fmt.Sprintf("%dms", state.Latency.Milliseconds())
+	}
+	meta := hubCardMeta(hubNodeAddressLabel(node.Address), status, state.Warning != "")
+	contentWidth := max(1, width-4)
+	var content []string
+	switch {
+	case state.Error != "":
+		content = renderOfflineHubCard(state, contentWidth)
+	case !state.Snapshot.CollectedAt.IsZero():
 		snapshot := state.Snapshot
 		profile := normalizeMachineProfile(node.Profile)
 		if strings.TrimSpace(node.Profile) == "" && snapshot.Profile != "" {
 			profile = normalizeMachineProfile(snapshot.Profile)
 		}
-		if profile == machineProfileNAS {
-			content = renderNASHubCard(snapshot)
-			return renderCard(content)
-		}
-		if profile == machineProfileCPU {
-			content = renderCPUHubCard(snapshot, width)
-			return renderCard(content)
-		}
-		gpuUtil, gpuMemoryUsed, gpuMemoryTotal, maxTemperature := hubGPUStats(snapshot.GPUs)
-		gpuPrefix := fmt.Sprintf("%s ×%d %3.0f%%  %s ", dimStyle.Render("GPU"), len(snapshot.GPUs), gpuUtil, dimStyle.Render("VRAM"))
-		memory := bytes(gpuMemoryUsed) + "/" + bytes(gpuMemoryTotal)
-		if lipgloss.Width(gpuPrefix)+lipgloss.Width(memory) > width-4 {
-			memory = hubCompactBytes(gpuMemoryUsed) + "/" + hubCompactBytes(gpuMemoryTotal)
-		}
-		network := gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature)) + "  " + renderHubNetworkRates(snapshot)
-		if lipgloss.Width(network) > width-4 {
-			network = gpuTemperatureStyle(maxTemperature).Render(fmt.Sprintf("%d°C", maxTemperature)) +
-				" " + networkRXStyle.Render("↓") + hubMetricStyle.Render(hubCompactBytes(snapshot.NetworkRX)+"/s") +
-				" " + networkTXStyle.Render("↑") + hubMetricStyle.Render(hubCompactBytes(snapshot.NetworkTX)+"/s")
-		}
-		content = []string{
-			renderHubResourceSummary(snapshot),
-			gpuPrefix + hubMetricStyle.Render(memory),
-			network,
-			bar(math.Max(snapshot.CPUPercent, gpuUtil), max(1, width-4)),
-		}
+		content = renderLiveHubCard(snapshot, profile, contentWidth)
+	default:
+		content = renderWaitingHubCard(node.Description, contentWidth)
 	}
-	if node.Description == "" && strings.HasPrefix(content[0], "\x1b") {
-		// Live and offline cards already use all five lines. Waiting cards keep
-		// a stable height even when no optional description was configured.
-		content[0] = strings.TrimSpace(content[0])
+	return btopPanel(width, title, meta, strings.Join(content, "\n"), titleStyleForCard, border)
+}
+
+func hubCardMeta(address, status string, warn bool) string {
+	parts := []string{dimStyle.Render(address)}
+	if status != "" {
+		parts = append(parts, dimStyle.Render(status))
 	}
-	return renderCard(content)
+	if warn {
+		parts = append(parts, warningStyle.Render("WARN"))
+	}
+	return strings.Join(parts, dimStyle.Render("  "))
 }
 
 func hubNodeAddressLabel(address string) string {
@@ -1348,47 +1308,73 @@ func hubNodeAddressLabel(address string) string {
 	return label + sanitizeTerminalText(host)
 }
 
-func renderCPUHubCard(snapshot monitorSnapshot, width int) []string {
-	load := strings.TrimSpace(strings.TrimPrefix(snapshot.LoadAverage, "load"))
-	if load == "" {
-		load = "--"
+func renderWaitingHubCard(description string, width int) []string {
+	lines := []string{dimStyle.Render(truncate("Waiting for the first snapshot…", width))}
+	if strings.TrimSpace(description) != "" {
+		lines = append(lines, dimStyle.Render(truncate(description, width)))
 	}
-	return []string{
-		renderHubResourceSummary(snapshot),
-		fmt.Sprintf("%s %d  %s %s",
-			cpuTitleStyle.Render("CORES"), snapshot.CPUCores,
-			dimStyle.Render("LOAD"), dimStyle.Render(load)),
-		renderHubNetworkRates(snapshot),
-		bar(snapshot.CPUPercent, max(1, width-4)),
+	return fitHubLines(lines)
+}
+
+func renderOfflineHubCard(state hubNodeState, width int) []string {
+	lastSeen := "Never seen online"
+	if !state.LastSeen.IsZero() {
+		lastSeen = "Last seen " + hubAge(time.Since(state.LastSeen)) + " ago"
 	}
-}
-
-func renderHubResourceSummary(snapshot monitorSnapshot) string {
-	return dimStyle.Render("CPU ") + cpuTitleStyle.Render(fmt.Sprintf("%4.1f%%", snapshot.CPUPercent)) +
-		dimStyle.Render("  MEM ") + hubCapacityStyle(percent(snapshot.MemoryUsed, snapshot.MemoryTotal), memoryTitleStyle).Render(fmt.Sprintf("%4.1f%%", percent(snapshot.MemoryUsed, snapshot.MemoryTotal))) +
-		dimStyle.Render("  DSK ") + hubCapacityStyle(percent(snapshot.DiskUsed, snapshot.DiskTotal), diskTitleStyle).Render(fmt.Sprintf("%4.1f%%", percent(snapshot.DiskUsed, snapshot.DiskTotal)))
-}
-
-func hubCapacityStyle(usage float64, normal lipgloss.Style) lipgloss.Style {
-	if usage >= 95 {
-		return dangerStyle
+	retry := "retrying now"
+	if remaining := time.Until(state.NextRetry); remaining > 0 {
+		retry = "retry in " + hubAge(remaining)
 	}
-	if usage >= 85 {
-		return warningStyle
+	return fitHubLines([]string{
+		dangerStyle.Render(truncate("● OFFLINE / UNREACHABLE", width)),
+		dimStyle.Render(truncate(lastSeen+" · "+retry, width)),
+		dimStyle.Render(truncate(state.Error, width)),
+	})
+}
+
+func renderLiveHubCard(snapshot monitorSnapshot, profile string, width int) []string {
+	if profile == machineProfileNAS {
+		return renderNASHubCard(snapshot, width)
 	}
-	return normal
+	memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
+	disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
+	if profile == machineProfileCPU || len(snapshot.GPUs) == 0 {
+		return fitHubLines([]string{
+			labeledMeter("CPU", snapshot.CPUPercent, width),
+			labeledMeter("MEM", memory, width),
+			labeledMeter("DSK", disk, width),
+		})
+	}
+	gpuUtil, _, _, maxTemperature := hubGPUStats(snapshot.GPUs)
+	tail := ""
+	if len(snapshot.GPUs) > 0 {
+		tail = dimStyle.Render(fmt.Sprintf("×%d", len(snapshot.GPUs)))
+	}
+	if maxTemperature > 0 {
+		temp := temperatureReading(maxTemperature, fmt.Sprintf("%d°C", maxTemperature))
+		if tail != "" {
+			tail += " "
+		}
+		tail += temp
+	}
+	meterWidth := width
+	pad := ""
+	if tail != "" {
+		meterWidth = max(8, width-lipgloss.Width(tail)-1)
+		pad = strings.Repeat(" ", max(0, width-meterWidth))
+	}
+	gpu := labeledMeter("GPU", gpuUtil, meterWidth)
+	if tail != "" {
+		gpu += " " + tail
+	}
+	return fitHubLines([]string{
+		labeledMeter("CPU", snapshot.CPUPercent, meterWidth) + pad,
+		labeledMeter("MEM", memory, meterWidth) + pad,
+		gpu,
+	})
 }
 
-func hubCompactBytes(value uint64) string {
-	return strings.ReplaceAll(strings.ReplaceAll(bytes(value), ".0 ", " "), " ", "")
-}
-
-func renderHubNetworkRates(snapshot monitorSnapshot) string {
-	return networkRXStyle.Render("↓ ") + hubMetricStyle.Render(bytes(snapshot.NetworkRX)+"/s") +
-		"   " + networkTXStyle.Render("↑ ") + hubMetricStyle.Render(bytes(snapshot.NetworkTX)+"/s")
-}
-
-func renderNASHubCard(snapshot monitorSnapshot) []string {
+func renderNASHubCard(snapshot monitorSnapshot, width int) []string {
 	filesystems := snapshot.Filesystems
 	if len(filesystems) == 0 {
 		filesystems = []filesystemInfo{{Mount: "/", Used: snapshot.DiskUsed, Total: snapshot.DiskTotal}}
@@ -1400,12 +1386,18 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 			worst, worstUsage = filesystem, usage
 		}
 	}
-	storageStyle := dimStyle
-	if worstUsage >= 95 {
-		storageStyle = dangerStyle
-	} else if worstUsage >= 85 {
-		storageStyle = warningStyle
-	}
+	mount := dimStyle.Render(" " + truncate(worst.Mount, 16))
+	diskWidth := max(8, width-lipgloss.Width(mount))
+	net := dimStyle.Render("↓ ") + valueStyle.Render(bytes(snapshot.NetworkRX)+"/s") +
+		dimStyle.Render("  ↑ ") + valueStyle.Render(bytes(snapshot.NetworkTX)+"/s")
+	return fitHubLines([]string{
+		labeledMeter("DSK", worstUsage, diskWidth) + mount,
+		ansi.Truncate(net, width, "…"),
+		renderNASServiceLine(snapshot, width),
+	})
+}
+
+func renderNASServiceLine(snapshot monitorSnapshot, width int) string {
 	healthyHTTP := 0
 	for _, service := range snapshot.Services {
 		if service.Healthy {
@@ -1432,19 +1424,24 @@ func renderNASHubCard(snapshot monitorSnapshot) []string {
 	if snapshot.PM2Error != "" {
 		pm2Health = dangerStyle.Render("ERR")
 	}
-	return []string{
-		fmt.Sprintf("%s %s/s   %s %s/s",
-			networkRXStyle.Render("↓"), bytes(snapshot.NetworkRX),
-			networkTXStyle.Render("↑"), bytes(snapshot.NetworkTX)),
-		dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s", bytes(snapshot.NetworkRXTotal), bytes(snapshot.NetworkTXTotal))),
-		fmt.Sprintf("%s %d  %s",
-			diskTitleStyle.Render("DISK"), len(filesystems),
-			storageStyle.Render(fmt.Sprintf("MAX %.1f%% %s", worstUsage, truncate(worst.Mount, 12)))),
-		fmt.Sprintf("%s %s  %s %s  %s %s",
-			processTitleStyle.Render("HTTP"), compactHealthCount(healthyHTTP, len(snapshot.Services)),
-			accentStyle.Render("CTR"), containerHealth,
-			gpuTitleStyle.Render("PM2"), pm2Health),
+	line := dimStyle.Render("HTTP ") + compactHealthCount(healthyHTTP, len(snapshot.Services)) +
+		dimStyle.Render("  CTR ") + containerHealth +
+		dimStyle.Render("  PM2 ") + pm2Health
+	return ansi.Truncate(line, width, "…")
+}
+
+func fitHubLines(lines []string) []string {
+	if len(lines) > 3 {
+		return lines[:3]
 	}
+	for len(lines) < 3 {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+func hubCapacityStyle(usage float64, _ lipgloss.Style) lipgloss.Style {
+	return stateStyle(usageLevel(usage))
 }
 
 func compactHealthCount(healthy, total int) string {
@@ -1453,9 +1450,12 @@ func compactHealthCount(healthy, total int) string {
 		return dimStyle.Render("—")
 	}
 	if healthy == total {
-		return processRunningStyle.Render(label)
+		return okStyle.Render(label)
 	}
-	return dangerStyle.Render(label)
+	if healthy == 0 {
+		return dangerStyle.Render(label)
+	}
+	return warningStyle.Render(label)
 }
 
 func hubAge(duration time.Duration) string {

@@ -286,23 +286,11 @@ func (f processFormat) row(p processInfo) string {
 	return strings.Join(parts, " ")
 }
 
-func processLoadStyle(value float64, memory bool) lipgloss.Style {
-	low, medium, high := 10.0, 50.0, 90.0
-	if memory {
-		low, medium, high = 5, 15, 30
+func processLoadStyle(value float64, _ bool) lipgloss.Style {
+	if usageLevel(value) == stateOK {
+		return valueStyle
 	}
-	switch {
-	case value < 0.1:
-		return gpuIdleStyle
-	case value < low:
-		return gpuLightStyle
-	case value < medium:
-		return gpuActiveStyle
-	case value < high:
-		return gpuBusyStyle
-	default:
-		return gpuMaxStyle
-	}
+	return stateStyle(usageLevel(value))
 }
 
 func (f processFormat) renderRow(p processInfo, rank int, selected bool, mode colorMode, memoryTotal uint64) string {

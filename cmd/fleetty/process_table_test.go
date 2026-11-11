@@ -159,9 +159,9 @@ func TestProcessTableCellsAlignAcrossWidthsThemesAndSelection(t *testing.T) {
 					}
 					left += column.width + 1
 				}
-				red := "38;2;255;83;112"
+				red := "38;2;255;138;128"
 				if mode == colorModeLight {
-					red = "38;2;168;15;45"
+					red = "38;2;180;35;24"
 				}
 				if !strings.Contains(row, red) {
 					t.Fatal("load color was lost, including on a selected row")
@@ -193,13 +193,14 @@ func TestProcessLoadColorsAreIndependentOfState(t *testing.T) {
 			t.Fatalf("missing metric color %q in %q", expected, row)
 		}
 	}
-	seen := map[string]bool{}
-	for _, value := range []float64{0, 1, 20, 60, 100} {
-		color := processLoadStyle(value, false).Render("load")
-		if seen[color] {
-			t.Fatalf("load level %.1f has no distinct color", value)
-		}
-		seen[color] = true
+	ok := processLoadStyle(20, false).Render("load")
+	warn := processLoadStyle(75, false).Render("load")
+	crit := processLoadStyle(95, false).Render("load")
+	if ok == warn || warn == crit || ok == crit {
+		t.Fatal("process load no longer uses the shared ok/warn/crit scale")
+	}
+	if processLoadStyle(0, false).Render("load") != ok || processLoadStyle(69, false).Render("load") != ok {
+		t.Fatal("healthy process load picked up a state color")
 	}
 }
 

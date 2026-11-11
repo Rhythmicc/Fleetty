@@ -34,8 +34,14 @@ func renderCPUCoreLines(cores []cpuCoreUsage, width int) []string {
 			if core.Available {
 				value = fmt.Sprintf("%5.1f%%", core.Percent)
 			}
+			reading := value
+			if core.Available {
+				reading = usageReading(core.Percent, value)
+			} else {
+				reading = dimStyle.Render(value)
+			}
 			cell := dimStyle.Render(fixedCell(sanitizeTerminalText(core.CPU), labelWidth, false)) +
-				" " + valueStyle.Render(value)
+				" " + reading
 			barWidth := cellWidth - labelWidth - 8
 			if showFrequency {
 				clock := "--"
@@ -89,9 +95,8 @@ func (m *monitorModel) cpuMetricLines(card metricCard, width int) []string {
 	if contentWidth >= 76 {
 		historyWidth := min(40, max(24, contentWidth/4))
 		coreWidth := contentWidth - historyWidth - 3
-		_, style := gpuLoadStatus(card.usage)
 		cores := renderCPUCoreLines(m.snapshot.CPUCoreUsage, coreWidth)
-		history := renderHistoryChart(card.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, style)
+		history := renderHistoryChart(card.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, chartStyle)
 		return append(lines, historyColumns(cores, history, coreWidth)...)
 	}
 	return append(lines, renderCPUCoreLines(m.snapshot.CPUCoreUsage, contentWidth)...)

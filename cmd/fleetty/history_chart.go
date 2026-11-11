@@ -94,12 +94,12 @@ func renderNetworkHistories(rx, tx []float64, width int) []string {
 	var lines []string
 	if width >= 34 {
 		leftWidth := (width - 2) / 2
-		left := renderHistoryChart(rx, leftWidth, historyPlotHeight, "RX B/s", ceiling, networkRXStyle)
-		right := renderHistoryChart(tx, width-leftWidth-2, historyPlotHeight, "TX B/s", ceiling, networkTXStyle)
+		left := renderHistoryChart(rx, leftWidth, historyPlotHeight, "RX B/s", ceiling, chartStyle)
+		right := renderHistoryChart(tx, width-leftWidth-2, historyPlotHeight, "TX B/s", ceiling, chartStyle)
 		lines = historyColumns(left, right, leftWidth)
 	} else {
-		lines = renderHistoryChart(rx, width, historyPlotHeight, "RX B/s", ceiling, networkRXStyle)
-		lines = append(lines, renderHistoryChart(tx, width, historyPlotHeight, "TX B/s", ceiling, networkTXStyle)...)
+		lines = renderHistoryChart(rx, width, historyPlotHeight, "RX B/s", ceiling, chartStyle)
+		lines = append(lines, renderHistoryChart(tx, width, historyPlotHeight, "TX B/s", ceiling, chartStyle)...)
 	}
 	peak := fmt.Sprintf("PEAK ↓ %s/s ↑ %s/s", bytes(uint64(historyMax(rx))), bytes(uint64(historyMax(tx))))
 	return append(lines, dimStyle.Render(truncate(peak, width)))

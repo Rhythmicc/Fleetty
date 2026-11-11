@@ -173,7 +173,7 @@ func TestHubCPUProfileRendersDedicatedSectionAndCard(t *testing.T) {
 		t.Fatalf("CPU node groups = %#v", groups)
 	}
 	rendered := model.renderNodeCard(0, 48)
-	for _, expected := range []string{"CPU", "CORES", "64", "LOAD", "0.07", "↓", "↑"} {
+	for _, expected := range []string{"CPU", "MEM", "DSK"} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("CPU Hub card missing %q:\n%s", expected, rendered)
 		}
