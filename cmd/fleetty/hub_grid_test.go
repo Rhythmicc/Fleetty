@@ -258,6 +258,11 @@ func TestHubPackedGroupsAndPagination(t *testing.T) {
 		if strings.Count(plain, "CPU COMPUTE") != 1 || strings.Count(plain, "CLUSTER SERVICES") != 1 {
 			t.Fatalf("width %d lost a group header:\n%s", width, plain)
 		}
+		for _, line := range strings.Split(plain, "\n") {
+			if strings.Contains(line, "CPU COMPUTE") && strings.Contains(line, "CLUSTER SERVICES") {
+				t.Fatalf("width %d put two group headers on one row: %s", width, line)
+			}
+		}
 		rows := m.pageNodeRows(m.pages()[0])
 		if err := hubRowsAreContiguous(rows, m.nodeGroups()); err != nil {
 			t.Fatalf("width %d: %v", width, err)

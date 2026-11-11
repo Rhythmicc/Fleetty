@@ -2368,6 +2368,13 @@ func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorS
 	if includeProcesses {
 		c.collectProcesses(&s, &errs)
 		attachGPUWorkloadUsers(s.GPUs, s.Processes)
+	} else {
+		// The hub card names who is on the machine without shipping the
+		// full process table. Older hubs ignore a short Processes list.
+		var ignored []string
+		c.collectProcesses(&s, &ignored)
+		attachGPUWorkloadUsers(s.GPUs, s.Processes)
+		s.Processes = topProcesses(s.Processes, 3)
 	}
 	if len(errs) > 0 {
 		return s, errors.New(strings.Join(errs, "; "))
@@ -2563,6 +2570,28 @@ func parseGPUWorkloads(output []byte) map[string][]gpuWorkloadInfo {
 		})
 	}
 	return workloads
+}
+
+func topProcesses(processes []processInfo, limit int) []processInfo {
+	if limit <= 0 || len(processes) == 0 {
+		return nil
+	}
+	remaining := append([]processInfo(nil), processes...)
+	picked := make([]processInfo, 0, min(limit, len(remaining)))
+	for len(picked) < limit && len(remaining) > 0 {
+		best := 0
+		for index := 1; index < len(remaining); index++ {
+			if remaining[index].CPU > remaining[best].CPU {
+				best = index
+			}
+		}
+		if remaining[best].CPU <= 0 {
+			break
+		}
+		picked = append(picked, remaining[best])
+		remaining = append(remaining[:best], remaining[best+1:]...)
+	}
+	return picked
 }
 
 func attachGPUWorkloadUsers(gpus []gpuInfo, processes []processInfo) {

@@ -168,10 +168,15 @@ func demoHubNodes() []hubNodeConfig {
 	}
 	nodes := make([]hubNodeConfig, len(names))
 	for index, item := range names {
-		nodes[index] = hubNodeConfig{
+		node := hubNodeConfig{
 			Name: item.name, Group: item.group, Profile: item.profile,
 			Address: fmt.Sprintf("192.0.2.%d:23234", 11+index),
 		}
+		if item.name == "gpu-a01" || item.name == "gpu-b03" {
+			node.SlurmCluster = "Acme GPU"
+			node.SlurmNode = item.name
+		}
+		nodes[index] = node
 	}
 	return nodes
 }
@@ -194,13 +199,22 @@ func demoHubStates(now time.Time) []hubNodeState {
 		if count > 0 && util > 50 {
 			gpus[0].Workloads = []gpuWorkloadInfo{{PID: 4800, User: "alice", Name: "train.py", MemoryUsed: gib(usedOr(util))}}
 		}
-		return demoOnline(now, latency, demoGPUSnapshot(now, name, cpu, mem, disk, 4, 1, gpus))
+		state := demoOnline(now, latency, demoGPUSnapshot(now, name, cpu, mem, disk, 4, 1, gpus))
+		state.History = demoHistory(now, cpu, util)
+		return state
 	}
 	return []hubNodeState{
-		demoOnline(now, 18*time.Millisecond, demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, 86, 14, []gpuInfo{
-			demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
-			demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
-		})),
+		func() hubNodeState {
+			state := demoOnline(now, 18*time.Millisecond, demoGPUSnapshot(now, "gpu-a01", 62, 71, 44, 86, 14, []gpuInfo{
+				demoGPU(0, "NVIDIA L40S", 48, 41, 91, 71, 2400, 280, 300, "alice", "train.py"),
+				demoGPU(1, "NVIDIA L40S", 48, 18, 47, 58, 1800, 160, 300, "bob", "embed.py"),
+			}))
+			state.History = demoHistory(now, 62, 91)
+			state.Snapshot.Processes = []processInfo{{
+				PID: 4812, User: "alice", State: "R", Command: "train.py", CPU: 186, Elapsed: 5*3600 + 12*60,
+			}}
+			return state
+		}(),
 		gpu("gpu-a02", 24*time.Millisecond, 11, 22, 18, 4, 1, 42),
 		gpu("gpu-a03", 31*time.Millisecond, 8, 19, 21, 0, 2, 39),
 		gpu("gpu-b01", 44*time.Millisecond, 6, 14, 17, 2, 1, 41),
@@ -213,10 +227,40 @@ func demoHubStates(now time.Time) []hubNodeState {
 		gpu("gpu-d03", 22*time.Millisecond, 5, 16, 19, 0, 1, 40),
 		gpu("gpu-e01", 29*time.Millisecond, 9, 21, 24, 3, 1, 44),
 		gpu("gpu-e02", 33*time.Millisecond, 7, 24, 18, 0, 1, 41),
-		demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 18, "load 1.20  0.94  0.81", 31, 24, 1.4, 0.4)),
+		func() hubNodeState {
+			state := demoOnline(now, 12*time.Millisecond, demoCPUSnapshot(now, "cpu-01", 32, 18, "load 1.20  0.94  0.81", 31, 24, 1.4, 0.4))
+			state.History = demoHistory(now, 18, 0)
+			state.Snapshot.Processes = []processInfo{{
+				PID: 3300, User: "carol", State: "R", Command: "compile", CPU: 18, Elapsed: 2*3600 + 13*60,
+			}}
+			return state
+		}(),
 		demoOnline(now, 22*time.Millisecond, demoNASSnapshot(now)),
 		gpu("edge-01", 16*time.Millisecond, 7, 61, 12, 0, 1, 41),
 	}
+}
+
+func demoHistory(now time.Time, cpu, gpu float64) []historySample {
+	samples := make([]historySample, 16)
+	for index := range samples {
+		cpuValue := cpu + 14*math.Sin(float64(index)/2.7)
+		gpuValue := gpu + 18*math.Sin(float64(index)/2.2+0.6)
+		if cpuValue < 0 {
+			cpuValue = 0
+		}
+		if gpuValue < 0 {
+			gpuValue = 0
+		}
+		if gpuValue > 100 {
+			gpuValue = 100
+		}
+		samples[index] = historySample{
+			Timestamp:  now.Add(-time.Duration(len(samples)-index) * time.Minute),
+			CPUPercent: cpuValue,
+			GPUs:       []historyGPUSample{{Index: 0, Utilization: gpuValue}},
+		}
+	}
+	return samples
 }
 
 func usedOr(util float64) float64 {
@@ -237,7 +281,13 @@ func demoOnline(now time.Time, latency time.Duration, snapshot monitorSnapshot) 
 
 func demoSlurmStates(now time.Time) []slurmClusterState {
 	return []slurmClusterState{
-		{Snapshot: slurmSnapshot{Name: "Acme GPU", CollectedAt: now}, Latency: 40 * time.Millisecond, Checked: now, LastSeen: now},
+		{Snapshot: slurmSnapshot{
+			Name: "Acme GPU", CollectedAt: now,
+			Jobs: []slurmJob{
+				{ID: "18421", Name: "protein-fold", User: "alice", State: "RUNNING", Elapsed: "5:12:08", NodeList: "gpu-a01", Partition: "gpu"},
+				{ID: "18455", Name: "embed-corpus", User: "bob", State: "RUNNING", Elapsed: "2:04:41", NodeList: "gpu-b03", Partition: "gpu"},
+			},
+		}, Latency: 40 * time.Millisecond, Checked: now, LastSeen: now},
 		{Snapshot: slurmSnapshot{Name: "Acme CPU", CollectedAt: now}, Latency: 55 * time.Millisecond, Checked: now, LastSeen: now},
 	}
 }
