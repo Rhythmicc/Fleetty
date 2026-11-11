@@ -37,8 +37,8 @@ const (
 	// One sparkline column is one hub refresh. Keep enough samples for the
 	// widest card; a narrower card draws the newest tail.
 	hubSparkCap            = 96
-	hubSparkTarget         = 20
-	hubFactColumnWidth     = 26
+	hubSparkFloor          = 14
+	hubFactColumnWidth     = 14
 	hubOfflineRetryInitial = 5 * time.Second
 	hubOfflineRetryMaximum = 30 * time.Second
 )
@@ -868,9 +868,14 @@ func (m *hubModel) columns() int {
 	// empty when the terminal is just below a fixed-width breakpoint.
 	preferred := max(1, (width+1+stride/2)/stride)
 	columns := min(preferred, max(1, (width+1)/(hubMinimumCardWidth+1)))
-	// A ~20-column sparkline needs a wider card. Drop a column (140 → 2)
-	// before drawing a window only a few seconds long.
-	for columns > 1 && hubSparkColumns(hubContentWidth(width, columns)) < hubSparkTarget {
+	// Prefer another column over a wider card. Drop one only when the
+	// sparkline would be a stub and the wider card stays near the preferred
+	// width: 140 stays at 3, and ~220 settles at 4.
+	for columns > 1 && hubSparkColumns(hubContentWidth(width, columns)) < hubSparkFloor {
+		wider := (width - (columns - 1) + 1) / (columns - 1)
+		if wider > hubPreferredCardWidth+8 {
+			break
+		}
 		columns--
 	}
 	return columns
@@ -882,8 +887,8 @@ func hubContentWidth(termWidth, columns int) int {
 
 func hubSparkColumns(contentWidth int) int {
 	left, _ := hubColumnWidths(contentWidth)
-	// "GPU×99", a space, the sparkline, a space, and "100%".
-	width := left - 6 - 2 - 4
+	// "GPU×2", a space, the sparkline, a space, and "100%".
+	width := left - 5 - 2 - 4
 	if width < 0 {
 		return 0
 	}
@@ -1385,14 +1390,15 @@ func renderOfflineHubCard(state hubNodeState, width int) []string {
 	if remaining := time.Until(state.NextRetry); remaining > 0 {
 		retry = "retry in " + hubAge(remaining)
 	}
-	leftWidth, _ := hubColumnWidths(width)
-	return hubColumns([]string{
+	leftWidth := min(12, max(10, width/3))
+	rightWidth := max(1, width-leftWidth-1)
+	return joinHubColumns([]string{
 		dangerStyle.Render(truncate("● OFFLINE", leftWidth)),
 	}, []string{
-		dimStyle.Render(truncate(lastSeen, width)),
-		dimStyle.Render(truncate(retry, width)),
-		dimStyle.Render(hubShortError(state.Error, width)),
-	}, width)
+		dimStyle.Render(truncate(lastSeen, rightWidth)),
+		dimStyle.Render(truncate(retry, rightWidth)),
+		dimStyle.Render(hubShortError(state.Error, rightWidth)),
+	}, leftWidth, rightWidth)
 }
 
 func hubShortError(err string, width int) string {
@@ -1464,14 +1470,10 @@ func hubColumnWidths(width int) (left, right int) {
 	if width < 16 {
 		return max(1, width/2), max(1, width-width/2)
 	}
-	// Right column stays narrow: "↓ 12.3 MiB/s ↑ 1.2 MiB/s" or a short job name.
-	// Below that, keep the NAS service line ("HTTP 1/2 CTR 2/3 PM2 1/2").
+	// Narrow facts: "↓86M ↑14M", "vram 59/96G", "r40M w8M".
 	right = hubFactColumnWidth
-	if width < 48 {
-		right = 24
-	}
-	if width < 36 {
-		right = max(10, width*2/5)
+	if width < 32 {
+		right = max(8, width*2/5)
 	}
 	if right >= width-8 {
 		right = max(8, width/3)
@@ -1482,6 +1484,10 @@ func hubColumnWidths(width int) (left, right int) {
 
 func hubColumns(left, right []string, width int) []string {
 	leftWidth, rightWidth := hubColumnWidths(width)
+	return joinHubColumns(left, right, leftWidth, rightWidth)
+}
+
+func joinHubColumns(left, right []string, leftWidth, rightWidth int) []string {
 	lines := make([]string, 3)
 	for index := range lines {
 		var line, extra string
@@ -1632,7 +1638,7 @@ func (m *hubModel) hubFacts(index int, snapshot monitorSnapshot, gpu bool, width
 	third := hubRateLine("r", "w", snapshot.DiskRead, snapshot.DiskWrite, width)
 	if gpu {
 		_, used, total, _ := hubGPUStats(snapshot.GPUs)
-		third = ansi.Truncate(dimStyle.Render("vram ")+hubMetricStyle.Render(hubMemPair(used, total)), width, "")
+		third = ansi.Truncate(dimStyle.Render("vram ")+hubMetricStyle.Render(hubVRAM(used, total)), width, "")
 	}
 	return []string{
 		m.hubOccupant(index, snapshot, width),
@@ -1642,51 +1648,32 @@ func (m *hubModel) hubFacts(index int, snapshot monitorSnapshot, gpu bool, width
 }
 
 func hubRateLine(leftLabel, rightLabel string, left, right uint64, width int) string {
-	leftText, rightText := bytes(left)+"/s", bytes(right)+"/s"
-	if lipgloss.Width(leftLabel+" "+leftText+" "+rightLabel+" "+rightText) > width {
-		leftText, rightText = hubShortRate(left), hubShortRate(right)
-	}
-	line := dimStyle.Render(leftLabel+" ") + hubMetricStyle.Render(leftText) + " " +
-		dimStyle.Render(rightLabel+" ") + hubMetricStyle.Render(rightText)
+	line := dimStyle.Render(leftLabel) + hubMetricStyle.Render(hubCompactRate(left)) + " " +
+		dimStyle.Render(rightLabel) + hubMetricStyle.Render(hubCompactRate(right))
 	return ansi.Truncate(line, width, "")
 }
 
-func hubShortRate(value uint64) string {
+func hubCompactRate(value uint64) string {
 	const unit = 1024.0
 	if value < 1024 {
-		return fmt.Sprintf("%d B/s", value)
+		return fmt.Sprintf("%d", value)
 	}
-	f := float64(value)
-	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	scaled := float64(value)
+	labels := []string{"", "K", "M", "G", "T"}
 	index := 0
-	for f >= unit && index < len(units)-1 {
-		f /= unit
+	for scaled >= unit && index < len(labels)-1 {
+		scaled /= unit
 		index++
 	}
-	return fmt.Sprintf("%.0f %s/s", math.Round(f), units[index])
+	return fmt.Sprintf("%.0f%s", math.Round(scaled), labels[index])
 }
 
-func hubMemPair(used, total uint64) string {
+func hubVRAM(used, total uint64) string {
 	if total == 0 {
 		return "—"
 	}
 	const gi = 1024 * 1024 * 1024
-	unit := "GiB"
-	scale := float64(gi)
-	if total < gi {
-		unit = "MiB"
-		scale = 1024 * 1024
-	}
-	usedText := fmt.Sprintf("%.1f", float64(used)/scale)
-	if used == 0 {
-		usedText = "0"
-	}
-	totalValue := float64(total) / scale
-	totalText := fmt.Sprintf("%.1f", totalValue)
-	if math.Abs(totalValue-math.Round(totalValue)) < 0.05 {
-		totalText = fmt.Sprintf("%.0f", math.Round(totalValue))
-	}
-	return usedText + "/" + totalText + " " + unit
+	return fmt.Sprintf("%d/%dG", int(math.Round(float64(used)/float64(gi))), int(math.Round(float64(total)/float64(gi))))
 }
 
 func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) string {
@@ -1699,7 +1686,8 @@ func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) s
 				}
 			}
 			if len(running) > 0 {
-				return hubMetricStyle.Render(hubShown(hubJobText(running), width))
+				job := running[0]
+				return hubMetricStyle.Render(truncate(hubWho(job.User, hubBaseName(job.Name)), width))
 			}
 		}
 	}
@@ -1709,11 +1697,7 @@ func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) s
 			if name == "" || strings.EqualFold(name, "[No data]") {
 				continue
 			}
-			text := name
-			if user := strings.TrimSpace(workload.User); user != "" {
-				text = user + " · " + name
-			}
-			return hubMetricStyle.Render(truncate(text, width))
+			return hubMetricStyle.Render(truncate(hubWho(workload.User, name), width))
 		}
 	}
 	for _, process := range topProcesses(snapshot.Processes, 3) {
@@ -1724,84 +1708,22 @@ func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) s
 		if name == "" {
 			continue
 		}
-		text := name
-		if user := strings.TrimSpace(process.User); user != "" {
-			text = user + " · " + name
-		}
-		if process.Elapsed > 0 {
-			text += " · " + elapsed(process.Elapsed)
-		}
-		return hubMetricStyle.Render(hubShown(text, width))
+		return hubMetricStyle.Render(truncate(hubWho(process.User, name), width))
 	}
 	return dimStyle.Render("idle")
 }
 
-func hubJobText(jobs []slurmJob) string {
-	job := jobs[0]
-	text := strings.TrimSpace(job.User)
-	if name := hubBaseName(job.Name); name != "" {
-		if text != "" {
-			text += " · "
-		}
-		text += name
-	}
-	if job.ID != "" && text == "" {
-		text = "slurm " + job.ID
-	}
-	extra := hubShortElapsed(job.Elapsed)
-	if len(jobs) > 1 {
-		if extra != "" {
-			extra += " "
-		}
-		extra += fmt.Sprintf("+%d", len(jobs)-1)
-	}
-	return hubFitDetail(text, extra)
-}
-
-func hubShortElapsed(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "0:00" {
-		return ""
-	}
-	if days, _, ok := strings.Cut(value, "-"); ok {
-		return strings.TrimLeft(days, "0") + "d"
-	}
-	parts := strings.Split(value, ":")
-	switch len(parts) {
-	case 3:
-		return strings.TrimLeft(parts[0], "0") + "h" + parts[1] + "m"
-	case 2:
-		minutes := strings.TrimLeft(parts[0], "0")
-		if minutes == "" {
-			minutes = "0"
-		}
-		return minutes + "m"
+func hubWho(user, name string) string {
+	user = strings.TrimSpace(user)
+	name = strings.TrimSpace(name)
+	switch {
+	case user != "" && name != "":
+		return user + "·" + name
+	case name != "":
+		return name
 	default:
-		return value
+		return user
 	}
-}
-
-func hubFitDetail(text, extra string) string {
-	if extra == "" {
-		return text
-	}
-	if text == "" {
-		return extra
-	}
-	return text + " · " + extra
-}
-
-func hubShown(text string, width int) string {
-	if lipgloss.Width(text) <= width {
-		return text
-	}
-	if cut := strings.LastIndex(text, " · "); cut > 0 {
-		shorter := text[:cut]
-		if lipgloss.Width(shorter) <= width {
-			return shorter
-		}
-	}
-	return truncate(text, width)
 }
 
 func hubBaseName(value string) string {
@@ -1834,8 +1756,8 @@ func renderNASHubCard(spark []hubSparkSample, snapshot monitorSnapshot, width in
 	}, leftWidth)
 	left = append(left, dimStyle.Render(truncate(worst.Mount, leftWidth)))
 	return hubColumns(left, []string{
-		dimStyle.Render("↓ ") + hubMetricStyle.Render(truncate(bytes(snapshot.NetworkRX)+"/s", 16)),
-		dimStyle.Render("↑ ") + hubMetricStyle.Render(truncate(bytes(snapshot.NetworkTX)+"/s", 16)),
+		dimStyle.Render("↓") + hubMetricStyle.Render(hubCompactRate(snapshot.NetworkRX)),
+		dimStyle.Render("↑") + hubMetricStyle.Render(hubCompactRate(snapshot.NetworkTX)),
 		renderNASServiceLine(snapshot, rightWidth),
 	}, width)
 }
@@ -1873,9 +1795,9 @@ func renderNASServiceLine(snapshot monitorSnapshot, width int) string {
 	if lipgloss.Width(line) <= width {
 		return line
 	}
-	line = dimStyle.Render("H ") + compactHealthCount(healthyHTTP, len(snapshot.Services)) +
-		dimStyle.Render(" C ") + containerHealth +
-		dimStyle.Render(" P ") + pm2Health
+	line = dimStyle.Render("H") + compactHealthCount(healthyHTTP, len(snapshot.Services)) +
+		dimStyle.Render(" C") + containerHealth +
+		dimStyle.Render(" P") + pm2Health
 	return ansi.Truncate(line, width, "")
 }
 

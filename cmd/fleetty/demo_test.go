@@ -38,31 +38,29 @@ func TestDemoFramesUseFictionalData(t *testing.T) {
 	}
 	hubPlain := ansi.Strip(hub)
 	for _, text := range []string{
-		"Acme Research Cluster", "gpu-a01", "gpu-c01", "cpu-01", "OFFLINE", "14/16",
-		"i/o timeout", "alice", "protein-fold", "idle", "▁",
-		"↓ 12.3 MiB/s", "↑ 1.2 MiB/s", "r 40.0 MiB/s", "w 8.0 MiB/s", "vram 59.0/96 GiB",
+		"Acme Research Cluster", "gpu-a01", "gpu-c01", "cpu-01", "storage-01", "OFFLINE", "14/16",
+		"i/o timeout", "alice·protein", "idle", "▁",
+		"↓86M ↑14M", "↓12M ↑1M", "r40M w8M", "vram 59/96G",
 	} {
 		if !strings.Contains(hubPlain, text) {
 			t.Fatalf("hub frame missing %q", text)
 		}
 	}
-	// Two card columns at 140 put the service group on the next page.
-	tall, err := renderDemoFrame("hub", "dark", 140, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(ansi.Strip(tall), "storage-01") {
-		t.Fatal("taller hub frame lost storage-01")
+	if strings.Contains(hubPlain, "PAGE ") {
+		t.Fatal("140x48 hub spilled onto a second page")
 	}
 	wide, err := renderDemoFrame("hub", "dark", 220, 48)
 	if err != nil {
 		t.Fatal(err)
 	}
 	widePlain := ansi.Strip(wide)
-	for _, text := range []string{"storage-01", "cpu-01", "gpu-a01", "vram 59.0/96 GiB", "r 40.0 MiB/s"} {
+	for _, text := range []string{"storage-01", "cpu-01", "gpu-a01", "vram 59/96G", "r40M w8M"} {
 		if !strings.Contains(widePlain, text) {
 			t.Fatalf("220-col hub frame missing %q", text)
 		}
+	}
+	if strings.Contains(widePlain, "PAGE ") {
+		t.Fatal("220-col hub spilled onto a second page")
 	}
 
 	gpu, err := renderDemoFrame("gpu", "dark", 0, 0)

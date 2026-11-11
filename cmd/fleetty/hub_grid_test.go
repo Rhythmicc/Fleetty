@@ -34,14 +34,11 @@ func TestHubAdaptiveCardsAndClickTargets(t *testing.T) {
 		t.Run(fmt.Sprint(width), func(t *testing.T) {
 			m := wideTestHub(width, 24)
 			columns, cardWidth := m.columns(), m.cardWidth()
-			if width == 140 && columns != 2 {
-				t.Fatalf("columns = %d, want 2 so the sparkline can reach ~20", columns)
-			}
-			if width == 220 && columns != 3 {
+			if width == 140 && columns != 3 {
 				t.Fatalf("columns = %d, want 3", columns)
 			}
-			if columns > 1 && hubSparkColumns(cardWidth-4) < hubSparkTarget {
-				t.Fatalf("spark columns = %d, want at least %d", hubSparkColumns(cardWidth-4), hubSparkTarget)
+			if width == 220 && columns != 4 {
+				t.Fatalf("columns = %d, want 4", columns)
 			}
 			if gap := width - (columns*(cardWidth+1) - 1); gap < 0 || gap >= columns {
 				t.Fatalf("unused grid width = %d, want less than column count", gap)
@@ -107,8 +104,8 @@ func TestHubWideGridNavigationAndResize(t *testing.T) {
 	m := wideTestHub(244, 24)
 	m.cursor = 4
 	m.moveCursorVertical(1)
-	if m.cursor != 7 {
-		t.Fatalf("down from the second column selected %d, want 7", m.cursor)
+	if m.cursor != 9 {
+		t.Fatalf("down from column 5 selected %d, want 9", m.cursor)
 	}
 	m.moveCursorVertical(-1)
 	m.moveCursorHorizontal(1)
@@ -450,21 +447,21 @@ func TestHubFactsFollowTheirMetricRow(t *testing.T) {
 			},
 		}},
 	}
-	if gpu.columns() != 2 {
-		t.Fatalf("140-col hub uses %d columns, want 2", gpu.columns())
+	if gpu.columns() != 3 {
+		t.Fatalf("140-col hub uses %d columns, want 3", gpu.columns())
 	}
 	plain := ansi.Strip(gpu.renderNodeCard(0, gpu.cardWidth()))
 	cpuLine, memLine, gpuLine := hubMeterLine(plain, "CPU"), hubMeterLine(plain, "MEM"), hubMeterLine(plain, "GPU")
-	if !strings.Contains(cpuLine, "alice · protein-fold") || strings.Contains(cpuLine, "vram") {
+	if !strings.Contains(cpuLine, "alice·protein") || strings.Contains(cpuLine, "vram") {
 		t.Fatalf("CPU row: %s", cpuLine)
 	}
-	if sparkGlyphs(cpuLine) < hubSparkTarget {
-		t.Fatalf("CPU sparkline is %d columns:\n%s", sparkGlyphs(cpuLine), cpuLine)
+	if glyphs := sparkGlyphs(cpuLine); glyphs < 15 || glyphs > 18 {
+		t.Fatalf("CPU sparkline is %d columns:\n%s", glyphs, cpuLine)
 	}
-	if !strings.Contains(memLine, "↓ 12.3 MiB/s") || !strings.Contains(memLine, "↑ 1.2 MiB/s") {
+	if !strings.Contains(memLine, "↓12M ↑1M") {
 		t.Fatalf("MEM row: %s", memLine)
 	}
-	if !strings.Contains(gpuLine, "vram 59.0/96 GiB") {
+	if !strings.Contains(gpuLine, "vram 59/96G") {
 		t.Fatalf("GPU row: %s", gpuLine)
 	}
 	if strings.Contains(plain, "up ") || strings.Contains(plain, "load ") {
@@ -486,7 +483,7 @@ func TestHubFactsFollowTheirMetricRow(t *testing.T) {
 	}
 	cpuPlain := ansi.Strip(cpu.renderNodeCard(0, cpu.cardWidth()))
 	dsk := hubMeterLine(cpuPlain, "DSK")
-	if !strings.Contains(dsk, "r 40.0 MiB/s") || !strings.Contains(dsk, "w 8.0 MiB/s") {
+	if !strings.Contains(dsk, "r40M w8M") {
 		t.Fatalf("DSK row: %s", dsk)
 	}
 	idle := ansi.Strip(hubFixedSparkline([]float64{0, 0, 0}, 8))
