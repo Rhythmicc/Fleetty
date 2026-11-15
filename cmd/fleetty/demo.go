@@ -148,7 +148,7 @@ func demoHubSession(mode colorMode, width, height int) *hubModel {
 				State: "PENDING", Priority: uint64(14200 - i*150), QOS: "normal",
 				Elapsed: "0:00", TimeLimit: []string{"4:00:00", "8:00:00", "2:00:00"}[i%3],
 				Partition: []string{"gpu", "cpu"}[i%2],
-				Reason: []string{"Resources", "Priority", "Dependency"}[i%3], Nodes: 1 + i%2})
+				Reason:    []string{"Resources", "Priority", "Dependency"}[i%3], Nodes: 1 + i%2})
 	}
 	m.detailFixture = func(index int) *monitorModel {
 		if index == 0 {
