@@ -8,7 +8,7 @@ English | [简体中文](../zh-CN/usage.md)
 
 The default interface has four pages: Overview, Compute, Network, and Storage. Press `1` through `4`, or move with `Tab` and `Shift+Tab`. Left and Right do the same, except on the storage map, where they navigate directories.
 
-Overview puts the host and its uptime, CPU, memory, and disk health, GPU load, a 60-second network history, application traffic, the Slurm node queue, and a short process summary on one screen. Compute gives every remaining row to processes, after the hardware and the queue. Network shows live rates, cumulative totals, a 60-second peak, application traffic, and per-interface live and cumulative counters.
+Overview puts the host and its uptime, CPU, memory, and disk health, GPU load, one-minute average and peak network rates, application traffic, the Slurm node queue, and a short process summary on one screen. Wide multi-GPU tables also show the current clock in MHz. Compute gives every remaining row to processes, after the hardware and the queue. Network shows live rates, cumulative totals, a 60-second peak, application traffic, and per-interface live and cumulative counters.
 
 Fleetty draws only what this machine can supply. A host with no GPU, or no Slurm, drops that region, and the panels around it reflow into the space. Arrow keys, Enter, and the mouse select a process and open its details. `/` filters processes. `t` changes the theme. `q` quits.
 
@@ -46,7 +46,7 @@ A JSON snapshot's `cpu_core_usage` carries the CPU id, `percent`, and `available
 
 Above 32 logical CPUs, Compute uses a compact vertical chart. At 32 or fewer it keeps the horizontal bar per core. Each core is one column, ordered by CPU id, never resorted by load. Width follows the terminal. Height and color both mean 0–100 percent. A baseline `▁` is zero. `?` means not sampled yet. The history moves into a narrow column on the right, so a mid-size machine is not squeezed to the left. The chart is at most two rows. A narrow window, or a very large core count, pages with the selected core. Samples are not dropped. Click a column, or press `f` and move with the arrows, `Home`, and `End`. The line under the chart shows the id, the load, and the GHz. `Esc` or `f` returns to the process keys. `v` toggles the column chart and the full per-core list. That choice is only for this session's Compute page. Collection, JSON, Prometheus, and a custom layout are unchanged.
 
-Every history is a multi-line bar chart filled from the bottom. The top reads `HIST ·` plus the metric and its unit. The bottom reads `old → now`. CPU is fixed at 0–100 percent. Network RX and TX share the peak of the window, and that peak is labeled. Downsampling covers the whole retained window. A missing sample is a gap, not a zero and not a floating dot. If the window is empty, the chart waits. Overview keeps one recent CPU history, not a second 1-hour chart beside it. The older samples are still stored. Network, overview, custom cards, and the NAS view use the same widget. A wide window places series side by side. A narrow one stacks them, or drops a secondary history. It does not fall back to a one-line sparkline, and it does not change the live load bar. The overview network summary uses the space beside the chart for up to five lines, or three when narrow, without growing the panel. Memory and the root disk use a short bar. Extra rows go to the process table.
+Every history is a multi-line bar chart filled from the bottom. The top reads `HIST ·` plus the metric and its unit. The bottom reads `old → now`. CPU is fixed at 0–100 percent. Network RX and TX share the peak of the window, and that peak is labeled. Downsampling covers the whole retained window. A missing sample is a gap, not a zero and not a floating dot. If the window is empty, the chart waits. Overview keeps one recent CPU history, not a second 1-hour chart beside it. The older samples are still stored. Network, custom network cards, and the NAS view use the same widget. A wide window places series side by side. A narrow one stacks them, or drops a secondary history. It does not fall back to a one-line sparkline, and it does not change the live load bar. Overview replaces the RX and TX plots with average and peak rates and uses the full panel width for up to five traffic sources, or three when narrow. Memory and the root disk use a short bar. Extra rows go to the process table.
 
 The CPU panel also updates clocks on every sample. `AVG` is the arithmetic mean of online logical CPUs that have a frequency sample. The per-core view prints GHz next to the load, plus the range and, when the sample is partial, how many cores contributed. The per-core header folds the summary, load, and metadata into two lines, or three when the window is narrow. The history sits beside the cores. The source of the reading is kept in the export, not in that header.
 
@@ -61,6 +61,54 @@ An Apple Silicon Mac also shows, through IOKit and without root, total GPU load,
 Click a column header to sort by CPU, memory percent, RSS, elapsed time, PID, user, or command. Click the same header again to flip the direction. `o` moves to the next field and `O` reverses the current one. Neither needs management mode. The row range and the total are shown on the rows and in the corner of the panel. A filter adds the match count. Each connection keeps its own sort, and a refresh keeps the selected PID.
 
 CPU, memory, and RSS move from gray through cyan, green, yellow, and red as the value rises. The process name does not change color with the process state. `100%` CPU means one logical core. Memory percent and RSS are colored against the memory of the whole machine. The mark before the PID means running (`▶`), sleeping (`●`), waiting (`!`), stopped (`■`), zombie or exited (`×`), or idle (`○`). The table includes the legend.
+
+### Application-reported progress
+
+Overview and Compute show an optional progress bar next to the command. Each process reports its own progress; Fleetty does not derive it from CPU usage. Narrow terminals show just the percentage. Enter opens the exact counters and phase.
+
+The Fleetty node service and the first local `fleetty top` session for a user can receive reports over a local Unix stream socket. Run `fleetty progress --paths` to list the per-user socket and, on Linux, the system node socket. Applications should use the socket for the dashboard they want to update, on the same host and in the same PID namespace. No TCP port or background daemon is needed for local top.
+
+For each update, connect from the workload process itself, send one newline-terminated UTF-8 JSON message (at most 4096 bytes including the newline), read one JSON reply, and disconnect:
+
+```json
+{"v":1,"done":42,"total":100,"label":"factor"}
+```
+
+`done` and `total` are unsigned counts in the same unit, with `0 <= done <= total` and positive `total`. `label` is optional public text, at most 256 UTF-8 bytes. The reply is `{}` on success or `{"error":"..."}` on failure. Fleetty gets the PID and UID from the OS, so there is no `pid` field: a helper subprocess would report its own progress instead of the workload's.
+
+Re-report every 1–5 seconds, including during long phases. A report expires after 30 seconds without an update and stops appearing when the process exits. Send `{"v":1,"clear":true}` to remove it immediately. Progress stays in memory, but is visible to everyone allowed to view the node; do not include private labels. If the socket is unavailable, the workload should continue normally.
+
+```python
+import json
+import socket
+
+def report_progress(path, done, total, label=""):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(0.2)
+            conn.connect(path)
+            conn.sendall((json.dumps({
+                "v": 1, "done": done, "total": total, "label": label
+            }) + "\n").encode())
+            with conn.makefile("rb") as response:
+                return json.loads(response.readline(4096)) == {}
+    except (OSError, ValueError):
+        return False
+```
+
+### Progress from an existing file
+
+On a Linux node running Fleetty as root, an administrator can attach the progress JSON file a running workload already writes. Pass its PID, start time from field 22 of `/proc/PID/stat`, absolute path as seen by the target process, and the top-level counter keys.
+
+```sh
+sudo fleetty progress attach-file --pid 1234 --start-ticks 98765 \
+  --path /var/tmp/experiment/progress.json \
+  --done-key logical_completed --total-key logical_total --label factor
+sudo fleetty progress list-files
+sudo fleetty progress detach-file --pid 1234 --start-ticks 98765
+```
+
+Use `--total N` for a fixed positive total. Counters are unsigned integers. The file must be owned by the target process's effective UID, be at most 1 MiB, and have no symlinks in its path. Fleetty rereads the path every five seconds, including files replaced by an atomic rename. The details show `progress-file` and the file's modification time. Read errors or samples at least two minutes old add `~` to the displayed percentage and keep the last valid counters. A current socket report takes precedence. Registrations live in the node service's memory and expire when the process exits or its identity changes.
 
 ## Network
 

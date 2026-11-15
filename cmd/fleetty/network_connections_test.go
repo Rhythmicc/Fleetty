@@ -89,8 +89,9 @@ func TestNetworkRateColorLevels(t *testing.T) {
 			want      lipgloss.Style
 		}{
 			{1 << 30, false, dimStyle}, {0, true, dimStyle}, {1023, true, dimStyle},
-			{1024, true, valueStyle}, {100 * 1024, true, valueStyle},
-			{1024 * 1024, true, valueStyle}, {10 * 1024 * 1024, true, valueStyle},
+			{1024, true, direction}, {100<<10 - 1, true, direction},
+			{100 << 10, true, gpuActiveStyle}, {1 << 20, true, gpuBusyStyle},
+			{10 << 20, true, gpuHighStyle},
 		} {
 			got := networkRateStyle(test.rate, test.available, direction)
 			if !reflect.DeepEqual(got.GetForeground(), test.want.GetForeground()) {

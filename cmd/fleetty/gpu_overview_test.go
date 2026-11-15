@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -106,20 +107,16 @@ func TestOverviewSummaryHeightDoesNotGrow(t *testing.T) {
 	}
 }
 
-func TestNetworkOverviewFillsSpareRows(t *testing.T) {
+func TestNetworkOverviewUsesWidthForTrafficSources(t *testing.T) {
 	m := cpuChartTestModel(18, 180, 50)
 	for i := 0; i < 12; i++ {
 		m.snapshot.NetworkProcesses = append(m.snapshot.NetworkProcesses, processNetworkInfo{
 			PID: i + 100, Name: fmt.Sprintf("net-%02d", i), RX: 2048, TX: 1024})
 	}
 	for _, width := range []int{60, 70, 79, 89, 120, 180} {
-		three := renderPagePanel(width, m.networkActivityPanelSpec(width, true, 3))
 		filled := renderPagePanel(width, m.networkActivityPanelSpec(width, true, 5))
-		if lipgloss.Height(three) != lipgloss.Height(filled) {
-			t.Fatalf("filling unused rows grew the panel at width=%d", width)
-		}
 		if width >= 70 {
-			if !strings.Contains(filled, "net-04") || strings.Contains(filled, "net-05") {
+			if lipgloss.Height(filled) > 10 || !strings.Contains(filled, "net-04") || strings.Contains(filled, "net-05") {
 				t.Fatal("wide network summary did not fill exactly five rows")
 			}
 		} else if strings.Contains(filled, "net-03") {
@@ -128,37 +125,75 @@ func TestNetworkOverviewFillsSpareRows(t *testing.T) {
 	}
 }
 
-func TestNetworkOverviewSummaryBelowHistories(t *testing.T) {
+func TestNetworkOverviewShowsRatesInsteadOfPlots(t *testing.T) {
 	m := cpuChartTestModel(18, 180, 50)
-	m.cpuHistory = []float64{10, 20, 30}
-	m.networkRXHistory = []float64{1024, 2048, 4096}
-	m.networkTXHistory = []float64{4096, 2048, 1024}
-	for _, width := range []int{60, 70, 79, 89, 120, 180} {
+	m.networkRXHistory = []float64{1024, math.NaN(), 3072}
+	m.networkTXHistory = []float64{0, 8192, math.Inf(1)}
+	for _, width := range []int{36, 60, 70, 79, 89, 120, 180} {
 		spec := m.networkActivityPanelSpec(width, true, 5)
-		lines := strings.Split(ansi.Strip(strings.Join(spec.lines, "\n")), "\n")
-		if !strings.Contains(lines[0], "HIST · RX B/s") ||
-			!strings.Contains(lines[len(lines)-1], "TOTAL ↓") {
-			t.Fatalf("network summary is not below the charts at width=%d: %v", width, lines)
+		plain := ansi.Strip(strings.Join(spec.lines, "\n"))
+		if strings.Contains(plain, "HIST ·") || !strings.Contains(plain, "1m AVG") ||
+			!strings.Contains(plain, "PEAK") || !strings.Contains(plain, "TOTAL ↓") {
+			t.Fatalf("overview width=%d has incorrect rate summary: %s", width, plain)
 		}
-		if width >= 70 && len(lines) != 8 {
-			t.Fatalf("wide network panel height changed at width=%d: %d", width, len(lines))
+		if width >= 120 {
+			for _, want := range []string{"1m AVG ↓ 2.0 KiB/s  ↑ 4.0 KiB/s", "PEAK ↓ 3.0 KiB/s  ↑ 8.0 KiB/s"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("missing calculated value %q: %s", want, plain)
+				}
+			}
 		}
-		for _, line := range lines {
+		for _, line := range spec.lines {
 			if lipgloss.Width(line) > width-4 {
 				t.Fatalf("network content overflows at width=%d: %q", width, line)
 			}
 		}
 	}
-	for _, width := range []int{70, 79, 89, 120, 180} {
-		host := m.hostHealthPanelSpec(width, true)
-		network := m.networkActivityPanelSpec(width, true, 5)
-		hostLines := strings.Split(ansi.Strip(strings.Join(host.lines, "\n")), "\n")
-		networkLines := strings.Split(ansi.Strip(strings.Join(network.lines, "\n")), "\n")
-		if !strings.Contains(hostLines[0], "HIST · CPU %") ||
-			!strings.Contains(networkLines[0], "HIST · RX B/s") ||
-			!strings.Contains(hostLines[4], "→ now") ||
-			!strings.Contains(networkLines[4], "→ now") {
-			t.Fatalf("CPU and network charts are not vertically aligned at width=%d", width)
+	detail := strings.Join(m.networkTrafficSummaryPanelSpec(120).lines, "\n")
+	for _, label := range []string{"HIST · RX B/s", "HIST · TX B/s"} {
+		if !strings.Contains(detail, label) {
+			t.Fatalf("Network page lost %q", label)
+		}
+	}
+	warmup := ansi.Strip(strings.Join(networkOverviewWindow(nil, []float64{0}, 70), "\n"))
+	if !strings.Contains(warmup, "↓ --") || !strings.Contains(warmup, "↑ 0 B/s") {
+		t.Fatalf("missing history and measured idle must look different: %q", warmup)
+	}
+	history := make([]float64, networkHistorySamples+1)
+	history[0] = 1024
+	if avg, peak, ok := networkWindowRates(history); !ok || avg != 0 || peak != 0 {
+		t.Fatalf("network summary included a sample outside its window: avg=%d peak=%d valid=%t", avg, peak, ok)
+	}
+}
+
+func TestMultiGPUOverviewClockFitsAndAligns(t *testing.T) {
+	gpus := []gpuInfo{
+		{Name: "A100-PCIE-40GB", ClockMHz: 345, Temperature: 34},
+		{Name: "TITAN RTX", ClockMHz: 1980, Temperature: 28},
+		{Name: "No clock", Temperature: 45},
+	}
+	for _, width := range []int{36, 68, multiGPUOverviewClockMinWidth - 1, multiGPUOverviewClockMinWidth, 140} {
+		lines := multiGPUOverviewLines(gpus, width)
+		header := ansi.Strip(lines[0])
+		clkEnd := strings.Index(header, "CLK")
+		if (clkEnd >= 0) != (width >= multiGPUOverviewClockMinWidth) {
+			t.Fatalf("incorrect CLK visibility at width %d: %s", width, header)
+		}
+		for i, clock := range []string{"345MHz", "1980MHz", "--"} {
+			row := ansi.Strip(lines[i+1])
+			if lipgloss.Width(row) > width {
+				t.Fatalf("clock overflow at width %d: %s", width, row)
+			}
+			if clkEnd < 0 {
+				if strings.Contains(row, "MHz") {
+					t.Fatalf("clock shown in compact row: %s", row)
+				}
+				continue
+			}
+			at := strings.Index(row, clock)
+			if at < 0 || lipgloss.Width(row[:at])+len(clock) != clkEnd+len("CLK") {
+				t.Fatalf("clock is missing or not aligned at width %d: %s", width, row)
+			}
 		}
 	}
 }

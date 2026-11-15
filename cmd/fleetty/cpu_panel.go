@@ -96,7 +96,7 @@ func (m *monitorModel) cpuMetricLines(card metricCard, width int) []string {
 		historyWidth := min(40, max(24, contentWidth/4))
 		coreWidth := contentWidth - historyWidth - 3
 		cores := renderCPUCoreLines(m.snapshot.CPUCoreUsage, coreWidth)
-		history := renderHistoryChart(card.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, chartStyle)
+		history := renderHistoryChart(card.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, utilizationStyle(card.usage))
 		return append(lines, historyColumns(cores, history, coreWidth)...)
 	}
 	return append(lines, renderCPUCoreLines(m.snapshot.CPUCoreUsage, contentWidth)...)

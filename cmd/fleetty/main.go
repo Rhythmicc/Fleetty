@@ -2,17 +2,14 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"image/color"
 	"math"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,7 +26,6 @@ import (
 	"charm.land/wish/v2/logging"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/x/ansi"
-	"golang.org/x/crypto/bcrypt"
 )
 
 const refreshInterval = time.Second
@@ -55,13 +51,22 @@ func runServer() {
 		log.Fatal("Could not load machine configuration", "error", err)
 	}
 	admin := newAdminController()
-	cache := newSnapshotCache(newMetricsCollector(machine))
+	collector := newMetricsCollector(machine)
+	cache := newSnapshotCache(collector)
 	history := newHistoryStore(defaultHistoryPath())
 	cache.record = history.Record
 	rpc := newNodeRPCService(admin, cache, history)
 	hub, err := loadHubConfig(os.Getenv("HUB_NODES_FILE"))
 	if err != nil {
 		log.Fatal("Could not load hub configuration", "error", err)
+	}
+	if hub == nil {
+		receiver, err := listenProgress(progressSocketPath(os.Geteuid()), os.Geteuid() == 0 && runtime.GOOS == "linux")
+		if err != nil {
+			log.Warn("Process progress receiver unavailable", "error", err)
+		}
+		collector.progress, cache.progress = receiver, receiver
+		defer receiver.Close()
 	}
 	var hubRuntime *hubService
 	stopHub := func() {}
@@ -89,10 +94,11 @@ func runServer() {
 					return nil, nil
 				}
 				if hubRuntime != nil {
-					return newHubModel(hubRuntime, sess, pty.Window.Width, pty.Window.Height), nil
+					return newHubModel(hubRuntime, pty.Window.Width, pty.Window.Height), nil
 				}
 				return newMonitorModel(admin, cache, history, machine, sess, pty.Window.Width, pty.Window.Height), nil
 			}),
+			hubRuntime.trackPanel,
 			terminalThemeCleanup,
 			activeterm.Middleware(),
 			nodeRPCMiddleware(rpc),
@@ -400,8 +406,8 @@ func (m *monitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loadErr = msg.err
 		m.cpuHistory = appendHistory(m.cpuHistory, msg.snapshot.CPUPercent, 60)
-		m.networkRXHistory = appendHistory(m.networkRXHistory, float64(msg.snapshot.NetworkRX), 60)
-		m.networkTXHistory = appendHistory(m.networkTXHistory, float64(msg.snapshot.NetworkTX), 60)
+		m.networkRXHistory = appendHistory(m.networkRXHistory, float64(msg.snapshot.NetworkRX), networkHistorySamples)
+		m.networkTXHistory = appendHistory(m.networkTXHistory, float64(msg.snapshot.NetworkTX), networkHistorySamples)
 		if len(msg.snapshot.ManagementActions) > 0 && m.admin != nil {
 			m.admin.actions = actionsFromInfo(msg.snapshot.ManagementActions)
 		}
@@ -1373,37 +1379,6 @@ func (m *monitorModel) monitorView() string {
 	return m.monitorPagesView()
 }
 
-func (m *monitorModel) systemMetricCards() []metricCard {
-	memoryPercent := percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal)
-	diskPercent := percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal)
-	return []metricCard{
-		{
-			title: "CPU", value: cpuSummaryValue(m.snapshot), detail: m.snapshot.LoadAverage,
-			visual: metricVisualCPU, usage: m.snapshot.CPUPercent, primaryHistory: m.cpuHistory,
-			titleStyle: cpuTitleStyle, borderColor: colorCPUBorder,
-		},
-		{
-			title: "MEMORY", value: fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal)), detail: fmt.Sprintf("%.1f%% used", memoryPercent),
-			visual: metricVisualMeter, usage: memoryPercent,
-			titleStyle: memoryTitleStyle, borderColor: colorMemoryBorder,
-		},
-		{
-			title: "DISK /", value: fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal)), detail: fmt.Sprintf("%.1f%% used", diskPercent),
-			visual: metricVisualMeter, usage: diskPercent,
-			titleStyle: diskTitleStyle, borderColor: colorDiskBorder,
-		},
-		{
-			title: "NETWORK", value: fmt.Sprintf("↓ %s/s  ↑ %s/s", bytes(m.snapshot.NetworkRX), bytes(m.snapshot.NetworkTX)), detail: fmt.Sprintf("TOTAL ↓ %s  ↑ %s", bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)),
-			visual: metricVisualNetwork, primaryHistory: m.networkRXHistory, secondaryHistory: m.networkTXHistory,
-			titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
-		},
-	}
-}
-
-func dashboardHeader(width int, collectedAt time.Time, mode colorMode, nodeName string) string {
-	return dashboardHeaderNamed("FLEETTY", width, collectedAt, mode, nodeName)
-}
-
 func dashboardHeaderNamed(label string, width int, collectedAt time.Time, mode colorMode, nodeName string) string {
 	title := titleStyle.Render(label)
 	if nodeName != "" {
@@ -1426,224 +1401,6 @@ func dashboardHeaderNamed(label string, width int, collectedAt time.Time, mode c
 	left := title + "  " + live
 	gap := max(2, width-lipgloss.Width(left)-lipgloss.Width(meta))
 	return left + strings.Repeat(" ", gap) + meta
-}
-
-func (m *monitorModel) gpuPanel(layout dashboardLayout) string {
-	return newGPUCardComponent(m.snapshot).render(gpuCardDetailed, layout.width, 0)
-}
-
-type gpuPanelColumns struct {
-	contentWidth int
-	compact      bool
-	index        int
-	name         int
-	util         int
-	memory       int
-	power        int
-	clock        int
-	temperature  int
-	barWidth     int
-}
-
-func newGPUPanelColumns(width int) gpuPanelColumns {
-	contentWidth := max(20, width-4)
-	compact := contentWidth < 72
-	columns := gpuPanelColumns{
-		contentWidth: contentWidth,
-		compact:      compact,
-		index:        6,
-	}
-	if compact {
-		columns.barWidth = max(2, min(5, contentWidth/32))
-		columns.util = columns.barWidth + 5
-		columns.memory = columns.barWidth + 12
-		columns.power = columns.barWidth + 12
-		columns.clock = 8
-		columns.temperature = 6
-	} else {
-		columns.barWidth = max(4, min(12, contentWidth/24))
-		columns.util = columns.barWidth + 5
-		columns.memory = columns.barWidth + 16
-		columns.power = columns.barWidth + 16
-		columns.clock = 11
-		columns.temperature = 6
-	}
-	// There is one separator between each cell. Keep the model column fixed
-	// too, so a short model cannot pull all following metrics to the left.
-	separators := 6
-	fixed := columns.index + columns.util + columns.memory + columns.power + columns.clock + columns.temperature + separators
-	// Keep enough room for a recognizable model even on a narrow SSH
-	// terminal; the trailing temperature cell may be truncated instead.
-	columns.name = max(12, contentWidth-fixed)
-	return columns
-}
-
-func gpuStyledCell(style lipgloss.Style, value string, width int, right bool) string {
-	return style.Render(fixedCell(value, width, right))
-}
-
-func gpuPanelMetricsLine(gpu gpuInfo, width int) string {
-	columns := newGPUPanelColumns(width)
-	displayName := gpu.Name
-	if columns.compact {
-		displayName = shortGPUName(displayName)
-	}
-	name := gpuStyledCell(valueStyle, displayName, columns.name, false)
-	utilStyle := gpuLoadStyle(gpu.Utilization)
-	memoryUsage := percent(gpu.MemoryUsed, gpu.MemoryTotal)
-	memoryStyle := gpuLoadStyle(memoryUsage)
-	powerUsage := 0.0
-	if gpu.PowerLimit > 0 {
-		powerUsage = gpu.Power * 100 / gpu.PowerLimit
-	}
-	powerStyle := gpuLoadStyle(powerUsage)
-	memory := compactByteCount(gpu.MemoryUsed) + "/" + compactByteCount(gpu.MemoryTotal)
-	power := fmt.Sprintf("%.0fW", gpu.Power)
-	if gpu.PowerLimit > 0 {
-		power = fmt.Sprintf("%.0f/%.0fW", gpu.Power, gpu.PowerLimit)
-	}
-	barWidth := columns.barWidth
-	clockText := fmt.Sprintf("CLK %dMHz", gpu.ClockMHz)
-	if columns.compact {
-		memory = shortGPUCount(gpu.MemoryUsed) + "/" + shortGPUCount(gpu.MemoryTotal)
-		if gpu.PowerLimit > 0 {
-			power = fmt.Sprintf("%.0f/%.0fW", gpu.Power, gpu.PowerLimit)
-		}
-		clockText = fmt.Sprintf("%dMHz", gpu.ClockMHz)
-	}
-	utilPart := gpuStyledCell(utilStyle, fmt.Sprintf("%s %3.0f%%", shortGPUBar(gpu.Utilization, barWidth), gpu.Utilization), columns.util, false)
-	memoryLabel := "MEM"
-	powerLabel := "PWR"
-	if columns.compact {
-		memoryLabel = "M"
-		powerLabel = "P"
-	}
-	memoryPart := gpuStyledCell(memoryStyle, fmt.Sprintf("%s %s %s", shortGPUBar(memoryUsage, barWidth), memoryLabel, memory), columns.memory, false)
-	powerPart := gpuStyledCell(powerStyle, fmt.Sprintf("%s %s %s", shortGPUBar(powerUsage, barWidth), powerLabel, power), columns.power, false)
-	clockPart := gpuStyledCell(gpuClockStyle(gpu.ClockMHz), clockText, columns.clock, false)
-	temperaturePart := gpuStyledCell(gpuTemperatureStyle(gpu.Temperature), fmt.Sprintf("%d°C", gpu.Temperature), columns.temperature, false)
-	parts := []string{
-		gpuStyledCell(valueStyle, fmt.Sprintf("GPU %-2d", gpu.Index), columns.index, false),
-		name,
-		utilPart,
-		memoryPart,
-		powerPart,
-		clockPart,
-		temperaturePart,
-	}
-	return ansi.Truncate(strings.Join(parts, " "), columns.contentWidth, "…")
-}
-
-func shortGPUBar(value float64, width int) string {
-	filled := int(value / 100 * float64(width))
-	filled = max(0, min(width, filled))
-	return strings.Repeat("█", filled) + barTrackStyle.Render(strings.Repeat("░", width-filled))
-}
-
-func shortGPUCount(value uint64) string {
-	return strings.ReplaceAll(compactByteCount(value), ".0", "")
-}
-
-func gpuPanelWorkloadLine(gpu gpuInfo, width int) string {
-	columns := newGPUPanelColumns(width)
-	indent := strings.Repeat(" ", columns.index+1)
-	if len(gpu.Workloads) == 0 {
-		if gpu.Platform == "apple" {
-			return dimStyle.Render(fmt.Sprintf("%sNO ACTIVE JOB  ·  RENDER %.0f%%  ·  TILER %.0f%%", indent,
-				gpu.RendererUtilization, gpu.TilerUtilization))
-		}
-		return dimStyle.Render(indent + "NO ACTIVE JOB")
-	}
-	parts := make([]string, 0, len(gpu.Workloads))
-	for _, workload := range gpu.Workloads {
-		name := strings.TrimSpace(workload.Name)
-		if separator := strings.LastIndex(name, "/"); separator >= 0 {
-			name = name[separator+1:]
-		}
-		if name == "" || strings.EqualFold(name, "[No data]") {
-			name = fmt.Sprintf("PID %d", workload.PID)
-		}
-		owner := strings.TrimSpace(workload.User)
-		if owner == "" {
-			owner = "unknown"
-		}
-		parts = append(parts,
-			gpuTitleStyle.Render("JOB ")+
-				valueStyle.Render(name)+
-				dimStyle.Render(" · USER "+owner+" · PID "+strconv.Itoa(workload.PID)),
-		)
-	}
-	return ansi.Truncate(indent+strings.Join(parts, dimStyle.Render("  │  ")), columns.contentWidth, "…")
-}
-
-func gpuTelemetry(gpu gpuInfo, showPowerLimit bool) string {
-	if gpu.Platform == "apple" {
-		cores := "CORES ?"
-		if gpu.CoreCount > 0 {
-			cores = fmt.Sprintf("CORES %d", gpu.CoreCount)
-		}
-		return fmt.Sprintf("%s · RENDER %3.0f%% · TILER %3.0f%%",
-			cores, gpu.RendererUtilization, gpu.TilerUtilization)
-	}
-	if showPowerLimit && gpu.PowerLimit > 0 {
-		return fmt.Sprintf("CLK %4d MHz · PWR %3.0f/%3.0f W · %3d°C", gpu.ClockMHz, gpu.Power, gpu.PowerLimit, gpu.Temperature)
-	}
-	return fmt.Sprintf("CLK %4d MHz · PWR %3.0f W · %3d°C", gpu.ClockMHz, gpu.Power, gpu.Temperature)
-}
-
-func gpuMemoryWidths(gpus []gpuInfo) (usedWidth, totalWidth int) {
-	for _, gpu := range gpus {
-		usedWidth = max(usedWidth, lipgloss.Width(bytes(gpu.MemoryUsed)))
-		totalWidth = max(totalWidth, lipgloss.Width(bytes(gpu.MemoryTotal)))
-	}
-	return max(usedWidth, 1), max(totalWidth, 1)
-}
-
-func gpuMemoryText(gpu gpuInfo, usedWidth, totalWidth int) string {
-	if gpu.Platform == "apple" {
-		return fmt.Sprintf("UMA %*s USED · %*s ALLOC",
-			usedWidth, bytes(gpu.MemoryUsed), totalWidth, bytes(gpu.MemoryTotal))
-	}
-	return fmt.Sprintf("MEM %*s/%*s", usedWidth, bytes(gpu.MemoryUsed), totalWidth, bytes(gpu.MemoryTotal))
-}
-
-func gpuNameWidth(gpus []gpuInfo, width int) int {
-	nameWidth := 8
-	for _, gpu := range gpus {
-		nameWidth = max(nameWidth, lipgloss.Width(gpu.Name))
-	}
-	return min(nameWidth, max(8, width-22))
-}
-
-func gpuLoadStatus(utilization float64) (string, lipgloss.Style) {
-	// The words stay so a row can still say IDLE or BUSY. The color is only
-	// the shared ok / warn / crit scale.
-	style := stateStyle(usageLevel(utilization))
-	switch {
-	case utilization < 5:
-		return "IDLE", style
-	case utilization < 35:
-		return "LIGHT", style
-	case utilization < 65:
-		return "ACTIVE", style
-	case utilization < 85:
-		return "BUSY", style
-	case utilization < 95:
-		return "HIGH", style
-	default:
-		return "MAX", style
-	}
-}
-
-// Clock speed is informational. Temperature is the health signal, colored
-// with the shared state scale.
-func gpuClockStyle(int) lipgloss.Style {
-	// Clock speed is not a health state. Keep it neutral.
-	return valueStyle
-}
-
-func gpuTemperatureStyle(temperature int) lipgloss.Style {
-	return stateStyle(temperatureLevel(temperature))
 }
 
 func (m *monitorModel) processPanel(layout dashboardLayout) string {
@@ -1678,177 +1435,6 @@ func (m *monitorModel) processPanel(layout dashboardLayout) string {
 	return btopPanel(w, "PROCESSES", meta, strings.Join(lines, "\n"), titleForPanel, border)
 }
 
-func (m *monitorModel) passwordView() string {
-	w := usableWidth(m.width)
-	masked := strings.Repeat("•", len([]rune(m.password)))
-	if masked == "" {
-		masked = dimStyle.Render("password")
-	}
-	content := strings.Join([]string{
-		titleStyle.Render("MANAGEMENT MODE"),
-		dimStyle.Render("Authentication is required before any host action."),
-		"",
-		"Password: " + inputStyle.Render(masked+" "),
-		"",
-		warningStyle.Render(m.status),
-	}, "\n")
-	footer := helpStyle.Render("[enter] continue  [esc] return") + "  " +
-		dimStyle.Render("Type or paste the management password.")
-	return centeredTerminalFrame(centeredPanel(w, content), footer, w, m.height)
-}
-
-func (m *monitorModel) adminView() string {
-	w := usableWidth(m.width)
-	processes := m.filteredProcesses()
-	rows := m.adminVisibleProcessRows()
-	end := min(len(processes), m.processOffset+rows)
-	if m.processOffset > end {
-		m.processOffset = 0
-	}
-	format := newProcessFormat(w)
-	table := []string{
-		processLegend(w - 4),
-		format.renderHeader(m.processSort),
-	}
-	for i := m.processOffset; i < end; i++ {
-		row := format.renderRow(processes[i], i+1, i == m.cursor && !m.filtering, m.colorMode, m.snapshot.MemoryTotal)
-		table = append(table, row)
-	}
-	if len(processes) == 0 {
-		table = append(table, warningStyle.Render("No processes match this filter."))
-	}
-
-	filterValue := m.filter
-	if filterValue == "" {
-		filterValue = "process name, user, or PID"
-	}
-	if m.filtering {
-		filterValue += "█"
-	}
-	filterLine := accentStyle.Render("FILTER /") + " " + inputStyle.Width(max(12, w-14)).Render(truncate(filterValue, max(8, w-18)))
-	actionButtons := make([]string, 0, len(m.admin.actions)*2)
-	for index, action := range m.admin.actions {
-		if index > 0 {
-			actionButtons = append(actionButtons, " ")
-		}
-		actionButtons = append(actionButtons,
-			compactButton(strconv.Itoa(index+1), m.adminActionLabel(index), action.dangerous))
-	}
-	actions := lipgloss.JoinHorizontal(lipgloss.Top, actionButtons...)
-	body := strings.Join([]string{
-		titleStyle.Render("MANAGEMENT MODE") + "  " + accentStyle.Render("AUTHORIZED"),
-		dimStyle.Render(truncate("Available actions reflect the service account permissions and require confirmation.", w)),
-		actions,
-		filterLine,
-		btopPanel(w, "PROCESS MANAGER", m.processTableMeta(m.processOffset, rows, w, "PROCESS MANAGER"), strings.Join(table, "\n"), processTitleStyle, colorProcessBorder),
-	}, "\n")
-	footer := helpStyle.Render("[o/O] sort/reverse  [/] filter  [↑/↓] select  [enter/click] details  [c] clear  [esc] monitor") + "  " + dimStyle.Render(m.status)
-	return terminalFrame(body, footer, w, m.height)
-}
-
-func (m *monitorModel) confirmView() string {
-	w := usableWidth(m.width)
-	if m.selectedAction == nil {
-		m.screen = screenAdmin
-		return m.adminView()
-	}
-	confirmLabel := "Confirm action"
-	if m.busy {
-		confirmLabel = "Running…"
-	}
-	body := strings.Join([]string{
-		titleStyle.Render("CONFIRM MANAGEMENT ACTION"),
-		warningStyle.Render("This runs on the host immediately: " + m.selectedAction.label),
-		"",
-		panelStyle(w).Render(sectionStyle.Render(m.selectedAction.label) + "\n" + m.selectedAction.description),
-		"",
-		actionCard(w, "Y", confirmLabel, "Click to execute", true),
-		"",
-		actionCard(w, "N", "Cancel", "Return without making a change", false),
-	}, "\n")
-	footer := helpStyle.Render("[y/enter] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status)
-	return terminalFrame(body, footer, w, m.height)
-}
-
-func (m *monitorModel) processDetailView() string {
-	w := usableWidth(m.width)
-	if m.selectedProcess == nil {
-		if m.processReadOnly {
-			m.screen = screenMonitor
-			return m.monitorView()
-		}
-		m.screen = screenAdmin
-		return m.adminView()
-	}
-	pid := m.selectedProcess.PID
-	action := compactButton("Esc", "Back to monitor", false)
-	description := "Read-only process information. Sensitive arguments and the working directory are redacted."
-	help := "[r] reload  [esc] back"
-	if !m.processReadOnly {
-		action = compactButton("T", "Terminate process", true)
-		if !m.selectedProcessCanTerminate() {
-			action = dimStyle.Render("Termination unavailable until details are loaded, or for protected processes")
-		}
-		action += "  " + compactButton("Esc", "Back to process manager", false)
-		description = "Inspect the selected process before taking action."
-		help = "[t/click] terminate  [r] reload  [esc] back"
-	}
-	body := "Loading process details…"
-	if m.detailErr != nil {
-		body = warningStyle.Render("Unable to read process details: " + m.detailErr.Error())
-	} else if m.processDetail != nil {
-		d := m.processDetail
-		lines := []string{
-			sectionStyle.Render(fmt.Sprintf("%s  PID %d", d.Name, d.PID)),
-			fmt.Sprintf("%s %d    %s %d    %s %s    %s %d", dimStyle.Render("PPID"), d.PPID, dimStyle.Render("UID"), d.UID, dimStyle.Render("USER"), d.User, dimStyle.Render("THREADS"), d.Threads),
-			fmt.Sprintf("%s %s    %s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("STATE"), d.State, dimStyle.Render("CPU"), d.CPU, dimStyle.Render("MEM"), d.Memory, dimStyle.Render("RSS"), bytes(d.RSS)),
-			fmt.Sprintf("%s %s", dimStyle.Render("ELAPSED"), elapsed(d.Elapsed)),
-			"",
-			dimStyle.Render("COMMAND") + "  " + truncate(d.CommandLine, max(12, w-14)),
-			dimStyle.Render("EXEC") + "     " + truncate(d.Executable, max(12, w-14)),
-			dimStyle.Render("CWD") + "      " + truncate(d.CWD, max(12, w-14)),
-		}
-		if d.Redacted {
-			lines = append([]string{warningStyle.Render("REDACTED  Authenticate for sensitive process details."), ""}, lines...)
-		}
-		body = strings.Join(lines, "\n")
-	}
-	pageBody := strings.Join([]string{
-		titleStyle.Render("PROCESS DETAILS") + "  " + accentStyle.Render(fmt.Sprintf("PID %d", pid)),
-		dimStyle.Render(description),
-		action,
-		panelStyle(w).Render(body),
-	}, "\n")
-	footer := helpStyle.Render(help) + "  " + dimStyle.Render(m.status)
-	return terminalFrame(pageBody, footer, w, m.height)
-}
-
-func (m *monitorModel) processTerminateConfirmView() string {
-	w := usableWidth(m.width)
-	if m.selectedProcess == nil {
-		m.screen = screenAdmin
-		return m.adminView()
-	}
-	p := m.selectedProcess
-	confirm := compactButton("Y", "Send SIGTERM", true)
-	if m.busy {
-		confirm = compactButton("…", "Sending SIGTERM", true)
-	}
-	body := strings.Join([]string{
-		titleStyle.Render("CONFIRM PROCESS TERMINATION"),
-		warningStyle.Render(fmt.Sprintf("PID %d (%s) will receive SIGTERM.", p.PID, p.Command)),
-		confirm + "  " + compactButton("N", "Cancel", false),
-		panelStyle(w).Render(strings.Join([]string{
-			sectionStyle.Render(fmt.Sprintf("PID %d", p.PID)),
-			fmt.Sprintf("%s %s", dimStyle.Render("USER"), p.User),
-			fmt.Sprintf("%s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("CPU"), p.CPU, dimStyle.Render("MEM"), p.Memory, dimStyle.Render("RSS"), bytes(p.RSS)),
-			dimStyle.Render("COMMAND") + "  " + truncate(p.Command, max(12, w-14)),
-		}, "\n")),
-	}, "\n")
-	footer := helpStyle.Render("[y/enter/click] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status)
-	return terminalFrame(body, footer, w, m.height)
-}
-
 type metricVisual int
 
 const (
@@ -1867,8 +1453,6 @@ type metricCard struct {
 	titleStyle                       lipgloss.Style
 	borderColor                      color.Color
 }
-
-const adminProcessRowStart = 7
 
 type dashboardLayout struct {
 	width       int
@@ -1946,7 +1530,7 @@ func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 			historyWidth := 24
 			leftWidth := contentWidth - historyWidth - 3
 			left := []string{valueStyle.Render(truncate(c.value, leftWidth)), dimStyle.Render(truncate(c.detail, leftWidth))}
-			lines = historyColumns(left, renderHistoryChart(c.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, chartStyle), leftWidth)
+			lines = historyColumns(left, renderHistoryChart(c.primaryHistory, historyWidth, historyPlotHeight, "CPU %", 100, utilizationStyle(c.usage)), leftWidth)
 		}
 		lines = strings.Split(strings.Join(lines, "\n"), "\n")
 		for len(lines) < minimumRows {
@@ -1976,7 +1560,7 @@ func renderMetricRows(cards []metricCard, layout dashboardLayout) string {
 func renderMetricVisual(card metricCard, width int) string {
 	switch card.visual {
 	case metricVisualCPU:
-		return strings.Join(renderHistoryChart(card.primaryHistory, width, historyPlotHeight, "CPU %", 100, chartStyle), "\n")
+		return strings.Join(renderHistoryChart(card.primaryHistory, width, historyPlotHeight, "CPU %", 100, utilizationStyle(card.usage)), "\n")
 	case metricVisualMeter:
 		return bar(card.usage, width)
 	case metricVisualNetwork:
@@ -2015,8 +1599,8 @@ func processLegend(width int) string {
 		parts = append(parts, processStateStyle(item.state).Render(label))
 	}
 	legend := strings.Join(parts, "  ")
-	load := dimStyle.Render("   LOAD ") + okStyle.Render("OK") + " " +
-		warningStyle.Render("WARN") + " " + dangerStyle.Render("CRIT")
+	load := dimStyle.Render("   LOAD ") + gpuLightStyle.Render("LOW") + " " +
+		gpuActiveStyle.Render("MID") + " " + gpuBusyStyle.Render("HIGH") + " " + gpuMaxStyle.Render("HOT")
 	if lipgloss.Width(legend)+lipgloss.Width(load) <= width {
 		legend += load
 	}
@@ -2045,120 +1629,6 @@ func processStateStyle(state string) lipgloss.Style {
 	default:
 		return processDefaultStyle
 	}
-}
-
-func actionCard(width int, key, title, detail string, dangerous bool) string {
-	style := clickableStyle(width)
-	label := accentStyle.Render("["+key+"] ") + title
-	if dangerous {
-		label = dangerStyle.Render("["+key+"] ") + title
-	}
-	return style.Render(label + "\n" + dimStyle.Render(detail))
-}
-
-func compactButton(key, label string, dangerous bool) string {
-	style := compactButtonStyle
-	keyStyle := accentStyle
-	if dangerous {
-		style = compactDangerButtonStyle
-		keyStyle = dangerStyle
-	}
-	return style.Render(keyStyle.Render("["+key+"]") + " " + label)
-}
-
-func compactButtonWidth(key, label string) int {
-	return lipgloss.Width(compactButton(key, label, false))
-}
-
-func centeredPanel(width int, content string) string {
-	return "\n" + panelStyle(min(68, width)).Render(content)
-}
-
-type adminAction struct {
-	ID          int
-	label       string
-	description string
-	operation   managementOperation
-	target      string
-	privileged  bool
-	dangerous   bool
-}
-
-type adminController struct {
-	password     string
-	passwordHash string
-	actions      []adminAction
-}
-
-func newAdminController() *adminController {
-	scope := strings.ToLower(strings.TrimSpace(os.Getenv("FLEETTY_INSTALL_SCOPE")))
-	return &adminController{
-		password:     os.Getenv("ADMIN_PASSWORD"),
-		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
-		actions:      defaultAdminActions(runtime.GOOS, scope, os.Geteuid(), privilegedSocketPath()),
-	}
-}
-
-func defaultAdminActions(goos, scope string, effectiveUID int, privilegedSocket string) []adminAction {
-	if goos != "linux" {
-		return nil
-	}
-	userScope := scope == "user" || scope == "" && effectiveUID != 0
-	actions := []adminAction{
-		{
-			ID: 0, label: "Restart Fleetty", description: "Restart the Fleetty node service.",
-			operation: managementRestartService, target: "fleetty.service",
-			privileged: !userScope && effectiveUID != 0,
-		},
-	}
-	if (!userScope && effectiveUID == 0) || strings.TrimSpace(privilegedSocket) != "" {
-		actions = append(actions, adminAction{
-			ID: 1, label: "Reboot machine",
-			description: "Restart the entire host. Active workloads will be interrupted.",
-			operation:   managementRebootHost,
-			privileged:  effectiveUID != 0,
-			dangerous:   true,
-		})
-	}
-	return actions
-}
-
-func newRemoteAdminController() *adminController {
-	admin := newAdminController()
-	admin.password = "remote"
-	admin.passwordHash = ""
-	return admin
-}
-
-func (a *adminController) enabled() bool { return a.password != "" || a.passwordHash != "" }
-
-func (a *adminController) actionInfo() []managementActionInfo {
-	result := make([]managementActionInfo, 0, len(a.actions))
-	for _, action := range a.actions {
-		result = append(result, managementActionInfo{
-			ID: action.ID, Label: action.label,
-			Description: action.description, Dangerous: action.dangerous,
-		})
-	}
-	return result
-}
-
-func actionsFromInfo(infos []managementActionInfo) []adminAction {
-	result := make([]adminAction, 0, len(infos))
-	for _, info := range infos {
-		result = append(result, adminAction{
-			ID: info.ID, label: info.Label,
-			description: info.Description, dangerous: info.Dangerous,
-		})
-	}
-	return result
-}
-
-func (a *adminController) authenticate(password string) bool {
-	if a.passwordHash != "" {
-		return bcrypt.CompareHashAndPassword([]byte(a.passwordHash), []byte(password)) == nil
-	}
-	return a.password != "" && subtle.ConstantTimeCompare([]byte(a.password), []byte(password)) == 1
 }
 
 type monitorSnapshot struct {
@@ -2196,6 +1666,7 @@ type monitorSnapshot struct {
 	GPUs                  []gpuInfo
 	GPUError              string
 	Processes             []processInfo
+	SlurmProgress         []slurmProcessProgress `json:",omitempty"`
 	ManagementActions     []managementActionInfo
 }
 
@@ -2239,6 +1710,8 @@ type gpuWorkloadInfo struct {
 
 type processInfo struct {
 	PID                  int
+	UID                  int              `json:"-"`
+	Progress             *processProgress `json:",omitempty"`
 	User, State, Command string
 	CPU, Memory          float64
 	RSS, Elapsed         uint64
@@ -2262,479 +1735,7 @@ type processDetail struct {
 	StartTimeTicks          uint64
 	Redacted                bool
 	CanTerminate            bool
-}
-
-type metricsCollector struct {
-	config                     machineConfig
-	identity                   systemIdentity
-	previousCPU                map[string]cpuCounters
-	cpuFrequencyReader         cpuFrequencyReader
-	cpuFrequencyInitialized    bool
-	previousNet                netCounters
-	previousDiskRead           uint64
-	previousDiskWrite          uint64
-	haveDiskIO                 bool
-	lastDiskIOAt               time.Time
-	previousInterfaces         map[string]networkDeviceCounters
-	previousProcessNet         map[int]processNetworkCounters
-	previousConnectionNet      map[string]connectionNetworkCounters
-	haveCPU                    bool
-	haveNet                    bool
-	lastNetAt                  time.Time
-	lastProcessNetAt           time.Time
-	lastServiceAt              time.Time
-	cachedServices             []serviceHealth
-	cachedContainers           []containerInfo
-	cachedDockerError          string
-	cachedPM2Processes         []pm2ProcessInfo
-	cachedPM2Error             string
-	processRefreshInterval     time.Duration
-	gpuWorkloadRefreshInterval time.Duration
-	processNetRefreshInterval  time.Duration
-	lastProcessesAt            time.Time
-	cachedProcesses            []processInfo
-	lastGPUWorkloadsAt         time.Time
-	cachedGPUWorkloads         map[string][]gpuWorkloadInfo
-	cachedNetworkProcesses     []processNetworkInfo
-	cachedNetworkConnections   []networkConnectionInfo
-	cachedConnectionWarning    string
-}
-
-type netCounters struct{ rx, tx uint64 }
-
-func counterDelta(current, previous uint64) uint64 {
-	if current < previous {
-		return 0
-	}
-	return current - previous
-}
-
-func newMetricsCollector(config machineConfig) *metricsCollector {
-	processNetInterval := 5 * time.Second
-	if runtime.GOOS == "linux" {
-		processNetInterval = time.Second
-	}
-	return &metricsCollector{
-		config:                     config,
-		identity:                   readSystemIdentity(),
-		previousInterfaces:         make(map[string]networkDeviceCounters),
-		previousProcessNet:         make(map[int]processNetworkCounters),
-		processRefreshInterval:     3 * time.Second,
-		gpuWorkloadRefreshInterval: 5 * time.Second,
-		processNetRefreshInterval:  processNetInterval,
-	}
-}
-
-func (c *metricsCollector) needsWarmup() bool {
-	return !c.haveCPU || !c.haveNet
-}
-
-func (c *metricsCollector) collect() (monitorSnapshot, error) {
-	return c.collectWithProcesses(true)
-}
-
-func (c *metricsCollector) collectSummary() (monitorSnapshot, error) {
-	return c.collectWithProcesses(false)
-}
-
-func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorSnapshot, error) {
-	s := monitorSnapshot{CollectedAt: time.Now()}
-	s.OSName = c.identity.OSName
-	s.CPUModel = c.identity.CPUModel
-	s.CPUCores = c.identity.CPUCores
-	s.Uptime = uptimeSeconds(c.identity, s.CollectedAt)
-	var errs []string
-	if err := c.collectCPU(&s); err != nil {
-		errs = append(errs, "cpu: "+err.Error())
-	}
-	c.collectCPUFrequency(&s)
-	if used, total, err := readMemory(); err != nil {
-		errs = append(errs, "memory: "+err.Error())
-	} else {
-		s.MemoryUsed, s.MemoryTotal = used, total
-	}
-	if used, total, err := readDisk(); err != nil {
-		errs = append(errs, "disk: "+err.Error())
-	} else {
-		s.DiskUsed, s.DiskTotal = used, total
-	}
-	c.collectDiskIO(&s)
-	if err := c.collectNetwork(&s); err != nil {
-		errs = append(errs, "network: "+err.Error())
-	}
-	if includeProcesses {
-		c.collectProcessNetwork(&s)
-	}
-	s.LoadAverage = readLoadAverage()
-	if runtime.GOOS == "darwin" {
-		s.Battery, _ = readDarwinBattery()
-		s.GPUs, _ = readDarwinAppleGPU()
-	} else if c.config.Profile == machineProfileGPU {
-		s.GPUs, s.GPUError = c.collectGPUs()
-	}
-	c.collectMachineDetails(&s)
-	if includeProcesses {
-		c.collectProcesses(&s, &errs)
-		attachGPUWorkloadUsers(s.GPUs, s.Processes)
-	} else {
-		// The hub card names who is on the machine without shipping the
-		// full process table. Older hubs ignore a short Processes list.
-		var ignored []string
-		c.collectProcesses(&s, &ignored)
-		attachGPUWorkloadUsers(s.GPUs, s.Processes)
-		s.Processes = topProcesses(s.Processes, 3)
-	}
-	if len(errs) > 0 {
-		return s, errors.New(strings.Join(errs, "; "))
-	}
-	return s, nil
-}
-
-func readMemory() (used, total uint64, err error) {
-	if runtime.GOOS == "darwin" {
-		return readDarwinMemory()
-	}
-	b, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, 0, err
-	}
-	values := map[string]uint64{}
-	for _, line := range strings.Split(string(b), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		value, _ := strconv.ParseUint(fields[1], 10, 64)
-		values[strings.TrimSuffix(fields[0], ":")] = value * 1024
-	}
-	total = values["MemTotal"]
-	available := values["MemAvailable"]
-	if total == 0 {
-		return 0, 0, errors.New("MemTotal missing")
-	}
-	return total - available, total, nil
-}
-
-func readDisk() (used, total uint64, err error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs("/", &stat); err != nil {
-		return 0, 0, err
-	}
-	total = stat.Blocks * uint64(stat.Bsize)
-	used = (stat.Blocks - stat.Bavail) * uint64(stat.Bsize)
-	return used, total, nil
-}
-
-func readNetwork() (netCounters, error) {
-	b, err := os.ReadFile("/proc/net/dev")
-	if err != nil {
-		return netCounters{}, err
-	}
-	var total netCounters
-	for _, line := range strings.Split(string(b), "\n") {
-		parts := strings.Split(line, ":")
-		if len(parts) != 2 {
-			continue
-		}
-		iface := strings.TrimSpace(parts[0])
-		if iface == "lo" {
-			continue
-		}
-		fields := strings.Fields(parts[1])
-		if len(fields) < 9 {
-			continue
-		}
-		rx, _ := strconv.ParseUint(fields[0], 10, 64)
-		tx, _ := strconv.ParseUint(fields[8], 10, 64)
-		total.rx += rx
-		total.tx += tx
-	}
-	return total, nil
-}
-
-func readLoadAverage() string {
-	if runtime.GOOS == "darwin" {
-		return readDarwinLoadAverage()
-	}
-	b, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		return "load unavailable"
-	}
-	fields := strings.Fields(string(b))
-	if len(fields) < 3 {
-		return "load unavailable"
-	}
-	return "load " + strings.Join(fields[:3], " · ")
-}
-
-// collectGPUs refreshes the per-GPU summary on every cycle and reuses the
-// heavier compute-apps attribution until gpuWorkloadRefreshInterval elapses.
-func (c *metricsCollector) collectGPUs() ([]gpuInfo, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw,power.limit,driver_version", "--format=csv,noheader,nounits").Output()
-	if err != nil {
-		return nil, gpuMetricsError(err, "/sys/bus/pci/devices")
-	}
-	gpus := parseGPUs(output)
-	c.attachGPUWorkloads(gpus)
-	return gpus, ""
-}
-
-func (c *metricsCollector) attachGPUWorkloads(gpus []gpuInfo) {
-	due := c.lastGPUWorkloadsAt.IsZero() ||
-		time.Since(c.lastGPUWorkloadsAt) >= c.gpuWorkloadRefreshInterval
-	if !due {
-		for index := range gpus {
-			gpus[index].Workloads = append(
-				[]gpuWorkloadInfo(nil), c.cachedGPUWorkloads[gpus[index].UUID]...,
-			)
-		}
-		return
-	}
-	workloadCtx, workloadCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer workloadCancel()
-	workloadOutput, workloadErr := exec.CommandContext(
-		workloadCtx, "nvidia-smi",
-		"--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
-		"--format=csv,noheader,nounits",
-	).Output()
-	if workloadErr == nil {
-		workloads := parseGPUWorkloads(workloadOutput)
-		c.cachedGPUWorkloads = workloads
-	}
-	c.lastGPUWorkloadsAt = time.Now()
-	for index := range gpus {
-		gpus[index].Workloads = append(
-			[]gpuWorkloadInfo(nil), c.cachedGPUWorkloads[gpus[index].UUID]...,
-		)
-	}
-}
-
-// collectProcesses refreshes the full process table at a lower cadence than
-// the host metrics and reuses the last successful table in between.
-func (c *metricsCollector) collectProcesses(snapshot *monitorSnapshot, errs *[]string) {
-	if c.lastProcessesAt.IsZero() ||
-		time.Since(c.lastProcessesAt) >= c.processRefreshInterval {
-		processes, err := readProcesses()
-		if err != nil {
-			*errs = append(*errs, "processes: "+err.Error())
-		} else {
-			c.cachedProcesses = processes
-			c.lastProcessesAt = time.Now()
-		}
-	}
-	snapshot.Processes = append([]processInfo(nil), c.cachedProcesses...)
-}
-
-func parseGPUs(output []byte) []gpuInfo {
-	var gpus []gpuInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		parts := strings.Split(line, ",")
-		if len(parts) != 9 && len(parts) != 11 {
-			continue
-		}
-		for index := range parts {
-			parts[index] = strings.TrimSpace(parts[index])
-		}
-		index, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-		nameIndex, utilIndex := 1, 2
-		uuid, driver := "", ""
-		if len(parts) == 11 {
-			uuid, nameIndex, utilIndex, driver = parts[1], 2, 3, parts[10]
-		}
-		memUsed, _ := strconv.ParseUint(parts[utilIndex+1], 10, 64)
-		memTotal, _ := strconv.ParseUint(parts[utilIndex+2], 10, 64)
-		util, _ := strconv.ParseFloat(parts[utilIndex], 64)
-		temp, _ := strconv.Atoi(parts[utilIndex+3])
-		clockMHz, _ := strconv.Atoi(parts[utilIndex+4])
-		power, _ := strconv.ParseFloat(parts[utilIndex+5], 64)
-		powerLimit, _ := strconv.ParseFloat(parts[utilIndex+6], 64)
-		gpus = append(gpus, gpuInfo{
-			Index: index, UUID: uuid, Name: parts[nameIndex], DriverVersion: driver,
-			Utilization: util,
-			MemoryUsed:  memUsed * 1024 * 1024, MemoryTotal: memTotal * 1024 * 1024,
-			Temperature: temp, ClockMHz: clockMHz, Power: power, PowerLimit: powerLimit,
-		})
-	}
-	return gpus
-}
-
-func parseGPUWorkloads(output []byte) map[string][]gpuWorkloadInfo {
-	workloads := make(map[string][]gpuWorkloadInfo)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		parts := strings.Split(line, ",")
-		if len(parts) != 4 {
-			continue
-		}
-		uuid := strings.TrimSpace(parts[0])
-		pid, pidErr := strconv.Atoi(strings.TrimSpace(parts[1]))
-		memoryMiB, memoryErr := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
-		if uuid == "" || pidErr != nil || pid <= 0 || memoryErr != nil {
-			continue
-		}
-		workloads[uuid] = append(workloads[uuid], gpuWorkloadInfo{
-			PID: pid, Name: sanitizeTerminalText(parts[2]), MemoryUsed: memoryMiB << 20,
-		})
-	}
-	return workloads
-}
-
-func topProcesses(processes []processInfo, limit int) []processInfo {
-	if limit <= 0 || len(processes) == 0 {
-		return nil
-	}
-	remaining := append([]processInfo(nil), processes...)
-	picked := make([]processInfo, 0, min(limit, len(remaining)))
-	for len(picked) < limit && len(remaining) > 0 {
-		best := 0
-		for index := 1; index < len(remaining); index++ {
-			if remaining[index].CPU > remaining[best].CPU {
-				best = index
-			}
-		}
-		if remaining[best].CPU <= 0 {
-			break
-		}
-		picked = append(picked, remaining[best])
-		remaining = append(remaining[:best], remaining[best+1:]...)
-	}
-	return picked
-}
-
-func attachGPUWorkloadUsers(gpus []gpuInfo, processes []processInfo) {
-	users := make(map[int]string, len(processes))
-	for _, process := range processes {
-		users[process.PID] = process.User
-	}
-	for gpuIndex := range gpus {
-		for workloadIndex := range gpus[gpuIndex].Workloads {
-			gpus[gpuIndex].Workloads[workloadIndex].User =
-				users[gpus[gpuIndex].Workloads[workloadIndex].PID]
-		}
-	}
-}
-
-func readProcesses() ([]processInfo, error) {
-	if runtime.GOOS == "darwin" {
-		return readDarwinProcesses()
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,comm=", "--sort=-pcpu").Output()
-	if err != nil {
-		return nil, err
-	}
-	var processes []processInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
-			continue
-		}
-		pid, _ := strconv.Atoi(fields[0])
-		cpu, _ := strconv.ParseFloat(fields[3], 64)
-		memory, _ := strconv.ParseFloat(fields[4], 64)
-		rss, _ := strconv.ParseUint(fields[5], 10, 64)
-		elapsed, _ := strconv.ParseUint(fields[6], 10, 64)
-		// ps can briefly appear as the busiest process because it is sampling
-		// the whole process table. It is collector noise, not a useful host task.
-		if fields[7] == "ps" {
-			continue
-		}
-		processes = append(processes, processInfo{
-			PID: pid, User: sanitizeTerminalText(fields[1]), State: sanitizeTerminalText(fields[2]), CPU: cpu, Memory: memory,
-			RSS: rss * 1024, Elapsed: elapsed, Command: sanitizeTerminalText(strings.Join(fields[7:], " ")),
-		})
-	}
-	sort.SliceStable(processes, func(i, j int) bool { return processes[i].CPU > processes[j].CPU })
-	return processes, nil
-}
-
-func readProcessDetailWithSensitive(pid int, includeSensitive bool) (processDetail, error) {
-	if runtime.GOOS == "darwin" {
-		return readDarwinProcessDetail(pid, includeSensitive)
-	}
-	if pid <= 0 {
-		return processDetail{}, errors.New("invalid PID")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,uid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,nlwp=,comm=").Output()
-	if err != nil {
-		return processDetail{}, fmt.Errorf("process no longer exists")
-	}
-	fields := strings.Fields(strings.TrimSpace(string(output)))
-	if len(fields) < 11 {
-		return processDetail{}, errors.New("incomplete process information")
-	}
-	detail := processDetail{}
-	detail.PID, _ = strconv.Atoi(fields[0])
-	detail.PPID, _ = strconv.Atoi(fields[1])
-	detail.UID, _ = strconv.Atoi(fields[2])
-	detail.User = sanitizeTerminalText(fields[3])
-	detail.State = sanitizeTerminalText(fields[4])
-	detail.CPU, _ = strconv.ParseFloat(fields[5], 64)
-	detail.Memory, _ = strconv.ParseFloat(fields[6], 64)
-	rss, _ := strconv.ParseUint(fields[7], 10, 64)
-	detail.RSS = rss * 1024
-	detail.Elapsed, _ = strconv.ParseUint(fields[8], 10, 64)
-	detail.Threads, _ = strconv.Atoi(fields[9])
-	detail.Name = sanitizeTerminalText(strings.Join(fields[10:], " "))
-
-	procRoot := fmt.Sprintf("/proc/%d", pid)
-	if commandLine, readErr := os.ReadFile(procRoot + "/cmdline"); readErr == nil {
-		detail.CommandLine = sanitizeTerminalText(strings.ReplaceAll(string(commandLine), "\x00", " "))
-	}
-	if detail.CommandLine == "" {
-		detail.CommandLine = detail.Name
-	}
-	if executable, readErr := os.Readlink(procRoot + "/exe"); readErr == nil {
-		detail.Executable = sanitizeTerminalText(executable)
-	} else {
-		detail.Executable = "unavailable"
-	}
-	if cwd, readErr := os.Readlink(procRoot + "/cwd"); readErr == nil {
-		detail.CWD = sanitizeTerminalText(cwd)
-	} else {
-		detail.CWD = "unavailable"
-	}
-	applyProcessDetailPolicy(&detail, includeSensitive)
-	detail.StartTimeTicks, _ = readProcessStartTicks(pid)
-	return detail, nil
-}
-
-func applyProcessDetailPolicy(detail *processDetail, includeSensitive bool) {
-	if detail == nil || includeSensitive {
-		return
-	}
-	detail.CommandLine = redactProcessCommandLine(detail.CommandLine)
-	detail.CWD = redactedProcessDetailMessage
-	detail.Redacted = true
-}
-
-func readProcessStartTicks(pid int) (uint64, error) {
-	if runtime.GOOS == "darwin" {
-		return readDarwinProcessStart(pid)
-	}
-	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0, err
-	}
-	return parseProcessStartTicks(stat)
-}
-
-func parseProcessStartTicks(stat []byte) (uint64, error) {
-	// The command name in field 2 may contain spaces. Everything after its
-	// closing parenthesis starts at field 3; starttime is field 22.
-	closing := strings.LastIndexByte(string(stat), ')')
-	if closing < 0 || closing+2 >= len(stat) {
-		return 0, errors.New("invalid process stat")
-	}
-	fields := strings.Fields(string(stat[closing+2:]))
-	if len(fields) <= 19 {
-		return 0, errors.New("incomplete process stat")
-	}
-	return strconv.ParseUint(fields[19], 10, 64)
+	Progress                *processProgress `json:",omitempty"`
 }
 
 func sanitizeTerminalText(value string) string {
@@ -2796,10 +1797,6 @@ func btopPanel(width int, title, meta, content string, titleStyle lipgloss.Style
 	}
 	rendered = append(rendered, borderStyle.Render("╰"+strings.Repeat("─", innerWidth)+"╯"))
 	return strings.Join(rendered, "\n")
-}
-
-func processTableHeader(header string, width int) string {
-	return processHeaderStyle.Width(max(1, width)).MaxWidth(max(1, width)).Render(header)
 }
 
 func renderFooter(width int, status string) string {
@@ -2925,18 +1922,6 @@ func usableWidth(width int) int {
 	}
 	return max(36, width)
 }
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 func percent(a, b uint64) float64 {
 	if b == 0 {
 		return 0
@@ -3006,26 +1991,17 @@ func historyMax(histories ...[]float64) float64 {
 }
 
 func bar(value float64, width int) string {
-	filled := int(value / 100 * float64(width))
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > width {
-		filled = width
-	}
-	return stateStyle(usageLevel(value)).Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
+	return loadBar(value, width, utilizationStyle(value))
 }
 
 func batteryBar(value float64, width int) string {
-	filled := int(value / 100 * float64(width))
-	filled = max(0, min(width, filled))
-	return stateStyle(batteryLevel(value)).Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
+	return loadBar(value, width, stateStyle(batteryLevel(value)))
 }
-func compactCommandError(err error) string {
-	if errors.Is(err, exec.ErrNotFound) {
-		return "command not found"
-	}
-	return "not available"
+
+func loadBar(value float64, width int, style lipgloss.Style) string {
+	width = max(0, width)
+	filled := max(0, min(width, int(value/100*float64(width))))
+	return style.Render(strings.Repeat("█", filled)) + barTrackStyle.Render(strings.Repeat("░", width-filled))
 }
 func compactOutput(output string) string {
 	output = strings.TrimSpace(strings.ReplaceAll(output, "\n", " "))

@@ -109,9 +109,9 @@ func TestHubAndLauncherPinOperationBarToLastRow(t *testing.T) {
 	requirePinnedFooter(t, hub.View().Content, hub.height, "select")
 
 	hub.config.SlurmClusters = []slurmClusterConfig{{Name: "GPU Cluster"}}
-	hub.slurmView = true
+	hub.queueExpanded = true
 	hub.slurmFilter = -1
-	requirePinnedFooter(t, hub.View().Content, hub.height, "hub")
+	requirePinnedFooter(t, hub.View().Content, hub.height, "collapse")
 
 	launcher := newLauncherModel()
 	launcher.width, launcher.height = 72, 30

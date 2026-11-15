@@ -499,10 +499,6 @@ func storagePathWithinRoot(path, root string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func scanStorageDirectory(ctx context.Context, path string) (storageScanResult, error) {
-	return scanStorageDirectoryProgress(ctx, path, nil)
-}
-
 func scanStorageDirectoryProgress(
 	ctx context.Context,
 	path string,
@@ -1223,6 +1219,10 @@ func storageRectLabel(rect storageMapRect, row, width int) string {
 	if width < 3 {
 		return ""
 	}
+	pad := ""
+	if width >= 6 {
+		pad = " "
+	}
 	relative := row - rect.Y
 	switch relative {
 	case 0:
@@ -1232,24 +1232,31 @@ func storageRectLabel(rect storageMapRect, row, width int) string {
 		} else if rect.Entry.Synthetic {
 			prefix = "◇ "
 		}
-		return ansi.Truncate(prefix+rect.Entry.Name, width, "…")
+		return ansi.Truncate(pad+prefix+rect.Entry.Name, width, "…")
 	case 1:
 		if rect.Height >= 2 {
-			return ansi.Truncate(bytes(rect.Entry.Size), width, "…")
+			return ansi.Truncate(pad+bytes(rect.Entry.Size), width, "…")
 		}
 	case 2:
 		if rect.Height >= 4 && rect.Entry.IsDir {
-			return ansi.Truncate(fmt.Sprintf("%d files", rect.Entry.Files), width, "…")
+			return ansi.Truncate(pad+fmt.Sprintf("%d files · %d dirs", rect.Entry.Files, rect.Entry.Directories), width, "…")
 		}
 	}
 	return ""
 }
 
-func storageRectStyle(_ int, selected bool, _ colorMode) lipgloss.Style {
+func storageRectStyle(index int, selected bool, mode colorMode) lipgloss.Style {
 	if selected {
 		return lipgloss.NewStyle().Foreground(colorOnAccent).Background(colorAccent).Bold(true)
 	}
-	return lipgloss.NewStyle().Foreground(colorText).Background(colorSurface).Bold(true)
+	darkPalette := []string{"#1B2B40", "#172538", "#152132", "#131D2C", "#111A26"}
+	lightPalette := []string{"#D6E4F0", "#DCE8F2", "#E2ECF5", "#E7EFF7", "#ECF2F9"}
+	palette := darkPalette
+	if mode == colorModeLight {
+		palette = lightPalette
+	}
+	bg := lipgloss.Color(palette[index%len(palette)])
+	return lipgloss.NewStyle().Foreground(colorText).Background(bg).Bold(true)
 }
 
 func compactStorageDuration(duration time.Duration) string {

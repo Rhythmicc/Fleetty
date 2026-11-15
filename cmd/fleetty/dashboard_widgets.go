@@ -30,7 +30,7 @@ type renderedDashboardWidget struct {
 func (m *monitorModel) widgetDashboardView() string {
 	m.ensurePanelLayout()
 	width := usableWidth(m.width)
-	header := dashboardHeader(width, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
+	header := dashboardHeaderNamed("FLEETTY", width, m.snapshot.CollectedAt, m.colorMode, m.nodeName)
 	footer := m.renderMonitorFooter(width)
 	if m.snapshot.CollectedAt.IsZero() {
 		body := strings.Join([]string{header, "", panelStyle(width).Render("Collecting system metrics…")}, "\n")
@@ -255,13 +255,33 @@ func widgetTableRows(size widgetSize, terminalHeight int) int {
 }
 
 func (m *monitorModel) metricWidgetCard(id dashboardPanelID) (metricCard, bool) {
-	cards := m.systemMetricCards()
-	index := map[dashboardPanelID]int{
-		dashboardPanelCPU: 0, dashboardPanelMemory: 1,
-		dashboardPanelDisk: 2, dashboardPanelNetwork: 3,
-	}
-	if cardIndex, ok := index[id]; ok {
-		return cards[cardIndex], true
+	switch id {
+	case dashboardPanelCPU:
+		return metricCard{
+			title: "CPU", value: cpuSummaryValue(m.snapshot), detail: m.snapshot.LoadAverage,
+			visual: metricVisualCPU, usage: m.snapshot.CPUPercent, primaryHistory: m.cpuHistory,
+			titleStyle: cpuTitleStyle, borderColor: colorCPUBorder,
+		}, true
+	case dashboardPanelMemory:
+		memoryPercent := percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal)
+		return metricCard{
+			title: "MEMORY", value: fmt.Sprintf("%s / %s", bytes(m.snapshot.MemoryUsed), bytes(m.snapshot.MemoryTotal)), detail: fmt.Sprintf("%.1f%% used", memoryPercent),
+			visual: metricVisualMeter, usage: memoryPercent,
+			titleStyle: memoryTitleStyle, borderColor: colorMemoryBorder,
+		}, true
+	case dashboardPanelDisk:
+		diskPercent := percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal)
+		return metricCard{
+			title: "DISK /", value: fmt.Sprintf("%s / %s", bytes(m.snapshot.DiskUsed), bytes(m.snapshot.DiskTotal)), detail: fmt.Sprintf("%.1f%% used", diskPercent),
+			visual: metricVisualMeter, usage: diskPercent,
+			titleStyle: diskTitleStyle, borderColor: colorDiskBorder,
+		}, true
+	case dashboardPanelNetwork:
+		return metricCard{
+			title: "NETWORK", value: fmt.Sprintf("↓ %s/s  ↑ %s/s", bytes(m.snapshot.NetworkRX), bytes(m.snapshot.NetworkTX)), detail: fmt.Sprintf("TOTAL ↓ %s  ↑ %s", bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)),
+			visual: metricVisualNetwork, primaryHistory: m.networkRXHistory, secondaryHistory: m.networkTXHistory,
+			titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
+		}, true
 	}
 	if id != dashboardPanelBattery || m.snapshot.Battery == nil {
 		return metricCard{}, false
@@ -370,7 +390,7 @@ func (m *monitorModel) renderLargeProcessMetricWidget(card metricCard, width int
 	} else {
 		limit := min(5, len(processes))
 		for _, process := range processes[:limit] {
-			lines = append(lines, renderMetricProcessRow(process, contentWidth))
+			lines = append(lines, renderMetricProcessRow(process, contentWidth, m.snapshot.MemoryTotal))
 		}
 	}
 	return btopPanel(
@@ -386,13 +406,13 @@ func metricProcessHeader(width int) string {
 	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 }
 
-func renderMetricProcessRow(process processInfo, width int) string {
+func renderMetricProcessRow(process processInfo, width int, memoryTotal uint64) string {
 	nameWidth := max(8, width-31)
 	return strings.Join([]string{
 		dimStyle.Render(fixedCell(strconv.Itoa(process.PID), 7, false)),
 		processStateStyle(process.State).Render(fixedCell(metricProcessName(process.Command), nameWidth, false)),
-		valueStyle.Render(fixedCell(fmt.Sprintf("%.1f%%", process.CPU), 9, true)),
-		valueStyle.Render(fixedCell(bytes(process.RSS), 11, true)),
+		processLoadStyle(process.CPU, false).Render(fixedCell(fmt.Sprintf("%.1f%%", process.CPU), 9, true)),
+		processLoadStyle(percent(process.RSS, memoryTotal), true).Render(fixedCell(bytes(process.RSS), 11, true)),
 	}, " ")
 }
 
@@ -607,8 +627,8 @@ func renderNetworkProcessRow(process processNetworkInfo, width int) string {
 		return strings.Join([]string{
 			dimStyle.Render(fixedCell(strconv.Itoa(process.PID), 7, false)),
 			valueStyle.Render(fixedCell(process.Name, nameWidth, false)),
-			networkRXStyle.Render(fixedCell(bytes(process.RX)+"/s", 12, true)),
-			networkTXStyle.Render(fixedCell(bytes(process.TX)+"/s", 12, true)),
+			networkRateStyle(process.RX, true, networkRXStyle).Render(fixedCell(bytes(process.RX)+"/s", 12, true)),
+			networkRateStyle(process.TX, true, networkTXStyle).Render(fixedCell(bytes(process.TX)+"/s", 12, true)),
 			dimStyle.Render(fixedCell(bytes(process.RXTotal+process.TXTotal), 13, true)),
 		}, " ")
 	}
@@ -616,8 +636,8 @@ func renderNetworkProcessRow(process processNetworkInfo, width int) string {
 	return strings.Join([]string{
 		dimStyle.Render(fixedCell(strconv.Itoa(process.PID), 7, false)),
 		valueStyle.Render(fixedCell(process.Name, nameWidth, false)),
-		networkRXStyle.Render(fixedCell(bytes(process.RX)+"/s", 10, true)),
-		networkTXStyle.Render(fixedCell(bytes(process.TX)+"/s", 10, true)),
+		networkRateStyle(process.RX, true, networkRXStyle).Render(fixedCell(bytes(process.RX)+"/s", 10, true)),
+		networkRateStyle(process.TX, true, networkTXStyle).Render(fixedCell(bytes(process.TX)+"/s", 10, true)),
 	}, " ")
 }
 
@@ -634,8 +654,8 @@ func renderNetworkInterfaceRow(networkInterface networkInterfaceInfo, width int)
 		networkInterface.RXDrops + networkInterface.TXDrops
 	return strings.Join([]string{
 		valueStyle.Render(fixedCell(networkInterface.Name, nameWidth, false)),
-		networkRXStyle.Render(fixedCell(bytes(networkInterface.RX)+"/s", 11, true)),
-		networkTXStyle.Render(fixedCell(bytes(networkInterface.TX)+"/s", 11, true)),
+		networkRateStyle(networkInterface.RX, true, networkRXStyle).Render(fixedCell(bytes(networkInterface.RX)+"/s", 11, true)),
+		networkRateStyle(networkInterface.TX, true, networkTXStyle).Render(fixedCell(bytes(networkInterface.TX)+"/s", 11, true)),
 		dimStyle.Render(fixedCell(strconv.FormatUint(errorsAndDrops, 10), 16, true)),
 	}, " ")
 }
@@ -667,8 +687,8 @@ func (m *monitorModel) adjustDashboardScroll(delta int) {
 func (m *monitorModel) visibleWidgetPlacement(id dashboardPanelID) (widgetPlacement, int, bool) {
 	headerHeight := 0
 	if m.monitorPage == monitorPageCustom {
-		headerHeight = lipgloss.Height(dashboardHeader(
-			usableWidth(m.width), m.snapshot.CollectedAt, m.colorMode, m.nodeName,
+		headerHeight = lipgloss.Height(dashboardHeaderNamed(
+			"FLEETTY", usableWidth(m.width), m.snapshot.CollectedAt, m.colorMode, m.nodeName,
 		))
 	} else {
 		headerHeight = lipgloss.Height(m.renderMonitorPageHeader(usableWidth(m.width)))

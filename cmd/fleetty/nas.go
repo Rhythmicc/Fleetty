@@ -122,6 +122,7 @@ func (m *monitorModel) nasStoragePanel(width, rows int) string {
 			Mount: "/", Used: m.snapshot.DiskUsed, Total: m.snapshot.DiskTotal,
 		}}
 	}
+	contentWidth := max(24, width-4)
 	rows = min(max(1, rows), len(filesystems))
 	lines := make([]string, 0, rows)
 	for _, filesystem := range filesystems[:rows] {
@@ -138,17 +139,34 @@ func (m *monitorModel) nasStoragePanel(width, rows int) string {
 		if label == "/" {
 			label = "SYSTEM /"
 		}
-		line := fmt.Sprintf("%-14s %s  %s/%s",
-			truncate(label, 14), usageStyle.Render(fmt.Sprintf("%5.1f%%", usage)),
-			bytes(filesystem.Used), bytes(filesystem.Total))
-		if width >= 100 {
-			line += "  " + bar(usage, min(46, width-lipgloss.Width(line)-6))
+		device := filesystem.Device
+		if device == "" {
+			device = "local"
 		}
-		lines = append(lines, line)
+		freeBytes := uint64(0)
+		if filesystem.Total > filesystem.Used {
+			freeBytes = filesystem.Total - filesystem.Used
+		}
+		line := valueStyle.Render(fixedCell(label, 14, false))
+		if contentWidth >= 110 {
+			line += "  " + dimStyle.Render(fixedCell(device, 15, false))
+		}
+		line += "  " + usageStyle.Render(fixedCell(fmt.Sprintf("%.1f%%", usage), 6, true)) +
+			"  " + valueStyle.Render(fixedCell(bytes(filesystem.Used)+" / "+bytes(filesystem.Total), 20, true))
+		if contentWidth >= 128 {
+			line += "  " + dimStyle.Render(fixedCell("FREE "+bytes(freeBytes), 15, false))
+		}
+		if contentWidth >= 88 {
+			barW := max(12, contentWidth-lipgloss.Width(line)-2)
+			line += "  " + bar(usage, barW)
+		}
+		lines = append(lines, ansi.Truncate(line, contentWidth, "…"))
 	}
-	meta := fmt.Sprintf("%d MOUNTS", len(filesystems))
+	meta := fmt.Sprintf("%d MOUNTS · IO ↓ %s/s ↑ %s/s",
+		len(filesystems), bytes(m.snapshot.DiskRead), bytes(m.snapshot.DiskWrite))
 	if rows < len(filesystems) {
-		meta = fmt.Sprintf("%d/%d SHOWN", rows, len(filesystems))
+		meta = fmt.Sprintf("%d/%d SHOWN · IO ↓ %s/s ↑ %s/s",
+			rows, len(filesystems), bytes(m.snapshot.DiskRead), bytes(m.snapshot.DiskWrite))
 	}
 	return btopPanel(width, "STORAGE", meta, strings.Join(lines, "\n"), diskTitleStyle, colorDiskBorder)
 }
@@ -169,7 +187,7 @@ func (m *monitorModel) nasServicesDashboard(width, maxHeight int) string {
 
 	httpColumns := 2
 	desiredBottomRows := max(len(m.snapshot.PM2Processes), (len(m.snapshot.Services)+1)/2)
-	if maxHeight >= 21 {
+	if maxHeight >= 21 || len(m.snapshot.Services) <= max(2, len(m.snapshot.PM2Processes)) {
 		httpColumns = 1
 		desiredBottomRows = max(len(m.snapshot.PM2Processes), len(m.snapshot.Services))
 	}
@@ -375,17 +393,17 @@ func renderDockerContainerRow(container containerInfo, width int) string {
 	case width >= 132:
 		return strings.Join([]string{
 			style.Render(fixedCell(state, 6, false)),
-			valueStyle.Render(fixedCell(name, 18, false)),
-			dimStyle.Render(fixedCell(image, 16, false)),
+			valueStyle.Render(fixedCell(name, 16, false)),
+			dimStyle.Render(fixedCell(image, 32, false)),
 			percentValue(container.CPU, 7),
 			memoryValue(container.MemoryUsed, container.MemoryLimit, 17),
-			networkRXStyle.Render(fixedCell("↓"+bytes(container.NetworkRX), 10, true)) + " " +
-				networkTXStyle.Render(fixedCell("↑"+bytes(container.NetworkTX), 10, true)),
-			dimStyle.Render(fixedCell("↓"+bytes(container.BlockRead), 10, true) + " " + fixedCell("↑"+bytes(container.BlockWrite), 10, true)),
+			networkRXStyle.Render(fixedCell("↓"+compactByteCount(container.NetworkRX), 7, true)) + " " +
+				networkTXStyle.Render(fixedCell("↑"+compactByteCount(container.NetworkTX), 7, true)),
+			dimStyle.Render(fixedCell("↓"+compactByteCount(container.BlockRead), 7, true) + " " + fixedCell("↑"+compactByteCount(container.BlockWrite), 7, true)),
 			fixedCell(elapsed(container.Uptime), 8, false),
 			fixedCell(fmt.Sprintf("%d", container.PIDs), 5, true),
 			restartValue(container.Restarts, 4),
-			dimStyle.Render(truncate(tail, max(2, width-133))),
+			dimStyle.Render(truncate(tail, max(2, width-135))),
 		}, " ")
 	case width >= 92:
 		return strings.Join([]string{
@@ -453,11 +471,13 @@ func renderHTTPServiceRow(service serviceHealth, width int) string {
 	if service.Healthy {
 		state, style = "UP", okStyle
 	}
-	nameWidth := min(32, max(8, width-21))
+	latency := service.Latency.Round(time.Millisecond).String()
+	nameWidth := min(14, max(8, width/5))
+	detailWidth := max(8, width-5-nameWidth-8-3)
 	return style.Render(fixedCell(state, 5, false)) + " " +
 		valueStyle.Render(fixedCell(service.Name, nameWidth, false)) + " " +
-		style.Render(fixedCell(service.Detail, 5, true)) + " " +
-		dimStyle.Render(fixedCell(service.Latency.Round(time.Millisecond).String(), 7, true))
+		dimStyle.Render(fixedCell(service.Detail, detailWidth, false)) + " " +
+		style.Render(fixedCell(latency, 8, true))
 }
 
 func (m *monitorModel) nasAttentionPanel(width int) string {
@@ -517,7 +537,7 @@ func dockerTableHeader(width int) string {
 	var header string
 	switch {
 	case width >= 132:
-		header = fmt.Sprintf("%-6s %-18s %-16s %7s %17s %21s %21s %-8s %5s %4s %s",
+		header = fmt.Sprintf("%-6s %-16s %-32s %7s %17s %15s %15s %-8s %5s %4s %s",
 			"STATE", "NAME", "IMAGE", "CPU", "MEMORY", "NET I/O", "BLOCK I/O", "UPTIME", "PIDS", "RST", "PORTS / STATUS")
 	case width >= 92:
 		header = fmt.Sprintf("%-6s %-20s %7s %17s %-8s %4s %s",
@@ -547,10 +567,13 @@ func pm2TableHeader(width int) string {
 func httpTableHeader(width, columns int) string {
 	if columns == 2 {
 		cellWidth := max(12, (width-1)/2)
-		header := fixedCell("STATE  ENDPOINT", cellWidth, false) + " " + "STATE  ENDPOINT"
+		header := fixedCell("STATE SERVICE   ENDPOINT", cellWidth, false) + " " + "STATE SERVICE   ENDPOINT"
 		return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 	}
-	return dimStyle.Copy().Bold(true).Render(truncate("STATE ENDPOINT  CODE LATENCY", width))
+	nameWidth := min(14, max(8, width/5))
+	detailWidth := max(8, width-5-nameWidth-8-3)
+	header := fmt.Sprintf("%-5s %-*s %-*s %8s", "STATE", nameWidth, "SERVICE", detailWidth, "ENDPOINT", "LATENCY")
+	return dimStyle.Copy().Bold(true).Render(truncate(header, width))
 }
 
 func fixedCell(value string, width int, right bool) string {

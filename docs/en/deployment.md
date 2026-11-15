@@ -97,6 +97,17 @@ The manifest has no password field. OpenSSH holds the SSH credentials. Fleetty's
 
 Only a system-scope deploy account is equivalent to a root administrator. `become: "sudo"` requires non-interactive administrative sudo. It is not a low-privilege grant. User scope manages that SSH user's own Fleetty files and user service, and it is the right default.
 
+## Update an installed Hub from source
+
+From the repository root, deploy the current working tree to an existing system `fleetty-hub.service`:
+
+```bash
+bash deploy/hub-deploy.sh --check hub-admin
+bash deploy/hub-deploy.sh hub-admin
+```
+
+`hub-admin` is the host's administration SSH alias, not the interactive Hub endpoint. OpenSSH options such as `-J bastion` can follow the alias. The control machine needs Go, Git, OpenSSH and `zstd`; the host needs `zstd` and administrator sudo. The script checks the host identity, updates only the Hub binary, and leaves configuration and systemd units intact. It verifies the running executable and listener after restarting, rolls back on failure, and caches deployed binaries locally for delta transfers. Enter any sudo password at the prompt.
+
 ## Updating nodes from a Hub
 
 The Hub can be the single place that downloads and distributes Fleetty archives. Each round downloads a release asset once, checks SHA-256, writes it to a local cache, and walks the adjacency declared in the update manifest. The Hub updates nodes it can reach directly. A compute node behind a login node is updated by that login node. The far end still uses Fleetty's own installer and rolls back if the service does not come up. A machine that is off, or unreachable for now, is marked `DEFERRED`. Only its branch pauses. Other nodes continue, and the deferred branch is tried again next round.

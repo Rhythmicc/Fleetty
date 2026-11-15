@@ -10,6 +10,9 @@ import (
 )
 
 const historyPlotHeight = 3
+const networkHistorySamples = 60
+
+var verticalEighthBlocks = [...]string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 
 func verticalGraphGlyph(value float64, available bool, row, height int) string {
 	if !available || math.IsNaN(value) || math.IsInf(value, 0) {
@@ -24,7 +27,7 @@ func verticalGraphGlyph(value float64, available bool, row, height int) string {
 	}
 	units := int(math.Ceil(value / 100 * float64(height*8)))
 	level := max(0, min(8, units-(height-1-row)*8))
-	return string([]rune(" ▁▂▃▄▅▆▇█")[level])
+	return verticalEighthBlocks[level]
 }
 
 // Every history uses the same filled, bottom-aligned plot. Downsampling covers
@@ -74,9 +77,9 @@ func renderHistoryChart(history []float64, width, height int, label string, ceil
 			if available[column] {
 				glyph = verticalGraphGlyph(value, true, row, height)
 			}
-			line.WriteString(style.Render(glyph))
+			line.WriteString(glyph)
 		}
-		content := line.String()
+		content := style.Render(line.String())
 		if !anySample && row == height-1 {
 			content = dimStyle.Render(fixedCell("awaiting sample", plotWidth, false))
 		}
@@ -94,15 +97,33 @@ func renderNetworkHistories(rx, tx []float64, width int) []string {
 	var lines []string
 	if width >= 34 {
 		leftWidth := (width - 2) / 2
-		left := renderHistoryChart(rx, leftWidth, historyPlotHeight, "RX B/s", ceiling, chartStyle)
-		right := renderHistoryChart(tx, width-leftWidth-2, historyPlotHeight, "TX B/s", ceiling, chartStyle)
+		left := renderHistoryChart(rx, leftWidth, historyPlotHeight, "RX B/s", ceiling, networkRXStyle)
+		right := renderHistoryChart(tx, width-leftWidth-2, historyPlotHeight, "TX B/s", ceiling, networkTXStyle)
 		lines = historyColumns(left, right, leftWidth)
 	} else {
-		lines = renderHistoryChart(rx, width, historyPlotHeight, "RX B/s", ceiling, chartStyle)
-		lines = append(lines, renderHistoryChart(tx, width, historyPlotHeight, "TX B/s", ceiling, chartStyle)...)
+		lines = renderHistoryChart(rx, width, historyPlotHeight, "RX B/s", ceiling, networkRXStyle)
+		lines = append(lines, renderHistoryChart(tx, width, historyPlotHeight, "TX B/s", ceiling, networkTXStyle)...)
 	}
 	peak := fmt.Sprintf("PEAK ↓ %s/s ↑ %s/s", bytes(uint64(historyMax(rx))), bytes(uint64(historyMax(tx))))
 	return append(lines, dimStyle.Render(truncate(peak, width)))
+}
+
+func networkWindowRates(history []float64) (average, peak uint64, available bool) {
+	history = history[max(0, len(history)-networkHistorySamples):]
+	var sum, maximum float64
+	count := 0
+	for _, value := range history {
+		if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		sum += value
+		maximum = math.Max(maximum, value)
+		count++
+	}
+	if count == 0 {
+		return 0, 0, false
+	}
+	return uint64(sum / float64(count)), uint64(maximum), true
 }
 
 func historyColumns(left, right []string, leftWidth int) []string {

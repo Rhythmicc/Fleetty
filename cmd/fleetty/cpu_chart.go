@@ -126,7 +126,7 @@ func (layout cpuChartLayout) labels(cores []cpuCoreUsage) string {
 // Resample the whole retained time window into buckets; left-padding
 // distinguishes warm-up from idle CPU. The layout bounds its sidebar width.
 func (m *monitorModel) cpuChartHistory(width, height int) []string {
-	return renderHistoryChart(m.cpuHistory, width, height-1, "CPU %", 100, chartStyle)
+	return renderHistoryChart(m.cpuHistory, width, height-1, "CPU %", 100, utilizationStyle(m.snapshot.CPUPercent))
 }
 
 func (m *monitorModel) renderCPUChart(width int) []string {

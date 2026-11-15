@@ -43,7 +43,10 @@ func (r *scriptedSlurmRunner) Run(_ context.Context, command string, args ...str
 	case command == "sinfo":
 		return []byte("gpu*\tup\t20:00\t1\tidle\t0/16/0/16\tgpu:test:1\n"), nil
 	case command == "squeue":
-		return []byte("101\tgpu\ttrain\talice\tPENDING\t98765\tnormal\t0:00\t20:00\t1\t\tgres/gpu:test:1\t\tgpu01\t\t(Priority)\n"), nil
+		if !strings.HasSuffix(arguments, "\t%S\t%A\t%U") {
+			return nil, fmt.Errorf("squeue format omits expected start or allocation identity")
+		}
+		return []byte("101\tgpu\ttrain\talice\tPENDING\t98765\tnormal\t0:00\t20:00\t1\t\tgres/gpu:test:1\t\tgpu01\t\t1\t0\t\t(Priority)\t2026-11-13T18:00:00\t101\t1000\n"), nil
 	default:
 		return nil, fmt.Errorf("unexpected command %s %s", command, arguments)
 	}
@@ -128,7 +131,7 @@ func TestThemeSelectionIsSessionLocal(t *testing.T) {
 }
 
 func TestProcessHeaderIsMutedInBothThemes(t *testing.T) {
-	dark := processTableHeader("PID  USER  CPU  COMMAND", 50)
+	dark := newProcessFormat(50).renderHeader(processSortCPU)
 	if !strings.Contains(dark, "38;2;156;163;188") || strings.Contains(dark, "48;2;") {
 		t.Fatalf("dark process header should be muted text without a filled background: %q", dark)
 	}
@@ -281,15 +284,14 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 					t.Fatalf("%dx%d Hub missing section %q\n%s", size.width, size.height, section, rendered)
 				}
 			}
-			gpuCardY := 2
-			cardWidth := model.cardWidth()
-			if index, ok := model.nodeAt(0, gpuCardY); !ok || index != 0 {
-				t.Fatalf("GPU card click resolved to index=%d ok=%t", index, ok)
+			gpuRow := model.hubRackStartRow() + 1
+			if index, ok := model.nodeAt(0, gpuRow); !ok || index != 0 {
+				t.Fatalf("GPU row click resolved to index=%d ok=%t", index, ok)
 			}
-			if index, ok := model.nodeAt(2*(cardWidth+1), gpuCardY); !ok || index != 1 {
-				t.Fatalf("NAS card click resolved to index=%d ok=%t", index, ok)
+			if index, ok := model.nodeAt(0, gpuRow+3); !ok || index != 1 {
+				t.Fatalf("NAS row click resolved to index=%d ok=%t", index, ok)
 			}
-			if _, ok := model.nodeAt(0, gpuCardY-1); ok {
+			if _, ok := model.nodeAt(0, gpuRow-1); ok {
 				t.Fatal("group label should not be clickable")
 			}
 		}
@@ -304,11 +306,11 @@ func TestHubConfigAndResponsiveOverview(t *testing.T) {
 	}
 
 	model.width, model.height, model.cursor = 140, 30, 0
-	model.moveCursorHorizontal(1)
+	model.moveCursorVertical(1)
 	if model.cursor != 2 {
 		t.Fatalf("grouped right navigation selected config index %d, want 2", model.cursor)
 	}
-	model.moveCursorHorizontal(1)
+	model.moveCursorVertical(1)
 	if model.cursor != 1 {
 		t.Fatalf("grouped navigation should enter NAS section at config index 1, got %d", model.cursor)
 	}
@@ -451,18 +453,19 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		t.Fatalf("unexpected aggregated Slurm partition: %#v", partitions)
 	}
 	jobs, err := parseSlurmJobs(strings.Join([]string{
-		"101\tgpu\ttrain\talice\tRUNNING\t45678\tnormal\t1:20\t20:00\t1\tgpu01\tgres/gpu:test:1\tgpu01\t(null)\t\tgpu01",
-		"102_[1-4]\tgpu\tsweep\tbob\tPENDING\t12345\turgent\t0:00\t20:00\t1\t\tgres/gpu:test:1\t\tgpu02\tgpu03\t(Priority)",
-		"103\tcpu\tcompile\tcarol\tRUNNING\t23456\tnormal\t0:10\t10:00\t1\tcpu01\tN/A\t\t(null)\t\tcpu01",
+		"101_12\tgpu\ttrain\talice\tRUNNING\t45678\tnormal\t1:20\t20:00\t1\tgpu01\tgres/gpu:test:1\tgpu01\t(null)\t\t1\t0\t\tgpu01\t2026-11-13T17:00:00\t110\t1000",
+		"102_[1-4]\tgpu\tsweep\tbob\tPENDING\t12345\turgent\t0:00\t20:00\t1\t\tgres/gpu:test:1\t\tgpu02\tgpu03\t1\t0\t\t(Priority)\t2026-11-13T18:00:00\t102\t1001",
+		"103\tcpu\tcompile\tcarol\tRUNNING\t23456\tnormal\t0:10\t10:00\t1\tcpu01\tN/A\t\t(null)\t\t1\t0\t\tcpu01\t\t103\t1002",
 	}, "\n"), []string{"gpu"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 2 || jobs[0].NodeList != "gpu01" || jobs[0].Priority != 45678 ||
+	if len(jobs) != 2 || jobs[0].ID != "101_12" || jobs[0].RawID != 110 || jobs[0].UID != 1000 ||
+		jobs[0].NodeList != "gpu01" || jobs[0].Priority != 45678 ||
 		jobs[0].QOS != "normal" || jobs[1].QOS != "urgent" ||
 		jobs[1].Reason != "(Priority)" || jobs[1].Nodes != 1 ||
 		jobs[1].GRES != "gres/gpu:test:1" || jobs[1].ExpectedNodes != "gpu02" ||
-		jobs[1].ExcludedNodes != "gpu03" {
+		jobs[1].ExcludedNodes != "gpu03" || jobs[0].ExpectedStart != "" || jobs[1].ExpectedStart != "2026-11-13T18:00:00" {
 		t.Fatalf("unexpected parsed Slurm jobs: %#v", jobs)
 	}
 	nodes, err := parseSlurmNodes(
@@ -483,14 +486,16 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	now := time.Now()
 	model := &hubModel{
 		config: hubConfig{
-			Name: "Test Lab Hub",
+			Name:   "Test Lab Hub",
+			Nodes:  []hubNodeConfig{{Name: "worker", Group: "gpu"}},
+			Groups: []hubGroupConfig{{ID: "gpu", Title: "GPU COMPUTE", Style: hubGroupStyleGPU}},
 			SlurmClusters: []slurmClusterConfig{
 				{Name: "A100 Cluster", Transport: "ssh"},
 				{Name: "General GPU", Transport: "local"},
 			},
 		},
-		slurmView:   true,
-		slurmFilter: -1,
+		queueExpanded: true,
+		slurmFilter:   -1,
 		slurmStates: []slurmClusterState{
 			{Snapshot: slurmSnapshot{
 				Name: "A100 Cluster", CollectedAt: now, Version: "slurm-wlm 23.11.4",
@@ -502,7 +507,7 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 					States: []string{"alloc"}, CPUsAlloc: 20, CPUsTotal: 20,
 				}},
 				Jobs: []slurmJob{
-					{ID: "57612", Partition: "gpu-part", Name: "bash", User: "yida", State: "RUNNING", Priority: 71001, QOS: "a100", Elapsed: "4:00", TimeLimit: "20:00", Nodes: 1, GRES: "gpu:a100:1", Reason: "a100"},
+					{ID: "57612", Partition: "gpu-part", Name: "bash", User: "yida", State: "RUNNING", Priority: 71001, QOS: "a100", Elapsed: "4:00", TimeLimit: "20:00", Nodes: 1, GRES: "gpu:a100:1", NodeList: "a100"},
 					{ID: "57615", Partition: "gpu-part", Name: "laplace", User: "lwx", State: "PENDING", Priority: 69002, QOS: "high", Elapsed: "0:00", TimeLimit: "20:00", Nodes: 1, Reason: "(Resources)"},
 				},
 			}, Latency: 20 * time.Millisecond},
@@ -527,19 +532,18 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	}
 	for _, size := range []struct{ width, height int }{{160, 40}, {100, 30}, {60, 24}} {
 		model.width, model.height, model.slurmOffset = size.width, size.height, 0
-		rendered := model.slurmQueueView()
+		rendered := model.hubView()
 		if size.width == 160 {
 			for _, expected := range []string{
-				"SLURM QUEUES", "A100 Cluster", "General GPU", "NODES 1",
-				"GPU 1/2", "GPU  A100×2", "RTX 3090×1", "+2 TYPES",
-				"CPU 20/20", "LIVE", "WEIGHT", "urgent", "71001", "57612",
-				"NEXT", "613_[0-7%1]", "PRIORITY",
+				"SLURM QUEUE", "worker", "A100 Cluster", "General GPU",
+				"LIVE", "WEIGHT", "urgent", "71001", "57612",
+				"PENDING", "613", "NODE",
 			} {
 				if !strings.Contains(rendered, expected) {
 					t.Fatalf("%dx%d Slurm view missing %q\n%s", size.width, size.height, expected, rendered)
 				}
 			}
-			for _, verbose := range []string{"GPU TYPES", "USERS 2", "SOURCE SSH", "UPDATED", "slurm-wlm"} {
+			for _, verbose := range []string{"GPU TYPES", "USERS 2", "SOURCE SSH", "UPDATED", "slurm-wlm", "BLOCKER", "PRIORITY"} {
 				if strings.Contains(rendered, verbose) {
 					t.Fatalf("%dx%d Slurm view retained verbose card text %q\n%s",
 						size.width, size.height, verbose, rendered)
@@ -555,14 +559,8 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 			}
 		}
 	}
-	if index, ok := model.slurmClusterAt(0, 1); !ok || index != 0 {
-		t.Fatalf("Slurm cluster click resolved to index=%d ok=%t", index, ok)
-	}
-	secondCardY := model.slurmClusterCardLineCount() + 3
-	if index, ok := model.slurmClusterAt(0, secondCardY); !ok || index != 1 {
-		t.Fatalf("second Slurm cluster click resolved to index=%d ok=%t", index, ok)
-	}
-	model.moveSlurmFilter(1)
+	model.width, model.height = 160, 40
+	model.Update(testKey("right"))
 	if model.slurmFilter != 0 {
 		t.Fatalf("Slurm filter = %d, want first cluster", model.slurmFilter)
 	}
@@ -570,7 +568,7 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 	if _, command := model.Update(testKey("enter")); command != nil || !model.slurmExplain {
 		t.Fatalf("Enter did not open Slurm explanation: explain=%t command=%v", model.slurmExplain, command)
 	}
-	explanation := model.slurmQueueView()
+	explanation := model.hubView()
 	for _, expected := range []string{
 		"WHY IT IS NOT RUNNING", "CONTROLLER", "Resources", "REQUEST", "CANDIDATE NODE FIT",
 	} {
@@ -596,13 +594,13 @@ func TestSlurmConfigParsersAndResponsiveQueueView(t *testing.T) {
 		t.Fatalf("Slurm explanation did not retain stable job selection: cursor=%d id=%q",
 			model.slurmCursor, model.slurmJobID)
 	}
-	if _, command := model.Update(testKey("q")); command != nil || model.slurmExplain || !model.slurmView {
+	if _, command := model.Update(testKey("q")); command != nil || model.slurmExplain || !model.queueExpanded {
 		t.Fatalf("q from explanation should return to queue: explain=%t view=%t command=%v",
-			model.slurmExplain, model.slurmView, command)
+			model.slurmExplain, model.queueExpanded, command)
 	}
 	updated, command := model.Update(testKey("q"))
-	if updated != model || command != nil || model.slurmView {
-		t.Fatalf("q from Slurm queue should return to Hub: view=%t command=%v", model.slurmView, command)
+	if updated != model || command != nil || model.queueExpanded {
+		t.Fatalf("q from Slurm queue should collapse it: expanded=%t command=%v", model.queueExpanded, command)
 	}
 	_, command = model.Update(testKey("q"))
 	if command == nil {
@@ -634,13 +632,13 @@ func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
 	if queue == nil || len(queue.Jobs) != 3 {
 		t.Fatalf("unexpected node queue: %#v", queue)
 	}
-	if queue.Jobs[0].Job.ID != "7" || !queue.Jobs[1].Next ||
+	if queue.Jobs[0].Job.ID != "7" ||
 		queue.Jobs[1].Job.ID != "12" || queue.Jobs[2].Job.ID != "101" {
 		t.Fatalf("node queue order/classification = %#v", queue.Jobs)
 	}
 	detail := &monitorModel{width: 120, height: 42, slurmQueue: queue}
 	panel := detail.slurmNodePanel(120, widgetTableRows(widgetSizeLarge, detail.height))
-	for _, expected := range []string{"NODE QUEUE", "WEIGHT", "QOS", "urgent", "70000", "RUNNING", "NEXT", "QUEUED", "active", "first", "later"} {
+	for _, expected := range []string{"NODE QUEUE", "WEIGHT", "QOS", "urgent", "70000", "RUNNING", "PENDING", "active", "first", "later"} {
 		if !strings.Contains(panel, expected) {
 			t.Fatalf("node queue panel missing %q\n%s", expected, panel)
 		}
@@ -651,7 +649,7 @@ func TestNodeSlurmQueueSelectsRunningNextAndEligibleJobs(t *testing.T) {
 	}
 }
 
-func TestSlurmQueuesMarkNextPerPartition(t *testing.T) {
+func TestSlurmQueuesKeepPendingStateAndOrder(t *testing.T) {
 	jobs := []slurmJob{
 		{ID: "run", Partition: "gpu-a", State: "RUNNING", NodeList: "node1"},
 		{ID: "dependency", Partition: "gpu-a", State: "PENDING", Priority: 900, Reason: "(Dependency)"},
@@ -673,26 +671,26 @@ func TestSlurmQueuesMarkNextPerPartition(t *testing.T) {
 		slurmStates: []slurmClusterState{{Snapshot: snapshot}},
 	}
 
-	assertNext := func(label string, display []slurmDisplayJob) {
+	assertStates := func(label string, display []slurmDisplayJob) {
 		t.Helper()
-		var next []string
-		for _, job := range display {
-			if job.Next {
-				next = append(next, job.Job.ID)
+		if len(display) != len(jobs) {
+			t.Fatalf("%s lost jobs", label)
+		}
+		for i, job := range display {
+			state, _ := slurmDisplayState(job)
+			if state != jobs[i].State || job.Job.ID != jobs[i].ID {
+				t.Fatalf("%s row %d = %s %s", label, i, job.Job.ID, state)
 			}
 		}
-		if strings.Join(next, ",") != "next-a,next-b" {
-			t.Fatalf("%s NEXT jobs = %v, want one candidate for each partition", label, next)
-		}
 	}
-	assertNext("cluster queue", model.selectedSlurmJobs())
+	assertStates("cluster queue", model.selectedSlurmJobs())
 	queue := model.nodeSlurmQueue(0)
 	if queue == nil {
 		t.Fatal("node queue is nil")
 	}
-	assertNext("node queue", queue.Jobs)
-	if summary := ansi.Strip(slurmClusterQueueSummaryLine(snapshot)); !strings.Contains(summary, "NEXT 2") {
-		t.Fatalf("cluster summary = %q, want NEXT 2", summary)
+	assertStates("node queue", queue.Jobs)
+	if summary, _ := model.hubQueueHeading(160, -1, model.selectedSlurmJobs(), ""); !strings.Contains(ansi.Strip(summary), "PENDING 5") || strings.Contains(ansi.Strip(summary), "NEXT") {
+		t.Fatalf("cluster summary = %q, want PENDING 5 without NEXT", summary)
 	}
 }
 
@@ -736,13 +734,13 @@ func TestNodeSlurmQueueFiltersPendingJobsByGPUType(t *testing.T) {
 
 	queue4090 := model.nodeSlurmQueue(0)
 	if queue4090 == nil || len(queue4090.Jobs) != 2 ||
-		queue4090.Jobs[0].Job.ID != "1512" || !queue4090.Jobs[0].Next ||
+		queue4090.Jobs[0].Job.ID != "1512" ||
 		queue4090.Jobs[1].Job.ID != "1513" {
 		t.Fatalf("gpu4090 queue contains incompatible jobs: %#v", queue4090)
 	}
 	queue5090 := model.nodeSlurmQueue(1)
 	if queue5090 == nil || len(queue5090.Jobs) != 2 ||
-		queue5090.Jobs[0].Job.ID != "1511" || !queue5090.Jobs[0].Next ||
+		queue5090.Jobs[0].Job.ID != "1511" ||
 		queue5090.Jobs[1].Job.ID != "1513" {
 		t.Fatalf("gpu5090 queue contains incompatible jobs: %#v", queue5090)
 	}
@@ -794,9 +792,6 @@ func TestSlurmExplanationDistinguishesArrayLimitAndResourceFit(t *testing.T) {
 		!strings.Contains(array.Summary, "1 sibling task") {
 		t.Fatalf("unexpected array explanation: %#v", array)
 	}
-	if slurmEligibleForNext(snapshot.Jobs[3]) {
-		t.Fatal("array-throttled job must not be marked NEXT")
-	}
 	if got := slurmStableJobID(snapshot.Jobs[3]); got != "7000_[]" {
 		t.Fatalf("stable array job ID = %q", got)
 	}
@@ -804,7 +799,7 @@ func TestSlurmExplanationDistinguishesArrayLimitAndResourceFit(t *testing.T) {
 
 func TestParseExtendedSlurmResourceFields(t *testing.T) {
 	jobs, err := parseSlurmJobs(
-		"4949_[42-43%1]\tmixed-gpu\trong-dgl\themeng\tPENDING\t2000\tnormal\t0:00\t1:00:00\t1\t\tgres/gpu:rtx_5080:1\t\tgpu5090\t\t6\t49152M\tampere\t(Resources)",
+		"4949_[42-43%1]\tmixed-gpu\trong-dgl\themeng\tPENDING\t2000\tnormal\t0:00\t1:00:00\t1\t\tgres/gpu:rtx_5080:1\t\tgpu5090\t\t6\t49152M\tampere\t(Resources)\tUnknown\t4949\t1000",
 		nil,
 	)
 	if err != nil {
@@ -818,7 +813,7 @@ func TestParseExtendedSlurmResourceFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(jobs) != 1 || jobs[0].CPUs != 6 || jobs[0].MemoryBytes != 48<<30 ||
-		jobs[0].Constraints != "ampere" || jobs[0].Reason != "(Resources)" {
+		jobs[0].Constraints != "ampere" || jobs[0].Reason != "(Resources)" || jobs[0].ExpectedStart != "" {
 		t.Fatalf("unexpected extended job: %#v", jobs)
 	}
 	if len(nodes) != 1 || nodes[0].CPUsIdle != 4 ||
@@ -890,6 +885,9 @@ func TestSlurmCollectorReusesPersistentRunner(t *testing.T) {
 	}
 	if runner.calls != 8 {
 		t.Fatalf("runner calls = %d, want two four-command snapshots", runner.calls)
+	}
+	if len(second[0].Snapshot.Jobs) != 1 || second[0].Snapshot.Jobs[0].ExpectedStart != "2026-11-13T18:00:00" {
+		t.Fatalf("expected start did not reach the collected snapshot: %#v", second[0].Snapshot.Jobs)
 	}
 	if runner.closed != 0 || runners[0] != runner {
 		t.Fatalf("healthy runner was not retained: closed=%d runner=%#v", runner.closed, runners[0])
@@ -1039,10 +1037,13 @@ func TestNASConfigCollectionAndResponsiveView(t *testing.T) {
 		}
 	}
 
-	hubCard := ansi.Strip(strings.Join(renderNASHubCard(nil, model.snapshot, 42), "\n"))
-	for _, expected := range []string{"DSK", "HTTP 1/1", "CTR 1/1", "PM2 1/1", "↓", "↑"} {
-		if !strings.Contains(hubCard, expected) {
-			t.Fatalf("NAS Hub card missing %q: %s", expected, hubCard)
+	hub := &hubModel{config: hubConfig{Nodes: []hubNodeConfig{{Name: "NAS", Profile: machineProfileNAS}}},
+		states: []hubNodeState{{Snapshot: model.snapshot}}}
+	hub.states[0].Snapshot.CollectedAt = time.Now()
+	detail := ansi.Strip(strings.Join(hub.renderHubRackDetail(0, 42), "\n"))
+	for _, expected := range []string{"DISK", "HTTP 1/1", "CTR 1/1", "PM2 1/1", "↓", "↑"} {
+		if !strings.Contains(detail, expected) {
+			t.Fatalf("NAS Hub details missing %q: %s", expected, detail)
 		}
 	}
 }
@@ -1429,7 +1430,7 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 		"HOST HEALTH", "GPU", "NETWORK ACTIVITY",
 		"NODE QUEUE / SLURM", "TOP PROCESSES",
 		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [2 COMPUTE]",
-		"12 logical CPUs", "(1m 5m 15m)", "HIST · RX B/s", "PEAK",
+		"12 logical CPUs", "(1m 5m 15m)", "1m AVG", "PEAK",
 	} {
 		if !strings.Contains(plain, expected) {
 			t.Fatalf("designed overview missing %q:\n%s", expected, plain)
@@ -2247,7 +2248,6 @@ func TestReadOnlyDashboardResizesPanelsAndOpensProcessDetails(t *testing.T) {
 				ID: fmt.Sprintf("%d", 1000+index), User: "alice", State: "PENDING",
 				Partition: "gpu", Name: fmt.Sprintf("job-%d", index),
 			},
-			Next: index == 0,
 		}
 	}
 	m := &monitorModel{
@@ -2626,16 +2626,6 @@ func TestGPUClockAndPowerParsing(t *testing.T) {
 	if gpu.ClockMHz != 1410 || gpu.Power != 70.64 || gpu.PowerLimit != 250 {
 		t.Fatalf("GPU telemetry = %#v", gpu)
 	}
-	if got := gpuTelemetry(gpu, true); got != "CLK 1410 MHz · PWR  71/250 W ·  55°C" {
-		t.Fatalf("GPU telemetry text = %q", got)
-	}
-	apple := gpuInfo{
-		Platform: "apple", CoreCount: 40,
-		RendererUtilization: 42, TilerUtilization: 37,
-	}
-	if got := gpuTelemetry(apple, true); got != "CORES 40 · RENDER  42% · TILER  37%" {
-		t.Fatalf("Apple GPU telemetry text = %q", got)
-	}
 }
 
 func TestGPUWorkloadAndDriverParsing(t *testing.T) {
@@ -2825,19 +2815,6 @@ func TestGPUComputeColumnsStayAlignedAndLiveSignalsChangeColor(t *testing.T) {
 	}
 	if narrow, wide := newGPUPanelColumns(88).barWidth, newGPUPanelColumns(180).barWidth; narrow >= wide {
 		t.Fatalf("GPU bars should grow with the panel width: narrow=%d wide=%d", narrow, wide)
-	}
-}
-
-func TestGPUMemoryColumnsAreAligned(t *testing.T) {
-	gpus := []gpuInfo{
-		{MemoryUsed: 425 * 1024 * 1024, MemoryTotal: 40 * 1024 * 1024 * 1024},
-		{MemoryUsed: 1 * 1024 * 1024, MemoryTotal: 24 * 1024 * 1024 * 1024},
-	}
-	usedWidth, totalWidth := gpuMemoryWidths(gpus)
-	first := gpuMemoryText(gpus[0], usedWidth, totalWidth)
-	second := gpuMemoryText(gpus[1], usedWidth, totalWidth)
-	if lipgloss.Width(first) != lipgloss.Width(second) || strings.Index(first, "/") != strings.Index(second, "/") {
-		t.Fatalf("GPU memory columns are not aligned: %q / %q", first, second)
 	}
 }
 

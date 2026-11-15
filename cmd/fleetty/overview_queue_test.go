@@ -40,9 +40,12 @@ func TestOverviewQueueUsesRenderedPanelWidth(t *testing.T) {
 							t.Fatalf("queue rule does not span its %d-column panel: %q", panelWidth, rule)
 						}
 					}
-					if strings.Contains(line, job.Job.ID) {
+					if strings.Contains(line, "134323 ") {
 						foundJob = true
 						row := ansi.Cut(line, start+2, start+panelWidth-2)
+						if strings.Contains(row, job.Job.ID) {
+							t.Fatalf("queue row includes the array suffix: %q", row)
+						}
 						want := ansi.Truncate(ansi.Strip(renderSlurmNodeJobRow(job, panelWidth-4)), panelWidth-4, "")
 						if strings.TrimSpace(row) != strings.TrimSpace(want) {
 							t.Fatalf("queue row uses wrong width:\n got: %q\nwant: %q", row, want)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"reflect"
 	"strings"
 	"testing"
@@ -22,8 +23,8 @@ func TestSlurmSelectionPreservesColorsAcrossEntireRow(t *testing.T) {
 					ID: "145020", User: "yuechen", State: "RUNNING", QOS: qos,
 					Elapsed: "1:23", Name: "train", NodeList: "node01",
 				}}
-				plain := renderSlurmJobRow(job, width)
-				selected := renderSlurmJobRowWithStyle(job, width, base)
+				plain := renderSlurmJobRow(job, width, true, lipgloss.NewStyle())
+				selected := renderSlurmJobRow(job, width, true, base)
 				if ansi.Strip(plain) != ansi.Strip(selected) {
 					t.Fatalf("selection changed content at width %d", width)
 				}
@@ -49,7 +50,7 @@ func TestCompactSlurmRowsPrioritizeElapsedAndName(t *testing.T) {
 	}}
 	for width := 32; width < slurmCompactWidth; width++ {
 		for _, node := range []bool{false, true} {
-			header, row := slurmJobTableHeader(width), renderSlurmJobRow(job, width)
+			header, row := slurmJobTableHeader(width, true), renderSlurmJobRow(job, width, true, lipgloss.NewStyle())
 			if node {
 				header, row = slurmNodeJobHeader(width), renderSlurmNodeJobRow(job, width)
 			}
@@ -63,7 +64,7 @@ func TestCompactSlurmRowsPrioritizeElapsedAndName(t *testing.T) {
 			if !strings.Contains(r, "12-23:59:59") || !strings.Contains(r, " R ") || !strings.Contains(r, "● ") || !strings.Contains(r, "lhc") || !strings.Contains(h, "USER") {
 				t.Fatalf("width %d lost required compact data: %s", width, r)
 			}
-			if width >= 54 && (!strings.Contains(r, "144762_19") || !strings.Contains(r, "ext-hostfast")) {
+			if width >= 54 && (!strings.Contains(r, "144762 ") || !strings.Contains(r, "ext-hostfast")) {
 				t.Fatalf("phone width %d lost job ID/name: %s", width, r)
 			}
 			if lipgloss.Width(h[:strings.Index(h, "ELAPSED")])+len("ELAPSED") != lipgloss.Width(r[:strings.Index(r, job.Job.Elapsed)])+len(job.Job.Elapsed) {
@@ -75,19 +76,17 @@ func TestCompactSlurmRowsPrioritizeElapsedAndName(t *testing.T) {
 
 func TestCompactSlurmStatesArraysAndUnicode(t *testing.T) {
 	for _, state := range []string{"RUNNING", "PENDING", "COMPLETING", "SUSPENDED"} {
-		for _, next := range []bool{false, true} {
-			job := slurmDisplayJob{Next: next, Job: slurmJob{
-				ID: "144886_[8-15%2]", State: state, Elapsed: "0:00", QOS: "custom-qos",
-				Name: "训练任务-with-a-long-name", Reason: "Resources",
-			}}
-			for _, width := range []int{32, 40, 56, 80, 111} {
-				row := renderSlurmJobRow(job, width)
-				if lipgloss.Width(row) > width || !strings.Contains(row, "0:00") {
-					t.Fatalf("invalid compact row: %s", row)
-				}
-				if width >= 56 && !strings.Contains(row, "训练任务") {
-					t.Fatalf("Unicode job name lost: %s", row)
-				}
+		job := slurmDisplayJob{Job: slurmJob{
+			ID: "144886_[8-15%2]", State: state, Elapsed: "0:00", QOS: "custom-qos",
+			Name: "训练任务-with-a-long-name", Reason: "Resources",
+		}}
+		for _, width := range []int{32, 40, 56, 80, 111} {
+			row := renderSlurmJobRow(job, width, true, lipgloss.NewStyle())
+			if lipgloss.Width(row) > width || !strings.Contains(row, "0:00") {
+				t.Fatalf("invalid compact row: %s", row)
+			}
+			if width >= 56 && !strings.Contains(row, "训练任务") {
+				t.Fatalf("Unicode job name lost: %s", row)
 			}
 		}
 	}
@@ -98,11 +97,10 @@ func TestSlurmQOSColorsAndLegend(t *testing.T) {
 	if slurmQOSStyle("urgent").Render("●") != dangerStyle.Render("●") {
 		t.Fatal("urgent QOS should use the critical state color")
 	}
-	if slurmQOSStyle("high").Render("●") != warningStyle.Render("●") {
-		t.Fatal("high QOS should use the warning state color")
-	}
-	if slurmQOSStyle("normal").Render("●") != dimStyle.Render("●") || slurmQOSStyle("long").Render("●") != dimStyle.Render("●") {
-		t.Fatal("ordinary QOS names should stay neutral")
+	for _, qos := range []string{"high", "low", "normal", "long", "custom"} {
+		if slurmQOSStyle(qos).Render("●") == slurmQOSStyle("").Render("●") {
+			t.Fatalf("QOS %s looks like a missing value", qos)
+		}
 	}
 	jobs := []slurmDisplayJob{{Job: slurmJob{QOS: "urgent"}}, {Job: slurmJob{QOS: "normal"}}, {Job: slurmJob{QOS: "urgent"}}}
 	legend := slurmQOSLegend(jobs, 56)
@@ -113,8 +111,53 @@ func TestSlurmQOSColorsAndLegend(t *testing.T) {
 	if legend != slurmQOSLegend(jobs, 56) {
 		t.Fatal("legend changes when queue order changes")
 	}
-	if slurmQOSDot("(null)") != slurmQOSDot("") || lipgloss.Width(slurmQOSLegend(jobs, 12)) > 12 {
+	if slurmQOSStyle("(null)").Render("●") != slurmQOSStyle("").Render("●") || lipgloss.Width(slurmQOSLegend(jobs, 12)) > 12 {
 		t.Fatal("invalid missing-QOS or narrow legend handling")
+	}
+}
+
+func TestSlurmQOSColorsAreReadableAndDistinct(t *testing.T) {
+	for _, mode := range []colorMode{colorModeDark, colorModeLight} {
+		for _, indexed := range []bool{false, true} {
+			canvas, _ := viewColors(mode)
+			selected := selectedProcessStyle(mode).GetBackground()
+			if indexed {
+				canvas = ansi.Convert256(canvas)
+			}
+			seen := map[color.Color]bool{}
+			for _, name := range []string{"high", "low", "normal"} {
+				fg := themeForeground(t, slurmQOSStyle(name), mode)
+				if indexed {
+					fg = ansi.Convert256(fg)
+				}
+				if seen[fg] || themeContrast(fg, canvas) < 4.5 || themeContrast(fg, selected) < 4.5 {
+					t.Errorf("%s/%t: QOS %s is not distinct and readable (canvas %.2f, selected %.2f)", mode, indexed, name, themeContrast(fg, canvas), themeContrast(fg, selected))
+				}
+				seen[fg] = true
+			}
+		}
+	}
+}
+
+func TestSlurmArraySuffixHiddenInListsButNotDetails(t *testing.T) {
+	for _, id := range []string{"315058", "315039_44", "312889_[2-5%1]"} {
+		base := strings.SplitN(id, "_", 2)[0]
+		job := slurmDisplayJob{Cluster: "Cluster", Job: slurmJob{ID: id, User: "alice", State: "PENDING", QOS: "low"}}
+		for _, width := range []int{36, 96, 112, 152, 200} {
+			for _, row := range []string{renderSlurmJobRow(job, width, true, lipgloss.NewStyle()), renderSlurmNodeJobRow(job, width)} {
+				plain := ansi.Strip(row)
+				if !strings.Contains(plain, base+" ") || strings.Contains(plain, "_") {
+					t.Fatalf("width %d: suffix leaked or base ID is missing: %s", width, plain)
+				}
+			}
+		}
+		m := &hubModel{width: 120, height: 24, queueExpanded: true, slurmExplain: true, slurmFilter: -1,
+			config:      hubConfig{SlurmClusters: []slurmClusterConfig{{Name: "Cluster"}}},
+			slurmStates: []slurmClusterState{{Snapshot: slurmSnapshot{Name: "Cluster", CollectedAt: time.Now(), Jobs: []slurmJob{job.Job}}}},
+		}
+		if !strings.Contains(ansi.Strip(m.hubView()), id) {
+			t.Fatalf("job details lost full ID %s", id)
+		}
 	}
 }
 
@@ -124,11 +167,11 @@ func TestCompactSlurmLegendDoesNotStealJobSelection(t *testing.T) {
 		jobs[i] = slurmJob{ID: fmt.Sprintf("JOB%03d", i), User: "yuechen", State: "RUNNING", QOS: "normal", Elapsed: "1:23", Name: "train"}
 	}
 	for _, width := range []int{36, 60, 96, 116, 160} {
-		m := &hubModel{width: width, height: 24, slurmFilter: -1, slurmCursor: 39,
+		m := &hubModel{width: width, height: 24, queueExpanded: true, slurmFilter: -1, slurmCursor: 39,
 			config:      hubConfig{Name: "Hub", SlurmClusters: []slurmClusterConfig{{Name: "Cluster"}}},
 			slurmStates: []slurmClusterState{{Snapshot: slurmSnapshot{Name: "Cluster", CollectedAt: time.Now(), Jobs: jobs}}},
 		}
-		view := m.slurmQueueView()
+		view := m.hubView()
 		if lipgloss.Height(view) != 24 || !strings.Contains(view, "JOB039") {
 			t.Fatalf("width %d lost viewport/selected job", width)
 		}
@@ -159,12 +202,12 @@ func TestCompactSlurmLegendDoesNotStealJobSelection(t *testing.T) {
 func TestWideSlurmKeepsWeightAndQOS(t *testing.T) {
 	job := slurmDisplayJob{Job: slurmJob{ID: "144566", QOS: "urgent", Priority: 3094, Elapsed: "1:23"}}
 	for _, width := range []int{112, 152, 200} {
-		for _, header := range []string{slurmJobTableHeader(width), slurmNodeJobHeader(width)} {
+		for _, header := range []string{slurmJobTableHeader(width, true), slurmNodeJobHeader(width)} {
 			if !strings.Contains(header, "WEIGHT") || !strings.Contains(header, "QOS") {
 				t.Fatalf("wide header lost columns: %s", header)
 			}
 		}
-		for _, row := range []string{renderSlurmJobRow(job, width), renderSlurmNodeJobRow(job, width)} {
+		for _, row := range []string{renderSlurmJobRow(job, width, true, lipgloss.NewStyle()), renderSlurmNodeJobRow(job, width)} {
 			if !strings.Contains(row, "3094") || !strings.Contains(row, "urgent") {
 				t.Fatalf("wide row lost fields: %s", row)
 			}
@@ -190,7 +233,17 @@ func TestSlurmTimeHeadersMatchRowAlignment(t *testing.T) {
 						ID: "144566", User: "lhc", State: "RUNNING", QOS: "normal",
 						Elapsed: elapsed, TimeLimit: "20:00", Name: "training",
 					}}
-					header, row := slurmJobTableHeader(width), renderSlurmJobRow(job, width)
+					header, row := slurmJobTableHeader(width, true), renderSlurmJobRow(job, width, true, lipgloss.NewStyle())
+					if !node && width >= slurmCompactWidth {
+						timeWidth := 17
+						if width >= 152 {
+							timeWidth = 19
+						}
+						if rightEdge(header, "TIME") != rightEdge(row, slurmQueueTime(job.Job, timeWidth)) {
+							t.Fatalf("TIME is not right-aligned\nheader: %q\nrow:    %q", ansi.Strip(header), ansi.Strip(row))
+						}
+						return
+					}
 					elapsedWidth := 11
 					if width >= slurmCompactWidth {
 						elapsedWidth = 8
@@ -214,25 +267,45 @@ func TestSlurmTimeHeadersMatchRowAlignment(t *testing.T) {
 	}
 }
 
+func TestSlurmQueueTime(t *testing.T) {
+	for _, tc := range []struct {
+		elapsed, limit string
+		width          int
+		want           string
+	}{
+		{"4:20", "30:00", 17, "4:20 / 30:00"},
+		{"0:00", "UNLIMITED", 17, "0:00 / UNLIMITED"},
+		{"2:30", "12-00:00:00", 17, "2:30/12-00:00:00"},
+		{"23:59:59", "UNLIMITED", 19, "23:59:59/UNLIMITED"},
+		{"12-23:59:59", "UNLIMITED", 17, "12-23:…/UNLIMITED"},
+		{"12-23:59:59", "365-00:00:00", 0, "12-23:59:59 / 365-00:00:00"},
+		{"4:20", "N/A", 17, "4:20 / —"},
+		{"", "30:00", 17, "— / 30:00"},
+	} {
+		job := slurmJob{Elapsed: tc.elapsed, TimeLimit: tc.limit}
+		if got := slurmQueueTime(job, tc.width); got != tc.want {
+			t.Errorf("elapsed %q, limit %q, width %d: got %q, want %q", tc.elapsed, tc.limit, tc.width, got, tc.want)
+		}
+	}
+}
+
 func TestCompactSlurmStateCodes(t *testing.T) {
 	for _, test := range []struct {
 		state string
-		next  bool
 		want  string
 	}{
-		{"RUNNING", false, "R"},
-		{"COMPLETING", false, "R"},
-		{"PENDING", true, "N"},
-		{"PENDING", false, "Q"},
-		{"SUSPENDED", false, "S"},
+		{"RUNNING", "R"},
+		{"COMPLETING", "C"},
+		{"PENDING", "P"},
+		{"SUSPENDED", "S"},
 	} {
-		job := slurmDisplayJob{Next: test.next, Job: slurmJob{
+		job := slurmDisplayJob{Job: slurmJob{
 			ID: "145020", User: "yuechen", State: test.state, Elapsed: "1:23", Name: "training",
 		}}
-		for _, render := range []func(slurmDisplayJob, int) string{renderSlurmJobRow, renderSlurmNodeJobRow} {
-			fields := strings.Fields(ansi.Strip(render(job, 56)))
+		for _, row := range []string{renderSlurmJobRow(job, 56, true, lipgloss.NewStyle()), renderSlurmNodeJobRow(job, 56)} {
+			fields := strings.Fields(ansi.Strip(row))
 			if len(fields) != 6 || fields[2] != "yuechen" || fields[3] != test.want || fields[4] != "1:23" || fields[5] != "training" {
-				t.Fatalf("state %s next=%v: %v", test.state, test.next, fields)
+				t.Fatalf("state %s: %v", test.state, fields)
 			}
 		}
 	}

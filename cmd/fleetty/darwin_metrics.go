@@ -428,29 +428,33 @@ func maxFloat64(first, second float64) float64 {
 }
 
 func readDarwinProcesses() ([]processInfo, error) {
-	output, err := commandOutput(3*time.Second, "ps", "-axo", "pid=,user=,state=,%cpu=,%mem=,rss=,etime=,comm=")
+	output, err := commandOutput(3*time.Second, "ps", "-axo", "pid=,uid=,user=,state=,%cpu=,%mem=,rss=,etime=,comm=")
 	if err != nil {
 		return nil, err
 	}
 	var processes []processInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 8 {
+		if len(fields) < 9 {
 			continue
 		}
 		pid, _ := strconv.Atoi(fields[0])
-		cpu, _ := strconv.ParseFloat(fields[3], 64)
-		memory, _ := strconv.ParseFloat(fields[4], 64)
-		rss, _ := strconv.ParseUint(fields[5], 10, 64)
-		elapsed, parseErr := parseBSDProcessElapsed(fields[6])
-		collectorProcess := filepath.Base(fields[7])
+		uid, uidErr := strconv.Atoi(fields[1])
+		if uidErr != nil {
+			uid = -1
+		}
+		cpu, _ := strconv.ParseFloat(fields[4], 64)
+		memory, _ := strconv.ParseFloat(fields[5], 64)
+		rss, _ := strconv.ParseUint(fields[6], 10, 64)
+		elapsed, parseErr := parseBSDProcessElapsed(fields[7])
+		collectorProcess := filepath.Base(fields[8])
 		if parseErr != nil || collectorProcess == "ps" || collectorProcess == "top" {
 			continue
 		}
 		processes = append(processes, processInfo{
-			PID: pid, User: sanitizeTerminalText(fields[1]), State: sanitizeTerminalText(fields[2]),
+			PID: pid, UID: uid, User: sanitizeTerminalText(fields[2]), State: sanitizeTerminalText(fields[3]),
 			CPU: cpu, Memory: memory, RSS: rss * 1024, Elapsed: elapsed,
-			Command: sanitizeTerminalText(strings.Join(fields[7:], " ")),
+			Command: sanitizeTerminalText(strings.Join(fields[8:], " ")),
 		})
 	}
 	sort.SliceStable(processes, func(i, j int) bool { return processes[i].CPU > processes[j].CPU })

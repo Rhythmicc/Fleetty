@@ -31,14 +31,15 @@ const (
 )
 
 type nodeRPCRequest struct {
-	Version          int              `json:"version"`
-	Operation        nodeRPCOperation `json:"operation"`
-	Password         string           `json:"password,omitempty"`
-	PID              int              `json:"pid,omitempty"`
-	StartTimeTicks   uint64           `json:"start_time_ticks,omitempty"`
-	ActionID         int              `json:"action_id,omitempty"`
-	IncludeProcesses bool             `json:"include_processes,omitempty"`
-	HistoryMinutes   int              `json:"history_minutes,omitempty"`
+	Version              int              `json:"version"`
+	Operation            nodeRPCOperation `json:"operation"`
+	Password             string           `json:"password,omitempty"`
+	PID                  int              `json:"pid,omitempty"`
+	StartTimeTicks       uint64           `json:"start_time_ticks,omitempty"`
+	ActionID             int              `json:"action_id,omitempty"`
+	IncludeProcesses     bool             `json:"include_processes,omitempty"`
+	IncludeSlurmProgress bool             `json:"include_slurm_progress,omitempty"`
+	HistoryMinutes       int              `json:"history_minutes,omitempty"`
 }
 
 type nodeRPCResponse struct {
@@ -75,6 +76,9 @@ func (s *nodeRPCService) Handle(request nodeRPCRequest) nodeRPCResponse {
 	switch request.Operation {
 	case rpcSnapshot:
 		snapshot, err := s.cache.Get(request.IncludeProcesses)
+		if request.IncludeSlurmProgress {
+			snapshot.SlurmProgress = s.cache.progress.slurmProgress()
+		}
 		snapshot.ManagementActions = s.admin.actionInfo()
 		response := nodeRPCResponse{Snapshot: snapshot}
 		if err != nil {

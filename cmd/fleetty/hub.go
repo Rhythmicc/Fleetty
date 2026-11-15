@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -28,19 +29,9 @@ const (
 	hubGroupStyleNetwork      = "network"
 	hubGroupStyleProcess      = "process"
 	defaultHubRefreshInterval = time.Second
-	hubCardHeight             = 5
-	hubPreferredCardWidth     = 46
-	hubMinimumCardWidth       = 36
-	hubOverviewRPCTimeout     = 900 * time.Millisecond
-	hubHistoryRPCTimeout      = 900 * time.Millisecond
-	hubHistoryRefreshInterval = time.Minute
-	// One sparkline column is one hub refresh. Keep enough samples for the
-	// widest card; a narrower card draws the newest tail.
-	hubSparkCap            = 96
-	hubSparkFloor          = 14
-	hubFactColumnWidth     = 14
-	hubOfflineRetryInitial = 5 * time.Second
-	hubOfflineRetryMaximum = 30 * time.Second
+	hubSparkCap               = 44 // also the widest rack history chart
+	hubOfflineRetryInitial    = 5 * time.Second
+	hubOfflineRetryMaximum    = 30 * time.Second
 )
 
 type hubConfig struct {
@@ -276,15 +267,16 @@ func (c hubConfig) refreshInterval() time.Duration {
 }
 
 type hubSparkSample struct {
-	CPU, Mem, Disk, GPU float64
+	At       time.Time // start of the Hub refresh interval
+	CPU, GPU float64
+	Net      uint64
 }
 
 type hubNodeState struct {
 	Snapshot            monitorSnapshot
-	History             []historySample
 	Spark               []hubSparkSample
-	historyAt           time.Time
 	Error               string
+	Delay               string
 	Warning             string
 	Latency             time.Duration
 	Checked             time.Time
@@ -298,48 +290,57 @@ type hubNodeState struct {
 type hubService struct {
 	config         hubConfig
 	mu             sync.RWMutex
-	collectMu      sync.Mutex
 	slurmCollectMu sync.Mutex
 	startOnce      sync.Once
-	nodeWake       chan struct{}
+	viewers        atomic.Int64
+	nodeWake       []chan struct{}
 	slurmWake      chan struct{}
+	linksWake      chan struct{}
+	linksViewUntil time.Time
+	links          hubLinkGraph
 	slurmRunners   []slurmCommandRunner
 	states         []hubNodeState
 	slurmStates    []slurmClusterState
-	collectedAt    time.Time
 }
 
 func newHubService(config hubConfig) *hubService {
+	nodeWake := make([]chan struct{}, len(config.Nodes))
+	for i := range nodeWake {
+		nodeWake[i] = make(chan struct{}, 1)
+	}
 	return &hubService{
 		config: config, states: make([]hubNodeState, len(config.Nodes)),
 		slurmStates:  make([]slurmClusterState, len(config.SlurmClusters)),
 		slurmRunners: make([]slurmCommandRunner, len(config.SlurmClusters)),
-		nodeWake:     make(chan struct{}, 1),
+		nodeWake:     nodeWake,
 		slurmWake:    make(chan struct{}, 1),
+		linksWake:    make(chan struct{}, 1),
 	}
 }
 
-// start owns the one polling loop for the whole Hub process. Connected users
+// Track interactive Hub sessions after the RPC and active-terminal checks.
+// The handler returns on normal exit, disconnect, or terminal errors.
+func (s *hubService) trackPanel(next ssh.Handler) ssh.Handler {
+	if s == nil {
+		return next
+	}
+	return func(session ssh.Session) {
+		s.viewers.Add(1)
+		defer s.viewers.Add(-1)
+		next(session)
+	}
+}
+
+// start owns the polling workers for the whole Hub process. Connected users
 // only read its cached snapshots, so adding users never multiplies node RPCs.
 func (s *hubService) start(ctx context.Context) {
 	s.startOnce.Do(func() {
-		go s.runNodes(ctx)
-		go s.runSlurm(ctx)
-	})
-}
-
-func (s *hubService) runNodes(ctx context.Context) {
-	ticker := time.NewTicker(s.config.refreshInterval())
-	defer ticker.Stop()
-	for {
-		s.collect()
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		case <-s.nodeWake:
+		for index := range s.config.Nodes {
+			go s.runNode(ctx, index, fetchHubNodeSnapshot)
 		}
-	}
+		go s.runSlurm(ctx)
+		go s.runLinks(ctx)
+	})
 }
 
 func (s *hubService) runSlurm(ctx context.Context) {
@@ -378,9 +379,11 @@ func (s *hubService) snapshot() ([]hubNodeState, []slurmClusterState) {
 }
 
 func (s *hubService) requestCollect() {
-	select {
-	case s.nodeWake <- struct{}{}:
-	default:
+	for _, wake := range s.nodeWake {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
 	}
 	select {
 	case s.slurmWake <- struct{}{}:
@@ -397,29 +400,6 @@ func (s *hubService) closeSlurmRunners() {
 			s.slurmRunners[index] = nil
 		}
 	}
-}
-
-func (s *hubService) collect() []hubNodeState {
-	s.collectMu.Lock()
-	defer s.collectMu.Unlock()
-
-	s.mu.RLock()
-	if !s.collectedAt.IsZero() && time.Since(s.collectedAt) < s.config.refreshInterval()/2 {
-		cached := append([]hubNodeState(nil), s.states...)
-		s.mu.RUnlock()
-		return cached
-	}
-	s.mu.RUnlock()
-
-	s.mu.RLock()
-	previous := append([]hubNodeState(nil), s.states...)
-	s.mu.RUnlock()
-	states := collectHubNodeStatesWithPrevious(s.config.Nodes, previous, time.Now())
-	s.mu.Lock()
-	s.states = append([]hubNodeState(nil), states...)
-	s.collectedAt = time.Now()
-	s.mu.Unlock()
-	return states
 }
 
 func (s *hubService) collectSlurm() []slurmClusterState {
@@ -439,68 +419,6 @@ func (s *hubService) collectSlurm() []slurmClusterState {
 	return states
 }
 
-func collectHubNodeStates(nodes []hubNodeConfig) []hubNodeState {
-	return collectHubNodeStatesWithPrevious(nodes, nil, time.Now())
-}
-
-func collectHubNodeStatesWithPrevious(nodes []hubNodeConfig, previous []hubNodeState, now time.Time) []hubNodeState {
-	states := make([]hubNodeState, len(nodes))
-	var wait sync.WaitGroup
-	for index := range nodes {
-		if index < len(previous) {
-			states[index] = previous[index]
-			if states[index].Error != "" && now.Before(states[index].NextRetry) {
-				continue
-			}
-		}
-		wait.Add(1)
-		go func(index int) {
-			defer wait.Done()
-			started := time.Now()
-			client := sharedRPCClientRegistry.clientFor(nodes[index])
-			response, err := client.CallWithTimeout(
-				nodeRPCRequest{Operation: rpcSnapshot},
-				hubOverviewRPCTimeout,
-			)
-			checked := time.Now()
-			state := states[index]
-			state.Latency = time.Since(started)
-			state.Checked = checked
-			if err != nil {
-				state.Error = sanitizeTerminalText(err.Error())
-				state.Warning = ""
-				state.ConsecutiveFailures++
-				state.NextRetry = checked.Add(hubOfflineRetryDelay(state.ConsecutiveFailures))
-				states[index] = state
-				return
-			}
-			state.Snapshot = response.Snapshot
-			state.Spark = appendSpark(state.Spark, hubSparkFrom(response.Snapshot))
-			state.Error = ""
-			state.Warning = sanitizeTerminalText(response.Warning)
-			state.LastSeen = checked
-			state.NextRetry = time.Time{}
-			state.ConsecutiveFailures = 0
-			if state.History == nil ||
-				checked.Sub(state.historyAt) >= hubHistoryRefreshInterval {
-				historyResponse, historyErr := client.CallWithTimeout(
-					nodeRPCRequest{Operation: rpcHistory, HistoryMinutes: 60},
-					hubHistoryRPCTimeout,
-				)
-				// History is a best-effort supplement to the live card; a
-				// failure keeps the previous curve and retries next minute.
-				if historyErr == nil {
-					state.History = historyResponse.History
-				}
-				state.historyAt = checked
-			}
-			states[index] = state
-		}(index)
-	}
-	wait.Wait()
-	return states
-}
-
 func hubOfflineRetryDelay(failures int) time.Duration {
 	delay := hubOfflineRetryInitial
 	for attempt := 1; attempt < failures && delay < hubOfflineRetryMaximum; attempt++ {
@@ -514,17 +432,11 @@ func hubOfflineRetryDelay(failures int) time.Duration {
 
 func (s *hubService) retryOfflineNow() {
 	s.mu.Lock()
-	for index := range s.states {
-		if s.states[index].Error != "" {
-			s.states[index].NextRetry = time.Time{}
-		}
-	}
 	for index := range s.slurmStates {
 		if s.slurmStates[index].ConsecutiveFailures > 0 {
 			s.slurmStates[index].NextRetry = time.Time{}
 		}
 	}
-	s.collectedAt = time.Time{}
 	s.mu.Unlock()
 	s.requestCollect()
 }
@@ -543,13 +455,16 @@ type hubModel struct {
 	width           int
 	height          int
 	cursor          int
-	offset          int
 	collecting      bool
 	colorMode       colorMode
 	theme           terminalTheme
 	status          string
 	detail          *monitorModel
-	slurmView       bool
+	linksView       bool
+	linksExplicit   bool // An explicitly opened Links view stays open when the window narrows.
+	links           hubLinkGraph
+	linksPage       int
+	queueExpanded   bool
 	slurmFilter     int
 	slurmOffset     int
 	slurmCursor     int
@@ -557,6 +472,7 @@ type hubModel struct {
 	slurmJobID      string
 	slurmJobCluster string
 	slurmStates     []slurmClusterState
+	detailFixture   func(int) *monitorModel
 }
 
 type hubNodeGroup struct {
@@ -565,40 +481,26 @@ type hubNodeGroup struct {
 	nodes []int
 }
 
-type hubDisplayRow struct {
-	headings []hubGroupSpan
-	nodes    []int
-}
-
-type hubGroupSpan struct {
-	group  int
-	column int
-	span   int
-	label  bool
-}
-
-type hubPage struct {
-	rows []hubDisplayRow
-}
-
-func newHubModel(service *hubService, _ ssh.Session, width, height int) *hubModel {
+func newHubModel(service *hubService, width, height int) *hubModel {
 	states, slurmStates := service.snapshot()
 	return &hubModel{
-		service:     service,
-		config:      service.config,
-		states:      states,
-		slurmStates: slurmStates,
-		slurmFilter: -1,
-		slurmView:   len(service.config.Nodes) == 0 && len(service.config.SlurmClusters) > 0,
-		width:       width,
-		height:      height,
-		colorMode:   parseColorMode(os.Getenv("DEFAULT_THEME")),
-		theme:       newTerminalTheme(os.Getenv("DEFAULT_THEME")),
-		status:      "Select a server to open its live dashboard.",
+		service:       service,
+		config:        service.config,
+		states:        states,
+		slurmStates:   slurmStates,
+		slurmFilter:   -1,
+		queueExpanded: len(service.config.Nodes) == 0 && len(service.config.SlurmClusters) > 0,
+		linksView:     len(service.config.Nodes) > 0,
+		width:         width,
+		height:        height,
+		colorMode:     parseColorMode(os.Getenv("DEFAULT_THEME")),
+		theme:         newTerminalTheme(os.Getenv("DEFAULT_THEME")),
+		status:        "Select a server to open its live dashboard.",
 	}
 }
 
 func (m *hubModel) Init() tea.Cmd {
+	m.refreshHubLinks()
 	return tea.Batch(m.theme.init(), m.startCollect(), hubTick(m.config.refreshInterval()))
 }
 
@@ -611,18 +513,14 @@ func (m *hubModel) startCollect() tea.Cmd {
 		return nil
 	}
 	m.collecting = true
-	nodes := append([]hubNodeConfig(nil), m.config.Nodes...)
-	clusters := append([]slurmClusterConfig(nil), m.config.SlurmClusters...)
 	service := m.service
+	cached := hubSnapshotsMsg{States: m.states, SlurmStates: m.slurmStates}
 	return func() tea.Msg {
 		if service != nil {
 			states, slurmStates := service.snapshot()
 			return hubSnapshotsMsg{States: states, SlurmStates: slurmStates}
 		}
-		return hubSnapshotsMsg{
-			States:      collectHubNodeStates(nodes),
-			SlurmStates: collectSlurmStatesWithPrevious(clusters, nil, time.Now()),
-		}
+		return cached
 	}
 }
 
@@ -649,10 +547,14 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case hubTickMsg:
+		m.refreshHubLinks()
 		return m, tea.Batch(m.startCollect(), hubTick(m.config.refreshInterval()))
 	}
 
 	if m.detail != nil {
+		if size, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = size.Width, size.Height
+		}
 		if key, ok := msg.(tea.KeyPressMsg); ok && m.detail.screen == screenMonitor {
 			if key.String() == "esc" || key.String() == "q" || key.String() == "Q" {
 				m.colorMode = m.detail.colorMode
@@ -675,30 +577,25 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.clampCursor()
+		if m.slurmExplain && m.hubQueueHeight() < 4 {
+			m.slurmExplain = false
+		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
-			if m.slurmView {
-				if m.slurmExplain {
-					m.slurmExplain = false
-					m.slurmJobID, m.slurmJobCluster = "", ""
-					return m, nil
-				}
-				if index, ok := m.slurmClusterAt(msg.Mouse().X, msg.Mouse().Y); ok {
-					m.slurmFilter = index
-					m.slurmOffset = 0
-					m.slurmCursor = 0
-					m.slurmJobID, m.slurmJobCluster = "", ""
-					m.status = "Showing jobs from " + m.config.SlurmClusters[index].Name + "."
-				} else if index, ok := m.slurmJobAt(msg.Mouse().X, msg.Mouse().Y); ok {
+			if m.queueExpanded {
+				if index, ok := m.slurmJobAt(msg.Mouse().X, msg.Mouse().Y); ok {
+					m.slurmExplain = m.slurmCursor == index && m.hubQueueHeight() >= 4
 					m.slurmCursor = index
-					m.slurmExplain = true
 					m.rememberSlurmSelection()
 				}
 				return m, nil
 			}
 			if index, ok := m.nodeAt(msg.Mouse().X, msg.Mouse().Y); ok {
+				if m.cursor == index {
+					return m, m.openSelected()
+				}
 				m.cursor = index
-				return m, m.openSelected()
+				return m, nil
 			}
 		}
 	case tea.KeyPressMsg:
@@ -706,131 +603,129 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "q", "Q":
-			if m.slurmView {
+			if m.queueExpanded {
 				if m.slurmExplain {
 					m.slurmExplain = false
-					m.slurmJobID, m.slurmJobCluster = "", ""
-					m.status = "Returned to the Slurm queue."
 					return m, nil
 				}
-				m.slurmView = false
-				m.slurmOffset = 0
-				m.status = "Returned to the server overview."
-				return m, nil
+				if len(m.config.Nodes) > 0 {
+					m.queueExpanded = false
+					return m, nil
+				}
 			}
 			return m, tea.Quit
 		case "t", "T":
 			m.toggleColorMode()
+		case "n":
+			if len(m.config.Nodes) == 0 {
+				break
+			}
+			m.linksView = !m.showHubLinks()
+			m.linksExplicit = m.linksView
+			m.linksPage = 0
 		case "r":
 			m.status = "Refreshing servers and Slurm queues…"
 			if m.service != nil {
 				m.service.retryOfflineNow()
 			}
 			return m, m.startCollect()
-		case "tab":
-			if len(m.config.SlurmClusters) > 0 {
-				m.slurmView = !m.slurmView
-				m.slurmOffset = 0
-				m.slurmCursor = 0
-				m.slurmExplain = false
-				m.slurmJobID, m.slurmJobCluster = "", ""
-				if m.slurmView {
-					m.status = "Slurm queue overview."
-				} else {
-					m.status = "Server overview."
-				}
-			}
 		case "s", "S":
-			if len(m.config.SlurmClusters) > 0 {
-				m.slurmView = true
-				m.slurmOffset = 0
-				m.slurmCursor = 0
+			if len(m.config.SlurmClusters) > 0 && len(m.config.Nodes) > 0 {
+				m.queueExpanded = !m.queueExpanded
 				m.slurmExplain = false
-				m.slurmJobID, m.slurmJobCluster = "", ""
-				m.status = "Slurm queue overview."
+				if m.queueExpanded {
+					m.clampSlurmCursor()
+					m.rememberSlurmSelection()
+				}
 			}
 		case "esc":
-			if m.slurmView {
-				if m.slurmExplain {
-					m.slurmExplain = false
-					m.slurmJobID, m.slurmJobCluster = "", ""
-					m.status = "Returned to the Slurm queue."
-					break
-				}
-				m.slurmView = false
-				m.status = "Server overview."
-			} else {
-				return m, tea.Quit
+			if m.slurmExplain {
+				m.slurmExplain = false
+				break
 			}
+			if m.queueExpanded && len(m.config.Nodes) > 0 {
+				m.queueExpanded = false
+				break
+			}
+			if m.hubCompactLinks() {
+				m.linksView = false
+				m.linksExplicit = false
+				break
+			}
+			return m, tea.Quit
 		case "a", "A":
-			if m.slurmView {
-				m.slurmFilter = -1
-				m.slurmOffset = 0
-				m.slurmCursor = 0
-				m.slurmJobID, m.slurmJobCluster = "", ""
-				m.status = "Showing jobs from all Slurm clusters."
+			if m.queueExpanded && !m.slurmExplain {
+				m.moveSlurmFilter(-len(m.config.SlurmClusters))
 			}
 		case "left", "h":
-			if m.slurmView {
+			if m.queueExpanded {
 				if m.slurmExplain {
 					break
 				}
 				m.moveSlurmFilter(-1)
 				break
 			}
-			m.moveCursorHorizontal(-1)
+			m.moveCursorVertical(-1)
 		case "right", "l":
-			if m.slurmView {
+			if m.queueExpanded {
 				if m.slurmExplain {
 					break
 				}
 				m.moveSlurmFilter(1)
 				break
 			}
-			m.moveCursorHorizontal(1)
+			m.moveCursorVertical(1)
 		case "up", "k":
-			if m.slurmView {
+			if m.queueExpanded {
 				m.moveSlurmCursor(-1)
 				break
 			}
 			m.moveCursorVertical(-1)
 		case "down", "j":
-			if m.slurmView {
+			if m.queueExpanded {
 				m.moveSlurmCursor(1)
 				break
 			}
 			m.moveCursorVertical(1)
 		case "pgup":
-			if m.slurmView {
-				m.moveSlurmCursor(-max(1, m.height/2))
+			if m.queueExpanded {
+				m.moveSlurmCursor(-m.hubQueuePageSize())
+			} else if m.showHubLinks() {
+				m.moveHubLinksPage(-1)
+			} else {
+				m.moveCursorVertical(-max(1, m.height-5))
 			}
 		case "pgdown":
-			if m.slurmView {
-				m.moveSlurmCursor(max(1, m.height/2))
+			if m.queueExpanded {
+				m.moveSlurmCursor(m.hubQueuePageSize())
+			} else if m.showHubLinks() {
+				m.moveHubLinksPage(1)
+			} else {
+				m.moveCursorVertical(max(1, m.height-5))
 			}
 		case "enter":
-			if m.slurmView {
-				if len(m.selectedSlurmJobs()) > 0 {
+			if m.queueExpanded {
+				if m.hubQueueHeight() >= 4 && len(m.selectedSlurmJobs()) > 0 {
 					m.slurmExplain = !m.slurmExplain
-					if m.slurmExplain {
-						m.rememberSlurmSelection()
-					} else {
-						m.slurmJobID, m.slurmJobCluster = "", ""
-					}
+					m.rememberSlurmSelection()
 				}
+				break
+			}
+			if m.hubCompactLinks() {
 				break
 			}
 			return m, m.openSelected()
 		}
 	}
+	m.refreshHubLinks()
 	return m, nil
 }
 
 func (m *hubModel) updateOnlineStatus() {
-	online := 0
+	live := 0
 	for _, state := range m.states {
-		if state.Error == "" {
-			online++
+		if state.Error == "" && state.Delay == "" && !state.Snapshot.CollectedAt.IsZero() {
+			live++
 		}
 	}
 	slurmOnline := 0
@@ -840,11 +735,11 @@ func (m *hubModel) updateOnlineStatus() {
 		}
 	}
 	if len(m.slurmStates) > 0 {
-		m.status = fmt.Sprintf("%d/%d servers · %d/%d Slurm clusters online.",
-			online, len(m.states), slurmOnline, len(m.slurmStates))
+		m.status = fmt.Sprintf("%d/%d servers live · %d/%d Slurm sources online.",
+			live, len(m.states), slurmOnline, len(m.slurmStates))
 		return
 	}
-	m.status = fmt.Sprintf("%d/%d servers online.", online, len(m.states))
+	m.status = fmt.Sprintf("%d/%d servers live.", live, len(m.states))
 }
 
 func (m *hubModel) openSelected() tea.Cmd {
@@ -856,50 +751,19 @@ func (m *hubModel) openSelected() tea.Cmd {
 		m.status = fmt.Sprintf("%s is offline. Press r to retry now.", node.Name)
 		return nil
 	}
-	m.detail = newRemoteMonitorModel(node, m.width, m.height, m.colorMode)
+	if m.detailFixture != nil {
+		m.detail = m.detailFixture(m.cursor)
+	} else {
+		m.detail = newRemoteMonitorModel(node, m.width, m.height, m.colorMode)
+	}
 	m.detail.theme = m.theme
 	m.detail.slurmQueue = m.nodeSlurmQueue(m.cursor)
 	m.detail.status = fmt.Sprintf("Connected through Hub to %s. Esc returns to the server list.", node.Name)
+	if m.detailFixture != nil {
+		m.detail.status = "Simulated node. Esc returns to the server list."
+		return nil
+	}
 	return tea.Batch(m.detail.startCollect(), tick())
-}
-
-func (m *hubModel) columns() int {
-	width := usableWidth(m.width)
-	stride := hubPreferredCardWidth + 1
-	// Pick the nearest column count, rather than leaving almost a whole card
-	// empty when the terminal is just below a fixed-width breakpoint.
-	preferred := max(1, (width+1+stride/2)/stride)
-	columns := min(preferred, max(1, (width+1)/(hubMinimumCardWidth+1)))
-	// Prefer another column over a wider card. Drop one only when the
-	// sparkline would be a stub and the wider card stays near the preferred
-	// width: 140 stays at 3, and ~220 settles at 4.
-	for columns > 1 && hubSparkColumns(hubContentWidth(width, columns)) < hubSparkFloor {
-		wider := (width - (columns - 1) + 1) / (columns - 1)
-		if wider > hubPreferredCardWidth+8 {
-			break
-		}
-		columns--
-	}
-	return columns
-}
-
-func hubContentWidth(termWidth, columns int) int {
-	return (termWidth-columns+1)/columns - 4
-}
-
-func hubSparkColumns(contentWidth int) int {
-	left, _ := hubColumnWidths(contentWidth)
-	// "GPU×2", a space, the sparkline, a space, and "100%".
-	width := left - 5 - 2 - 4
-	if width < 0 {
-		return 0
-	}
-	return width
-}
-
-func (m *hubModel) cardWidth() int {
-	columns := m.columns()
-	return (usableWidth(m.width) - columns + 1) / columns
 }
 
 func (m *hubModel) nodeGroups() []hubNodeGroup {
@@ -931,276 +795,6 @@ func (m *hubModel) nodeOrder() []int {
 	return order
 }
 
-// pageNodeRows returns the node-bearing rows of one page, skipping group
-// titles, so cursor movement follows the visual card grid instead of the
-// flat grouped node list.
-func (m *hubModel) pageNodeRows(page hubPage) [][]int {
-	rows := make([][]int, 0, len(page.rows))
-	for _, row := range page.rows {
-		if len(row.nodes) > 0 {
-			rows = append(rows, row.nodes)
-		}
-	}
-	return rows
-}
-
-// cursorCell locates the cursor in the visual grid of the page that contains
-// it and returns that page index, row index, column index and node rows.
-func (m *hubModel) cursorCell() (int, int, int, [][]int) {
-	for pageIndex, page := range m.pages() {
-		rows := m.pageNodeRows(page)
-		for rowIndex, row := range rows {
-			for column, nodeIndex := range row {
-				if nodeIndex == m.cursor {
-					return pageIndex, rowIndex, column, rows
-				}
-			}
-		}
-	}
-	return 0, 0, 0, nil
-}
-
-func (m *hubModel) moveCursorVertical(delta int) {
-	pages := m.pages()
-	pageIndex, rowIndex, column, rows := m.cursorCell()
-	if len(rows) == 0 || len(pages) == 0 {
-		return
-	}
-	targetRow := rowIndex
-	targetColumn := column
-	if delta < 0 {
-		if rowIndex > 0 {
-			targetRow = rowIndex - 1
-		} else {
-			if pageIndex == 0 {
-				return
-			}
-			previousRows := m.pageNodeRows(pages[pageIndex-1])
-			if len(previousRows) == 0 {
-				return
-			}
-			rows, targetRow = previousRows, len(previousRows)-1
-		}
-	} else {
-		if rowIndex < len(rows)-1 {
-			targetRow = rowIndex + 1
-		} else {
-			if pageIndex == len(pages)-1 {
-				return
-			}
-			nextRows := m.pageNodeRows(pages[pageIndex+1])
-			if len(nextRows) == 0 {
-				return
-			}
-			rows, targetRow = nextRows, 0
-		}
-	}
-	if targetColumn >= len(rows[targetRow]) {
-		targetColumn = len(rows[targetRow]) - 1
-	}
-	m.cursor = rows[targetRow][targetColumn]
-	m.clampCursor()
-}
-
-func (m *hubModel) moveCursorHorizontal(delta int) {
-	pages := m.pages()
-	pageIndex, rowIndex, column, rows := m.cursorCell()
-	if len(rows) == 0 || len(pages) == 0 {
-		return
-	}
-	row := rows[rowIndex]
-	if delta < 0 {
-		switch {
-		case column > 0:
-			m.cursor = row[column-1]
-		case rowIndex > 0:
-			previous := rows[rowIndex-1]
-			m.cursor = previous[len(previous)-1]
-		case pageIndex > 0:
-			previousRows := m.pageNodeRows(pages[pageIndex-1])
-			if len(previousRows) == 0 {
-				return
-			}
-			last := previousRows[len(previousRows)-1]
-			m.cursor = last[len(last)-1]
-		default:
-			return
-		}
-	} else {
-		switch {
-		case column < len(row)-1:
-			m.cursor = row[column+1]
-		case rowIndex < len(rows)-1:
-			next := rows[rowIndex+1]
-			m.cursor = next[0]
-		case pageIndex < len(pages)-1:
-			nextRows := m.pageNodeRows(pages[pageIndex+1])
-			if len(nextRows) == 0 {
-				return
-			}
-			m.cursor = nextRows[0][0]
-		default:
-			return
-		}
-	}
-	m.clampCursor()
-}
-
-func (m *hubModel) pages() []hubPage {
-	columns := m.columns()
-	grid := m.packedRows(columns)
-	heightBudget := max(hubCardHeight+1, max(10, m.height)-2)
-	var pages []hubPage
-	current := hubPage{}
-	usedHeight := 0
-	flush := func() {
-		if len(current.rows) == 0 {
-			return
-		}
-		pages = append(pages, current)
-		current = hubPage{}
-		usedHeight = 0
-	}
-	for _, row := range grid {
-		labels := rowGroupLabels(row, len(current.rows) == 0)
-		needed := hubCardHeight
-		if len(labels) > 0 {
-			needed++
-		}
-		if len(current.rows) > 0 && usedHeight+needed > heightBudget {
-			flush()
-			labels = rowGroupLabels(row, true)
-			needed = hubCardHeight
-			if len(labels) > 0 {
-				needed++
-			}
-		}
-		if len(labels) > 0 {
-			current.rows = append(current.rows, hubDisplayRow{headings: labels})
-			usedHeight++
-		}
-		current.rows = append(current.rows, hubDisplayRow{nodes: append([]int(nil), row.nodes...)})
-		usedHeight += hubCardHeight
-	}
-	flush()
-	if len(pages) == 0 {
-		pages = []hubPage{{}}
-	}
-	return pages
-}
-
-// packedRows fills each row left to right. A group continues in the next
-// group's slots, so a group's last row has no empty card.
-func (m *hubModel) packedRows(columns int) []hubDisplayRow {
-	if columns < 1 {
-		columns = 1
-	}
-	type item struct {
-		node, group int
-		origin      bool
-	}
-	var items []item
-	for groupIndex, group := range m.nodeGroups() {
-		for index, node := range group.nodes {
-			items = append(items, item{node: node, group: groupIndex, origin: index == 0})
-		}
-	}
-	var grid []hubDisplayRow
-	for start := 0; start < len(items); start += columns {
-		end := min(start+columns, len(items))
-		chunk := items[start:end]
-		row := hubDisplayRow{nodes: make([]int, len(chunk))}
-		for index, item := range chunk {
-			row.nodes[index] = item.node
-			if len(row.headings) == 0 || row.headings[len(row.headings)-1].group != item.group {
-				row.headings = append(row.headings, hubGroupSpan{
-					group: item.group, column: index, span: 1, label: item.origin,
-				})
-				continue
-			}
-			row.headings[len(row.headings)-1].span++
-		}
-		grid = append(grid, row)
-	}
-	return grid
-}
-
-func rowGroupLabels(row hubDisplayRow, pageStart bool) []hubGroupSpan {
-	var labels []hubGroupSpan
-	for _, span := range row.headings {
-		if !span.label && !(pageStart && span.column == 0) {
-			continue
-		}
-		span.label = true
-		labels = append(labels, span)
-	}
-	return labels
-}
-
-func (m *hubModel) clampCursor() {
-	order := m.nodeOrder()
-	if len(order) == 0 {
-		m.cursor, m.offset = 0, 0
-		return
-	}
-	found := false
-	for _, index := range order {
-		if index == m.cursor {
-			found = true
-			break
-		}
-	}
-	if !found {
-		m.cursor = order[0]
-	}
-	pages := m.pages()
-	for pageIndex, page := range pages {
-		for _, row := range page.rows {
-			for _, nodeIndex := range row.nodes {
-				if nodeIndex == m.cursor {
-					m.offset = pageIndex
-					return
-				}
-			}
-		}
-	}
-	m.offset = min(max(0, m.offset), len(pages)-1)
-}
-
-func (m *hubModel) nodeAt(x, y int) (int, bool) {
-	if y < 1 {
-		return 0, false
-	}
-	pages := m.pages()
-	if m.offset < 0 || m.offset >= len(pages) {
-		return 0, false
-	}
-	columns := m.columns()
-	cardWidth := m.cardWidth()
-	rowY := 1
-	for _, row := range pages[m.offset].rows {
-		if len(row.headings) > 0 {
-			if y == rowY {
-				return 0, false
-			}
-			rowY++
-			continue
-		}
-		if y >= rowY && y < rowY+hubCardHeight {
-			if x < 0 {
-				return 0, false
-			}
-			column := x / (cardWidth + 1)
-			if column >= columns || x%(cardWidth+1) >= cardWidth || column >= len(row.nodes) {
-				return 0, false
-			}
-			return row.nodes[column], true
-		}
-		rowY += hubCardHeight
-	}
-	return 0, false
-}
-
 func (m *hubModel) View() tea.View {
 	if m.detail != nil {
 		view := m.detail.View()
@@ -1208,9 +802,6 @@ func (m *hubModel) View() tea.View {
 		return view
 	}
 	body := m.hubView()
-	if m.slurmView {
-		body = m.slurmQueueView()
-	}
 	if m.colorMode == colorModeLight {
 		body = applyLightTheme(body)
 	}
@@ -1220,178 +811,6 @@ func (m *hubModel) View() tea.View {
 	view.WindowTitle = m.config.displayName()
 	view.BackgroundColor, view.ForegroundColor = m.theme.colors(m.colorMode)
 	return view
-}
-
-func (m *hubModel) hubView() string {
-	width := usableWidth(m.width)
-	online := 0
-	for _, state := range m.states {
-		if state.Error == "" && !state.Snapshot.CollectedAt.IsZero() {
-			online++
-		}
-	}
-	badge := liveBadgeStyle
-	if len(m.config.Nodes) > 0 && online == 0 {
-		badge = critBadgeStyle
-	} else if online < len(m.config.Nodes) {
-		badge = warnBadgeStyle
-	}
-	title := titleStyle.Render(m.config.displayName()) + "  " + badge.Render(fmt.Sprintf("%d/%d ONLINE", online, len(m.config.Nodes)))
-	meta := dimStyle.Render(fmt.Sprintf("%ds  ·  %s", int(m.config.refreshInterval().Seconds()), strings.ToUpper(m.colorMode.String())))
-	headerGap := max(2, width-lipgloss.Width(title)-lipgloss.Width(meta))
-	header := ansi.Truncate(title+strings.Repeat(" ", headerGap)+meta, width, "")
-
-	cardWidth := m.cardWidth()
-	pages := m.pages()
-	pageIndex := min(max(0, m.offset), len(pages)-1)
-	var rows []string
-	groups := m.nodeGroups()
-	for _, row := range pages[pageIndex].rows {
-		if len(row.headings) > 0 {
-			rows = append(rows, renderHubGroupLabels(groups, row.headings, cardWidth))
-			continue
-		}
-		var cards []string
-		for _, index := range row.nodes {
-			if len(cards) > 0 {
-				cards = append(cards, " ")
-			}
-			cards = append(cards, m.renderNodeCard(index, cardWidth))
-		}
-		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, cards...))
-	}
-	if len(rows) == 0 {
-		rows = []string{panelStyle(width).Render(warningStyle.Render("No servers are configured."))}
-	}
-	rangeText := ""
-	if len(pages) > 1 {
-		rangeText = fmt.Sprintf("  PAGE %d/%d", pageIndex+1, len(pages))
-	}
-	hints := []string{
-		keyHint("↑↓←→", "select"),
-		keyHint("enter", "open"),
-	}
-	if len(m.config.SlurmClusters) > 0 {
-		hints = append(hints, keyHint("s", "queues"))
-	}
-	hints = append(hints,
-		keyHint("r", "refresh"),
-		keyHint("t", "theme"),
-		keyHint("q", "quit"),
-	)
-	footer := strings.Join(hints, "  ")
-	statusWidth := width - lipgloss.Width(footer) - 2
-	if statusWidth > 10 {
-		footer += "  " + dimStyle.Render(truncate(m.status+rangeText, statusWidth))
-	}
-	footer = ansi.Truncate(footer, width, "")
-	body := strings.Join([]string{header, strings.Join(rows, "\n")}, "\n")
-	return terminalFrame(body, footer, width, m.height)
-}
-
-// renderHubGroupLabels places each new group's name above its first card.
-// Slots are one card wide, so two names on the same row cannot run together.
-func renderHubGroupLabels(groups []hubNodeGroup, spans []hubGroupSpan, cardWidth int) string {
-	last := 0
-	for _, span := range spans {
-		if span.column > last {
-			last = span.column
-		}
-	}
-	slots := make([]string, last+1)
-	for index := range slots {
-		slots[index] = strings.Repeat(" ", cardWidth)
-	}
-	for _, span := range spans {
-		if span.column < 0 || span.column >= len(slots) || span.group < 0 || span.group >= len(groups) {
-			continue
-		}
-		plain := truncate(strings.TrimSpace(groups[span.group].title), cardWidth)
-		styled := sectionStyle.Render(plain)
-		pad := cardWidth - lipgloss.Width(styled)
-		if pad < 0 {
-			pad = 0
-		}
-		slots[span.column] = styled + strings.Repeat(" ", pad)
-	}
-	return strings.Join(slots, " ")
-}
-
-func (m *hubModel) renderNodeCard(index, width int) string {
-	node := m.config.Nodes[index]
-	state := hubNodeState{}
-	if index < len(m.states) {
-		state = m.states[index]
-	}
-	selected := index == m.cursor
-	title := node.Name
-	titleStyleForCard := valueStyle
-	border := colorBorder
-	if selected {
-		title = "▸ " + title
-		titleStyleForCard = accentStyle
-		border = colorBorderFocus
-	}
-	status := "CHECKING"
-	temp := 0
-	if state.Error != "" {
-		status = "OFFLINE"
-	} else if !state.Snapshot.CollectedAt.IsZero() {
-		status = fmt.Sprintf("%dms", state.Latency.Milliseconds())
-		if len(state.Snapshot.GPUs) > 0 {
-			_, _, _, temp = hubGPUStats(state.Snapshot.GPUs)
-		}
-	}
-	meta := hubCardMeta(hubMetaBudget(width, title), hubNodeAddressLabel(node.Address), status, temp, state.Warning != "")
-	contentWidth := max(1, width-4)
-	var content []string
-	switch {
-	case state.Error != "":
-		content = renderOfflineHubCard(state, contentWidth)
-	case !state.Snapshot.CollectedAt.IsZero():
-		snapshot := state.Snapshot
-		profile := normalizeMachineProfile(node.Profile)
-		if strings.TrimSpace(node.Profile) == "" && snapshot.Profile != "" {
-			profile = normalizeMachineProfile(snapshot.Profile)
-		}
-		content = m.renderLiveHubCard(index, state.Spark, snapshot, profile, contentWidth)
-	default:
-		content = renderWaitingHubCard(node.Description, contentWidth)
-	}
-	return btopPanel(width, title, meta, strings.Join(content, "\n"), titleStyleForCard, border)
-}
-
-func hubMetaBudget(width int, title string) int {
-	inner := max(0, width-2)
-	titleText := " " + truncate(title, max(4, inner-5)) + " "
-	return max(0, inner-lipgloss.Width(titleText)-2)
-}
-
-func hubCardMeta(budget int, address, status string, temp int, warn bool) string {
-	if budget <= 0 {
-		return ""
-	}
-	var core []string
-	if status != "" {
-		core = append(core, dimStyle.Render(status))
-	}
-	if temp > 0 {
-		core = append(core, loadBandStyle(temperatureBand(temp), false).Render(fmt.Sprintf("%d°C", temp)))
-	}
-	if warn {
-		core = append(core, warningStyle.Render("WARN"))
-	}
-	join := func(parts []string) string {
-		return strings.Join(parts, dimStyle.Render("  "))
-	}
-	withAddress := append([]string{dimStyle.Render(address)}, core...)
-	if full := join(withAddress); lipgloss.Width(full) <= budget {
-		return full
-	}
-	if short := join(core); lipgloss.Width(short) <= budget {
-		return short
-	}
-	return ""
 }
 
 func hubNodeAddressLabel(address string) string {
@@ -1407,34 +826,6 @@ func hubNodeAddressLabel(address string) string {
 		label = "HOST "
 	}
 	return label + sanitizeTerminalText(host)
-}
-
-func renderWaitingHubCard(description string, width int) []string {
-	lines := []string{dimStyle.Render(truncate("Waiting for the first snapshot…", width))}
-	if strings.TrimSpace(description) != "" {
-		lines = append(lines, dimStyle.Render(truncate(description, width)))
-	}
-	return fitHubLines(lines)
-}
-
-func renderOfflineHubCard(state hubNodeState, width int) []string {
-	lastSeen := "Never seen online"
-	if !state.LastSeen.IsZero() {
-		lastSeen = "Last seen " + hubAge(time.Since(state.LastSeen)) + " ago"
-	}
-	retry := "retrying now"
-	if remaining := time.Until(state.NextRetry); remaining > 0 {
-		retry = "retry in " + hubAge(remaining)
-	}
-	leftWidth := min(12, max(10, width/3))
-	rightWidth := max(1, width-leftWidth-1)
-	return joinHubColumns([]string{
-		dangerStyle.Render(truncate("● OFFLINE", leftWidth)),
-	}, []string{
-		dimStyle.Render(truncate(lastSeen, rightWidth)),
-		dimStyle.Render(truncate(retry, rightWidth)),
-		dimStyle.Render(hubShortError(state.Error, rightWidth)),
-	}, leftWidth, rightWidth)
 }
 
 func hubShortError(err string, width int) string {
@@ -1463,102 +854,33 @@ func hubShortError(err string, width int) string {
 	return truncate(err, width)
 }
 
-func (m *hubModel) renderLiveHubCard(index int, spark []hubSparkSample, snapshot monitorSnapshot, profile string, width int) []string {
-	if profile == machineProfileNAS {
-		return renderNASHubCard(spark, snapshot, width)
-	}
-	leftWidth, rightWidth := hubColumnWidths(width)
-	memory := percent(snapshot.MemoryUsed, snapshot.MemoryTotal)
-	disk := percent(snapshot.DiskUsed, snapshot.DiskTotal)
-	gpuNode := len(snapshot.GPUs) > 0 && profile != machineProfileCPU
-	var rows []struct {
-		label  string
-		series []float64
-		value  float64
-	}
-	if gpuNode {
-		gpuUtil, _, _, _ := hubGPUStats(snapshot.GPUs)
-		rows = []struct {
-			label  string
-			series []float64
-			value  float64
-		}{
-			{"CPU", sparkSeries(spark, sparkCPU), snapshot.CPUPercent},
-			{"MEM", sparkSeries(spark, sparkMem), memory},
-			{fmt.Sprintf("GPU×%d", len(snapshot.GPUs)), sparkSeries(spark, sparkGPU), gpuUtil},
-		}
-	} else {
-		rows = []struct {
-			label  string
-			series []float64
-			value  float64
-		}{
-			{"CPU", sparkSeries(spark, sparkCPU), snapshot.CPUPercent},
-			{"MEM", sparkSeries(spark, sparkMem), memory},
-			{"DSK", sparkSeries(spark, sparkDisk), disk},
-		}
-	}
-	left := hubMetricRows(rows, leftWidth)
-	return hubColumns(left, m.hubFacts(index, snapshot, gpuNode, rightWidth), width)
-}
-
-func hubColumnWidths(width int) (left, right int) {
-	if width < 16 {
-		return max(1, width/2), max(1, width-width/2)
-	}
-	// Narrow facts: "↓86M ↑14M", "vram 59/96G", "r40M w8M".
-	right = hubFactColumnWidth
-	if width < 32 {
-		right = max(8, width*2/5)
-	}
-	if right >= width-8 {
-		right = max(8, width/3)
-	}
-	left = max(1, width-right-1)
-	return left, right
-}
-
-func hubColumns(left, right []string, width int) []string {
-	leftWidth, rightWidth := hubColumnWidths(width)
-	return joinHubColumns(left, right, leftWidth, rightWidth)
-}
-
-func joinHubColumns(left, right []string, leftWidth, rightWidth int) []string {
-	lines := make([]string, 3)
-	for index := range lines {
-		var line, extra string
-		if index < len(left) {
-			line = left[index]
-		}
-		if index < len(right) {
-			extra = right[index]
-		}
-		line = ansi.Truncate(line, leftWidth, "")
-		extra = ansi.Truncate(extra, rightWidth, "")
-		pad := leftWidth - lipgloss.Width(line)
-		if pad < 0 {
-			pad = 0
-		}
-		lines[index] = line + strings.Repeat(" ", pad) + " " + extra
-	}
-	return lines
-}
-
 func appendSpark(existing []hubSparkSample, sample hubSparkSample) []hubSparkSample {
-	next := append(append([]hubSparkSample(nil), existing...), sample)
-	if len(next) > hubSparkCap {
-		next = append([]hubSparkSample(nil), next[len(next)-hubSparkCap:]...)
+	// A manual refresh can update this interval, but must not consume an
+	// extra column. Never mutate history shared with open Hub sessions.
+	end := len(existing)
+	if end > 0 && existing[end-1].At.Equal(sample.At) {
+		end--
 	}
+	start := max(0, end+1-hubSparkCap)
+	next := make([]hubSparkSample, end-start+1)
+	copy(next, existing[start:end])
+	next[len(next)-1] = sample
 	return next
+}
+
+func (node hubNodeConfig) profileFor(snapshot monitorSnapshot) string {
+	if strings.TrimSpace(node.Profile) == "" {
+		return normalizeMachineProfile(snapshot.Profile)
+	}
+	return normalizeMachineProfile(node.Profile)
 }
 
 func hubSparkFrom(snapshot monitorSnapshot) hubSparkSample {
 	gpu, _, _, _ := hubGPUStats(snapshot.GPUs)
 	return hubSparkSample{
-		CPU:  snapshot.CPUPercent,
-		Mem:  percent(snapshot.MemoryUsed, snapshot.MemoryTotal),
-		Disk: percent(snapshot.DiskUsed, snapshot.DiskTotal),
-		GPU:  gpu,
+		CPU: snapshot.CPUPercent,
+		GPU: gpu,
+		Net: hubTotalNetworkRate(snapshot),
 	}
 }
 
@@ -1566,43 +888,66 @@ type sparkField int
 
 const (
 	sparkCPU sparkField = iota
-	sparkMem
-	sparkDisk
 	sparkGPU
+	sparkNet
 )
 
-func sparkSeries(samples []hubSparkSample, field sparkField) []float64 {
-	values := make([]float64, len(samples))
-	for index, sample := range samples {
+func hubSparkline(samples []hubSparkSample, field sparkField, width int, interval time.Duration, end time.Time) string {
+	if width <= 0 || len(samples) == 0 || interval <= 0 {
+		return hubFixedSparkline(nil, width)
+	}
+	values := make([]float64, width)
+	for i := range values {
+		values[i] = math.NaN()
+	}
+	latest := end.Truncate(interval)
+	scale := float64(1 << 20) // Do not magnify idle network chatter to a full bar.
+	for _, sample := range samples {
+		age := latest.Sub(sample.At.Truncate(interval))
+		index := width - 1 - int(age/interval)
+		if age < 0 || index < 0 {
+			continue
+		}
 		switch field {
-		case sparkMem:
-			values[index] = sample.Mem
-		case sparkDisk:
-			values[index] = sample.Disk
+		case sparkNet:
+			values[index] = float64(sample.Net)
+			scale = math.Max(scale, values[index])
 		case sparkGPU:
 			values[index] = sample.GPU
 		default:
 			values[index] = sample.CPU
 		}
 	}
-	return values
+	if field == sparkNet {
+		for index := range values {
+			values[index] = values[index] / scale * 100
+		}
+		// Height is relative to this window, so its peak is not an alarm.
+		return hubSparklineColumns(values, width, true)
+	}
+	return hubFixedSparkline(values, width)
 }
 
 // hubFixedSparkline draws one column per sample on a fixed 0–100 scale.
 // Samples not collected yet are a faint dot on the left. A real sample is at
 // least a dim baseline, so an idle row still reads as present.
 func hubFixedSparkline(values []float64, width int) string {
+	return hubSparklineColumns(values, width, false)
+}
+
+var sparklineBlockGlyphs = [...]string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+
+func hubSparklineColumns(values []float64, width int, network bool) string {
 	if width <= 0 {
 		return ""
 	}
-	blocks := []rune("▁▂▃▄▅▆▇█")
 	if len(values) > width {
 		values = values[len(values)-width:]
 	}
 	parts := make([]string, width)
 	missing := width - len(values)
 	for index := 0; index < width; index++ {
-		if index < missing {
+		if index < missing || math.IsNaN(values[index-missing]) {
 			parts[index] = barTrackStyle.Render("·")
 			continue
 		}
@@ -1613,78 +958,36 @@ func hubFixedSparkline(values []float64, width int) string {
 		if value > 100 {
 			value = 100
 		}
-		level := int(value / 100 * float64(len(blocks)))
+		level := int(value / 100 * float64(len(sparklineBlockGlyphs)))
 		if level < 0 {
 			level = 0
 		}
-		if level >= len(blocks) {
-			level = len(blocks) - 1
+		if level >= len(sparklineBlockGlyphs) {
+			level = len(sparklineBlockGlyphs) - 1
 		}
 		// The flat baseline stays fainter than a real column.
 		if level == 0 {
-			parts[index] = barTrackStyle.Render(string(blocks[0]))
+			parts[index] = barTrackStyle.Render(sparklineBlockGlyphs[0])
 			continue
 		}
-		parts[index] = loadBandStyle(percentBand(value), true).Render(string(blocks[level]))
+		style := networkRXStyle
+		if !network {
+			style = loadBandStyle(percentBand(value), true)
+		}
+		parts[index] = style.Render(sparklineBlockGlyphs[level])
 	}
 	return strings.Join(parts, "")
 }
 
-type hubMetric struct {
-	label  string
-	series []float64
-	value  float64
+func hubTotalNetworkRate(snapshot monitorSnapshot) uint64 {
+	return snapshot.NetworkRX + snapshot.NetworkTX
 }
 
-func hubMetricRows(rows []struct {
-	label  string
-	series []float64
-	value  float64
-}, width int) []string {
-	labelWidth := 3
-	for _, row := range rows {
-		labelWidth = max(labelWidth, lipgloss.Width(row.label))
-	}
-	lines := make([]string, len(rows))
-	for index, row := range rows {
-		label := row.label + strings.Repeat(" ", labelWidth-lipgloss.Width(row.label))
-		value := row.value
-		if value < 0 {
-			value = 0
-		}
-		if value > 100 {
-			value = 100
-		}
-		percentText := fmt.Sprintf("%3.0f%%", value)
-		sparkWidth := width - lipgloss.Width(label) - 1 - 1 - lipgloss.Width(percentText)
-		if sparkWidth < 1 {
-			lines[index] = ansi.Truncate(dimStyle.Render(label)+" "+loadBandStyle(percentBand(value), false).Render(percentText), width, "")
-			continue
-		}
-		lines[index] = dimStyle.Render(label) + " " +
-			hubFixedSparkline(row.series, sparkWidth) + " " +
-			loadBandStyle(percentBand(value), false).Render(percentText)
-	}
-	return lines
-}
-
-func (m *hubModel) hubFacts(index int, snapshot monitorSnapshot, gpu bool, width int) []string {
-	third := hubRateLine("r", "w", snapshot.DiskRead, snapshot.DiskWrite, 0, width)
-	if gpu {
-		_, used, total, _ := hubGPUStats(snapshot.GPUs)
-		third = ansi.Truncate(dimStyle.Render("vram ")+loadBandStyle(vramBand(used, total), false).Render(hubVRAM(used, total)), width, "")
-	}
-	return []string{
-		m.hubOccupant(index, snapshot, width),
-		hubRateLine("↓", "↑", snapshot.NetworkRX, snapshot.NetworkTX, hubLinkBytesPerSec(snapshot), width),
-		third,
-	}
-}
-
-func hubRateLine(leftLabel, rightLabel string, left, right, linkBytesPerSec uint64, width int) string {
-	line := dimStyle.Render(leftLabel) + loadBandStyle(throughputBand(left, linkBytesPerSec), false).Render(hubCompactRate(left)) + " " +
-		dimStyle.Render(rightLabel) + loadBandStyle(throughputBand(right, linkBytesPerSec), false).Render(hubCompactRate(right))
-	return ansi.Truncate(line, width, "")
+func hubNetworkRates(snapshot monitorSnapshot, width int) string {
+	link := hubLinkBytesPerSec(snapshot)
+	rx := networkRXStyle.Render("↓") + loadBandStyle(throughputBand(snapshot.NetworkRX, link), false).Render(hubCompactRate(snapshot.NetworkRX))
+	tx := networkTXStyle.Render("↑") + loadBandStyle(throughputBand(snapshot.NetworkTX, link), false).Render(hubCompactRate(snapshot.NetworkTX))
+	return ansi.Truncate(rx+" "+tx, width, "")
 }
 
 func vramBand(used, total uint64) loadBand {
@@ -1714,7 +1017,7 @@ func hubCompactRate(value uint64) string {
 		return fmt.Sprintf("%d", value)
 	}
 	scaled := float64(value)
-	labels := []string{"", "K", "M", "G", "T"}
+	labels := []string{"", "K", "M", "G", "T", "P", "E"}
 	index := 0
 	for scaled >= unit && index < len(labels)-1 {
 		scaled /= unit
@@ -1731,24 +1034,29 @@ func hubVRAM(used, total uint64) string {
 	return fmt.Sprintf("%d/%dG", int(math.Round(float64(used)/float64(gi))), int(math.Round(float64(total)/float64(gi))))
 }
 
-func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) string {
+func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot) string {
 	var users []string
 	seen := map[string]bool{}
 	add := func(user string) {
-		user = strings.TrimSpace(user)
+		user = strings.TrimSpace(sanitizeTerminalText(user))
 		if user == "" || seen[user] {
 			return
 		}
 		seen[user] = true
 		users = append(users, user)
 	}
-	if m != nil {
-		if queue := m.nodeSlurmQueue(index); queue != nil {
-			for _, display := range queue.Jobs {
-				if isSlurmRunning(display.Job.State) {
-					add(display.Job.User)
+	node := m.config.Nodes[index]
+	if node.SlurmNode != "" {
+		for cluster, config := range m.config.SlurmClusters {
+			if config.Name != node.SlurmCluster || cluster >= len(m.slurmStates) || m.slurmStates[cluster].Error != "" {
+				continue
+			}
+			for _, job := range m.slurmStates[cluster].Snapshot.Jobs {
+				if isSlurmRunning(job.State) && slurmNodeListContains(job.NodeList, node.SlurmNode) {
+					add(job.User)
 				}
 			}
+			break
 		}
 	}
 	for _, gpu := range snapshot.GPUs {
@@ -1770,13 +1078,13 @@ func (m *hubModel) hubOccupant(index int, snapshot monitorSnapshot, width int) s
 		add(process.User)
 	}
 	if len(users) == 0 {
-		return dimStyle.Render("idle")
+		return ""
 	}
 	text := users[0]
 	if extra := len(users) - 1; extra > 0 {
 		text += fmt.Sprintf(" +%d", extra)
 	}
-	return hubMetricStyle.Render(truncate(text, width))
+	return text
 }
 
 func hubBaseName(value string) string {
@@ -1787,33 +1095,28 @@ func hubBaseName(value string) string {
 	return value
 }
 
-func renderNASHubCard(spark []hubSparkSample, snapshot monitorSnapshot, width int) []string {
-	filesystems := snapshot.Filesystems
-	if len(filesystems) == 0 {
-		filesystems = []filesystemInfo{{Mount: "/", Used: snapshot.DiskUsed, Total: snapshot.DiskTotal}}
-	}
-	worst := filesystems[0]
-	worstUsage := percent(worst.Used, worst.Total)
-	for _, filesystem := range filesystems[1:] {
-		if usage := percent(filesystem.Used, filesystem.Total); usage > worstUsage {
-			worst, worstUsage = filesystem, usage
+// Compare the configured filesystems with the host's root disk.
+func hubNASDiskUsage(snapshot monitorSnapshot) (mount string, usage float64) {
+	mount, usage = "/", percent(snapshot.DiskUsed, snapshot.DiskTotal)
+	for _, filesystem := range snapshot.Filesystems {
+		if used := percent(filesystem.Used, filesystem.Total); used > usage {
+			mount, usage = filesystem.Mount, used
 		}
 	}
-	leftWidth, _ := hubColumnWidths(width)
-	left := hubMetricRows([]struct {
-		label  string
-		series []float64
-		value  float64
-	}{
-		{"DSK", sparkSeries(spark, sparkDisk), worstUsage},
-	}, leftWidth)
-	left = append(left, dimStyle.Render(truncate(worst.Mount, leftWidth)))
-	lines := hubColumns(left, []string{
-		dimStyle.Render("↓") + loadBandStyle(throughputBand(snapshot.NetworkRX, hubLinkBytesPerSec(snapshot)), false).Render(hubCompactRate(snapshot.NetworkRX)),
-		dimStyle.Render("↑") + loadBandStyle(throughputBand(snapshot.NetworkTX, hubLinkBytesPerSec(snapshot)), false).Render(hubCompactRate(snapshot.NetworkTX)),
-	}, width)
-	lines[2] = ansi.Truncate(renderNASServiceLine(snapshot, width), width, "")
-	return lines
+	return mount, usage
+}
+
+func hubStorageWarning(snapshot monitorSnapshot) string {
+	mount, usage := hubNASDiskUsage(snapshot)
+	if usage >= stateThresholds.Warn {
+		return fmt.Sprintf("Disk %s %.0f%% used", sanitizeTerminalText(mount), usage)
+	}
+	for _, filesystem := range snapshot.Filesystems {
+		if filesystem.Error != "" {
+			return "Disk " + sanitizeTerminalText(filesystem.Mount) + " unavailable"
+		}
+	}
+	return ""
 }
 
 func renderNASServiceLine(snapshot monitorSnapshot, width int) string {
@@ -1847,20 +1150,6 @@ func renderNASServiceLine(snapshot monitorSnapshot, width int) string {
 		dimStyle.Render("  CTR ") + containerHealth +
 		dimStyle.Render("  PM2 ") + pm2Health
 	return ansi.Truncate(line, width, "")
-}
-
-func fitHubLines(lines []string) []string {
-	if len(lines) > 3 {
-		return lines[:3]
-	}
-	for len(lines) < 3 {
-		lines = append(lines, "")
-	}
-	return lines
-}
-
-func hubCapacityStyle(usage float64, _ lipgloss.Style) lipgloss.Style {
-	return stateStyle(usageLevel(usage))
 }
 
 func compactHealthCount(healthy, total int) string {
@@ -1914,4 +1203,81 @@ func (m *hubModel) toggleColorMode() {
 		m.colorMode = colorModeLight
 	}
 	m.status = fmt.Sprintf("%s theme enabled for this Hub session.", strings.ToUpper(m.colorMode.String()))
+}
+
+const (
+	hubOverviewRPCTimeout  = 3 * time.Second
+	hubNodeOfflineFailures = 3
+)
+
+func fetchHubNodeSnapshot(ctx context.Context, node hubNodeConfig) (nodeRPCResponse, error) {
+	client := sharedRPCClientRegistry.clientFor(node)
+	return client.pool.call(ctx, nodeRPCRequest{
+		Version: nodeRPCVersion, Operation: rpcSnapshot,
+		IncludeSlurmProgress: node.SlurmCluster != "" && node.SlurmNode != "",
+	})
+}
+
+// Each node owns one poll at a time and publishes it without waiting for peers.
+// Cadence is measured from the start of an attempt, not from its completion.
+func (s *hubService) runNode(ctx context.Context, index int, fetch func(context.Context, hubNodeConfig) (nodeRPCResponse, error)) {
+	node, interval := s.config.Nodes[index], s.config.refreshInterval()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	var state hubNodeState
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		case <-s.nodeWake[index]:
+			// Manual refresh bypasses this node's current backoff.
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		started := time.Now()
+		requestCtx, cancel := context.WithTimeout(ctx, hubOverviewRPCTimeout)
+		response, err := fetch(requestCtx, node)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
+		state = updateHubNodeState(state, response, err, started, time.Now(), interval)
+		s.mu.Lock()
+		s.states[index] = state
+		s.mu.Unlock()
+
+		next := started.Add(interval)
+		if state.NextRetry.After(next) {
+			next = state.NextRetry
+		}
+		timer.Reset(time.Until(next))
+	}
+}
+
+func updateHubNodeState(state hubNodeState, response nodeRPCResponse, err error, started, checked time.Time, interval time.Duration) hubNodeState {
+	state.Latency = checked.Sub(started)
+	state.Checked = checked
+	if err != nil {
+		state.ConsecutiveFailures++
+		reason := sanitizeTerminalText(err.Error())
+		if state.ConsecutiveFailures < hubNodeOfflineFailures {
+			state.Delay = reason
+			return state
+		}
+		state.Error, state.Delay = reason, ""
+		state.NextRetry = checked.Add(hubOfflineRetryDelay(state.ConsecutiveFailures - hubNodeOfflineFailures + 1))
+		return state
+	}
+	state.Snapshot = response.Snapshot
+	sample := hubSparkFrom(response.Snapshot)
+	sample.At = started.Truncate(interval)
+	state.Spark = appendSpark(state.Spark, sample)
+	state.Error, state.Delay = "", ""
+	state.Warning = sanitizeTerminalText(response.Warning)
+	state.LastSeen = checked
+	state.NextRetry = time.Time{}
+	state.ConsecutiveFailures = 0
+	return state
 }

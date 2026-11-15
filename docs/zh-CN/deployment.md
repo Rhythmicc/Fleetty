@@ -97,6 +97,17 @@ manifest 没有密码字段。SSH 凭据由 OpenSSH 管理。Fleetty 的管理�
 
 只有系统范围的部署账户等同于 root 管理员。`become: "sudo"` 需要非交互的管理员 sudo，这不是低权限授权。用户范围只管理该 SSH 用户自己的 Fleetty 文件和用户服务，适合作为默认方式。
 
+## 从源码更新已安装的 Hub
+
+要把当前工作树部署到现有的系统级 `fleetty-hub.service`，在项目根目录运行：
+
+```bash
+bash deploy/hub-deploy.sh --check hub-admin
+bash deploy/hub-deploy.sh hub-admin
+```
+
+`hub-admin` 是登录服务器的管理 SSH 别名，不是 Hub 的只读界面入口。也可以在别名后附加 OpenSSH 选项，例如 `-J bastion`。本机需要 Go、Git、OpenSSH 和 `zstd`，远端需要 `zstd` 和管理员 sudo。脚本检查主机身份，只替换 Hub 二进制，保留配置和 systemd 单元。它在重启后校验运行中的文件和监听状态，失败时恢复旧版。已部署的二进制缓存在本地，下一次更新可用差量传输。密码只在 sudo 提示时输入。
+
 ## 由 Hub 自动更新节点
 
 Hub 可以作为唯一下载并分发 Fleetty 安装包的位置。每一轮只下载一次 Release 资产，校验 SHA-256，写入本地缓存，再按更新清单声明的邻接关系向外走。Hub 更新它能直接到达的节点。登录节点后面的计算节点由该登录节点更新。远端仍然使用 Fleetty 自己的安装器，服务起不来就回滚。关机或暂时不可达的机器标记为 `DEFERRED`。只有它所在的分支暂停，其他节点继续，下一轮会再试这个分支。

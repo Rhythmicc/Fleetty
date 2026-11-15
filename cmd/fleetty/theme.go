@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 )
 
 // A theme token is one semantic color. Styles always render the dark value.
@@ -20,20 +19,28 @@ type themeToken struct {
 }
 
 var (
-	tokenText     = themeToken{"#F5F7FF", "#172033"}
-	tokenMuted    = themeToken{"#9CA3BC", "#5B6475"}
-	tokenAccent   = themeToken{"#B9A4FF", "#5A3FA3"}
-	tokenOK       = themeToken{"#9EE493", "#1F6F50"}
-	tokenWarn     = themeToken{"#FFD180", "#8A5A00"}
-	tokenCrit     = themeToken{"#FF8A80", "#B42318"}
-	tokenBorder   = themeToken{"#40516B", "#C4CBD4"}
-	tokenTrack    = themeToken{"#343C49", "#D5D9DF"}
-	tokenOnAccent = themeToken{"#10131A", "#F8FAFC"}
-	tokenSurface  = themeToken{"#24283B", "#E4E9F0"}
-	tokenButton   = themeToken{"#30374A", "#D9E0EA"}
-	tokenCritText = themeToken{"#FFF4F2", "#8F1D18"}
-	tokenCritWash = themeToken{"#5A3037", "#F4D8D5"}
-	tokenCanvas   = themeToken{"#0E1117", "#F4F1EA"}
+	tokenText      = themeToken{"#F5F7FF", "#172033"}
+	tokenMuted     = themeToken{"#9CA3BC", "#5B6475"}
+	tokenAccent    = themeToken{"#B9A4FF", "#5A3FA3"}
+	tokenOK        = themeToken{"#9EE493", "#155C3C"}
+	tokenWarn      = themeToken{"#FFD180", "#6A4900"}
+	tokenCrit      = themeToken{"#FF8A80", "#B42318"}
+	tokenBorder    = themeToken{"#40516B", "#C4CBD4"}
+	tokenTrack     = themeToken{"#343C49", "#D5D9DF"}
+	tokenOnAccent  = themeToken{"#10131A", "#F8FAFC"}
+	tokenSurface   = themeToken{"#24283B", "#E4E9F0"}
+	tokenButton    = themeToken{"#30374A", "#D9E0EA"}
+	tokenCritText  = themeToken{"#FFF4F2", "#8F1D18"}
+	tokenCritWash  = themeToken{"#5A3037", "#F4D8D5"}
+	tokenCanvas    = themeToken{"#0E1117", "#F4F1EA"}
+	tokenLoadIdle  = themeToken{"#A0A7BE", "#505A6D"}
+	tokenLoadLow   = themeToken{"#70D6FF", "#005674"}
+	tokenLoadHigh  = themeToken{"#FF9F43", "#873800"}
+	tokenLoadHot   = themeToken{"#FF6D87", "#A80F2D"}
+	tokenNetTX     = themeToken{"#C4A7E7", "#704E91"}
+	tokenQOSHigh   = themeToken{"#FFAD5C", "#6A4900"}
+	tokenQOSLow    = themeToken{"#82B1FF", "#173FA8"}
+	tokenQOSNormal = themeToken{"#69DA97", "#006225"}
 )
 
 // stateThresholds is the only place a reading becomes ok, warn, or crit.
@@ -211,7 +218,6 @@ var (
 	sectionStyle   = lipgloss.NewStyle().Foreground(colorMuted)
 	valueStyle     = lipgloss.NewStyle().Foreground(colorText).Bold(true)
 	hubMetricStyle = lipgloss.NewStyle().Foreground(colorText)
-	chartStyle     = hubMetricStyle
 	barTrackStyle  = lipgloss.NewStyle().Foreground(colorTrack)
 	accentStyle    = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	okStyle        = lipgloss.NewStyle().Foreground(colorOK).Bold(true)
@@ -237,9 +243,12 @@ var (
 	// Column titles stay quiet. A filled header competed with the numbers.
 	processHeaderStyle = lipgloss.NewStyle().Foreground(colorMuted).Bold(true)
 	inputStyle         = lipgloss.NewStyle().Foreground(colorText).Background(colorSurface).Padding(0, 1)
-	// Direction is the arrow, not a second hue.
-	networkRXStyle = valueStyle
-	networkTXStyle = valueStyle
+	networkRXStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenLoadLow.dark)).Bold(true)
+	networkTXStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenNetTX.dark)).Bold(true)
+
+	slurmQOSHighStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenQOSHigh.dark)).Bold(true)
+	slurmQOSLowStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenQOSLow.dark)).Bold(true)
+	slurmQOSNormalStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenQOSNormal.dark)).Bold(true)
 
 	processRunningStyle  = okStyle
 	processSleepingStyle = dimStyle
@@ -250,12 +259,12 @@ var (
 	processDeadStyle     = dangerStyle
 	processDefaultStyle  = hubMetricStyle
 
-	gpuIdleStyle   = okStyle
-	gpuLightStyle  = okStyle
+	gpuIdleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenLoadIdle.dark))
+	gpuLightStyle  = networkRXStyle
 	gpuActiveStyle = okStyle
 	gpuBusyStyle   = warningStyle
-	gpuHighStyle   = dangerStyle
-	gpuMaxStyle    = dangerStyle
+	gpuHighStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenLoadHigh.dark)).Bold(true)
+	gpuMaxStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(tokenLoadHot.dark)).Bold(true)
 
 	compactButtonStyle       = lipgloss.NewStyle().Foreground(colorText).Background(colorButton).Padding(0, 1)
 	compactDangerButtonStyle = lipgloss.NewStyle().Foreground(colorCritText).Background(colorCritWash).Padding(0, 1)
@@ -274,58 +283,27 @@ func stateStyle(level stateLevel) lipgloss.Style {
 	}
 }
 
-// usageReading keeps a healthy number in neutral text. Warn and crit take
-// the shared state color, which is still a bright foreground.
-func usageReading(value float64, text string) string {
-	if usageLevel(value) == stateOK {
-		return valueStyle.Render(text)
+// Utilization distinguishes idle, light and moderate activity without changing
+// the shared warning and critical thresholds for host resources.
+func utilizationStyle(value float64) lipgloss.Style {
+	level := usageLevel(value)
+	if level == stateOK {
+		if value < 0.1 {
+			return gpuIdleStyle
+		}
+		if value < 30 {
+			return gpuLightStyle
+		}
 	}
-	return stateStyle(usageLevel(value)).Render(text)
+	return stateStyle(level)
+}
+
+func usageReading(value float64, text string) string {
+	return utilizationStyle(value).Render(text)
 }
 
 func temperatureReading(celsius int, text string) string {
 	return stateStyle(temperatureLevel(celsius)).Render(text)
-}
-
-// hubMeterStyle colors a hub reading. Healthy text stays the normal
-// foreground. Only warn and crit introduce yellow or red.
-func hubMeterStyle(level stateLevel) lipgloss.Style {
-	switch level {
-	case stateWarn:
-		return warningStyle
-	case stateCrit, stateOffline:
-		return dangerStyle
-	case stateUnknown:
-		return dimStyle
-	default:
-		return hubMetricStyle
-	}
-}
-
-// labeledMeter is one thin hub row: "CPU ━━━━━──  62%".
-// The empty portion is a faint rule, not a filled block.
-func labeledMeter(label string, value float64, width int) string {
-	if width < 1 {
-		return ""
-	}
-	if value < 0 {
-		value = 0
-	}
-	if value > 100 {
-		value = 100
-	}
-	name := dimStyle.Render(label)
-	level := usageLevel(value)
-	style := hubMeterStyle(level)
-	percentText := style.Render(fmt.Sprintf("%3.0f%%", value))
-	barWidth := width - lipgloss.Width(name) - 1 - 1 - lipgloss.Width(percentText)
-	if barWidth < 1 {
-		return ansi.Truncate(name+" "+percentText, width, "")
-	}
-	filled := int(value / 100 * float64(barWidth))
-	filled = max(0, min(barWidth, filled))
-	bar := style.Render(strings.Repeat("━", filled)) + dimStyle.Render(strings.Repeat("─", barWidth-filled))
-	return ansi.Truncate(name+" "+bar+" "+percentText, width, "")
 }
 
 // selectedProcessStyle uses explicit xterm indexes. A truecolor accent wash
@@ -351,13 +329,18 @@ func viewColors(mode colorMode) (background, foreground color.Color) {
 
 type themeColorSwap struct{ dark, light string }
 
-var lightThemeColorSwaps = paletteSwaps()
+var (
+	lightThemeColorSwaps = paletteSwaps()
+	lightThemeReplacer   = buildLightThemeReplacer(lightThemeColorSwaps)
+)
 
 func paletteSwaps() []themeColorSwap {
 	tokens := []themeToken{
 		tokenText, tokenMuted, tokenAccent, tokenOK, tokenWarn, tokenCrit,
 		tokenBorder, tokenTrack, tokenOnAccent, tokenSurface, tokenButton,
 		tokenCritText, tokenCritWash, tokenCanvas,
+		tokenLoadIdle, tokenLoadLow, tokenLoadHigh, tokenLoadHot, tokenNetTX,
+		tokenQOSHigh, tokenQOSLow, tokenQOSNormal,
 	}
 	swaps := make([]themeColorSwap, 0, len(tokens))
 	seen := map[string]string{}
@@ -374,17 +357,21 @@ func paletteSwaps() []themeColorSwap {
 	return swaps
 }
 
+func buildLightThemeReplacer(swaps []themeColorSwap) *strings.Replacer {
+	pairs := make([]string, 0, len(swaps)*4)
+	for _, swap := range swaps {
+		dark := ansiRGB(swap.dark)
+		light := ansiRGB(swap.light)
+		pairs = append(pairs, "38;2;"+dark, "38;2;"+light, "48;2;"+dark, "48;2;"+light)
+	}
+	return strings.NewReplacer(pairs...)
+}
+
 // Rendering always uses the immutable dark palette. Light mode rewrites only
 // known ANSI RGB sequences in the completed view, keeping theme selection
 // session-local without mutating shared styles across concurrent SSH sessions.
 func applyLightTheme(rendered string) string {
-	for _, swap := range lightThemeColorSwaps {
-		dark := ansiRGB(swap.dark)
-		light := ansiRGB(swap.light)
-		rendered = strings.ReplaceAll(rendered, "38;2;"+dark, "38;2;"+light)
-		rendered = strings.ReplaceAll(rendered, "48;2;"+dark, "48;2;"+light)
-	}
-	return rendered
+	return lightThemeReplacer.Replace(rendered)
 }
 
 func ansiRGB(hex string) string {

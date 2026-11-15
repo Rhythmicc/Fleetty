@@ -21,6 +21,7 @@ type snapshotCache struct {
 	summaryFn func() (monitorSnapshot, error)
 	warmupFn  func() bool
 	record    func(monitorSnapshot)
+	progress  *progressReceiver
 
 	mu          sync.Mutex
 	full        monitorSnapshot

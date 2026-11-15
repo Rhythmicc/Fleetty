@@ -50,7 +50,11 @@ func (m *monitorModel) filteredProcesses() []processInfo {
 	query := strings.ToLower(strings.TrimSpace(m.filter))
 	processes := make([]processInfo, 0, len(m.snapshot.Processes))
 	for _, p := range m.snapshot.Processes {
-		if query == "" || strings.Contains(strings.ToLower(fmt.Sprintf("%d %s %s", p.PID, p.User, p.Command)), query) {
+		if query == "" ||
+			containsFold(p.Command, query) ||
+			containsFold(p.User, query) ||
+			strings.Contains(strconv.Itoa(p.PID), query) ||
+			(p.Progress != nil && containsFold(p.Progress.Label, query)) {
 			processes = append(processes, p)
 		}
 	}
@@ -66,9 +70,9 @@ func (m *monitorModel) filteredProcesses() []processInfo {
 		case processSortPID:
 			order = cmp.Compare(a.PID, b.PID)
 		case processSortUser:
-			order = strings.Compare(strings.ToLower(a.User), strings.ToLower(b.User))
+			order = compareFold(a.User, b.User)
 		case processSortCommand:
-			order = strings.Compare(strings.ToLower(a.Command), strings.ToLower(b.Command))
+			order = compareFold(a.Command, b.Command)
 		default:
 			order = cmp.Compare(a.CPU, b.CPU)
 		}
@@ -81,6 +85,41 @@ func (m *monitorModel) filteredProcesses() []processInfo {
 		return order
 	})
 	return processes
+}
+
+func containsFold(s, lowerSubstr string) bool {
+	if lowerSubstr == "" {
+		return true
+	}
+	if len(s) < len(lowerSubstr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(lowerSubstr); i++ {
+		if strings.EqualFold(s[i:i+len(lowerSubstr)], lowerSubstr) {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(s), lowerSubstr)
+}
+
+func compareFold(a, b string) int {
+	limit := min(len(a), len(b))
+	for i := 0; i < limit; i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 0x80 || cb >= 0x80 {
+			return strings.Compare(strings.ToLower(a), strings.ToLower(b))
+		}
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return int(ca) - int(cb)
+		}
+	}
+	return cmp.Compare(len(a), len(b))
 }
 
 func (m *monitorModel) selectedProcessIDs() (monitor, admin int) {
@@ -286,11 +325,25 @@ func (f processFormat) row(p processInfo) string {
 	return strings.Join(parts, " ")
 }
 
-func processLoadStyle(value float64, _ bool) lipgloss.Style {
-	if usageLevel(value) == stateOK {
-		return valueStyle
+func processLoadStyle(value float64, memory bool) lipgloss.Style {
+	medium, high, hot := 10.0, 50.0, 90.0
+	if memory {
+		medium, high, hot = 5, 15, 30
 	}
-	return stateStyle(usageLevel(value))
+	switch {
+	case usageLevel(value) == stateUnknown:
+		return dimStyle
+	case value < 0.1:
+		return gpuIdleStyle
+	case value < medium:
+		return gpuLightStyle
+	case value < high:
+		return gpuActiveStyle
+	case value < hot:
+		return gpuBusyStyle
+	default:
+		return gpuMaxStyle
+	}
 }
 
 func (f processFormat) renderRow(p processInfo, rank int, selected bool, mode colorMode, memoryTotal uint64) string {
@@ -319,6 +372,11 @@ func (f processFormat) renderRow(p processInfo, rank int, selected bool, mode co
 			style = processLoadStyle(p.Memory, true)
 		case processSortRSS:
 			style = processLoadStyle(percent(p.RSS, memoryTotal), true)
+		case processSortCommand:
+			if p.Progress != nil && p.Progress.Total > 0 && column.width >= 10 {
+				parts = append(parts, renderProcessCommandProgress(p, column.width, base, paint))
+				continue
+			}
 		case processSortPID:
 			// Only the single marker encodes state; the PID stays neutral.
 			parts = append(parts, paint(processStateMarker(p.State), processStateStyle(p.State))+
@@ -328,6 +386,40 @@ func (f processFormat) renderRow(p processInfo, rank int, selected bool, mode co
 		parts = append(parts, paint(text, style))
 	}
 	return strings.Join(parts, base.Render(" "))
+}
+
+func renderProcessCommandProgress(p processInfo, width int, base lipgloss.Style, paint func(string, lipgloss.Style) string) string {
+	progress := p.Progress
+	rate := percent(progress.Done, progress.Total)
+	if progress.Done < progress.Total && rate >= 100 {
+		rate = 99
+	}
+	reading := fmt.Sprintf("%d%%", int(rate))
+	readingStyle := accentStyle
+	if progress.Stale {
+		reading += "~"
+		readingStyle = dimStyle
+	}
+	indicator := paint(reading, readingStyle)
+	if width < 30 {
+		return paint(fixedCell(p.Command, width-len(reading)-1, false)+" ", base) +
+			indicator
+	}
+	barWidth := min(16, max(10, width/5))
+	fill := int(rate / 100 * float64(barWidth))
+	readingWidth := 4
+	if progress.Stale {
+		readingWidth++
+	}
+	meter := paint(strings.Repeat("━", fill), readingStyle) +
+		paint(strings.Repeat("─", barWidth-fill), dimStyle) + paint(" ", base) +
+		paint(fixedCell(reading, readingWidth, true), readingStyle)
+	leftWidth := max(1, width-barWidth-1-readingWidth-1)
+	command := p.Command
+	if progress.Label != "" {
+		command += " · " + progress.Label
+	}
+	return paint(fixedCell(command, leftWidth, false)+" ", base) + meter
 }
 
 func (m *monitorModel) sortProcessHeaderAt(x, width int) {

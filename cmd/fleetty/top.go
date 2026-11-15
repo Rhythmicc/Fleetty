@@ -52,7 +52,13 @@ func runTopCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) err
 	panelLayout, layoutErr := loadPanelLayout(layoutPath)
 
 	admin := newAdminController()
-	cache := newSnapshotCache(newMetricsCollector(machine))
+	collector := newMetricsCollector(machine)
+	cache := newSnapshotCache(collector)
+	// A second local monitor must not replace the first one's receiver.
+	if receiver, err := listenProgress(progressSocketPath(os.Geteuid()), os.Geteuid() == 0 && runtime.GOOS == "linux"); err == nil {
+		collector.progress, cache.progress = receiver, receiver
+		defer receiver.Close()
+	}
 	history := newHistoryStore(defaultHistoryPath())
 	cache.record = history.Record
 	account, _ := user.Current()

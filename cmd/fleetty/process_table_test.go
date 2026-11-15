@@ -159,9 +159,9 @@ func TestProcessTableCellsAlignAcrossWidthsThemesAndSelection(t *testing.T) {
 					}
 					left += column.width + 1
 				}
-				red := "38;2;255;138;128"
+				red := "38;2;255;109;135"
 				if mode == colorModeLight {
-					red = "38;2;180;35;24"
+					red = "38;2;168;15;45"
 				}
 				if !strings.Contains(row, red) {
 					t.Fatal("load color was lost, including on a selected row")
@@ -193,14 +193,22 @@ func TestProcessLoadColorsAreIndependentOfState(t *testing.T) {
 			t.Fatalf("missing metric color %q in %q", expected, row)
 		}
 	}
-	ok := processLoadStyle(20, false).Render("load")
-	warn := processLoadStyle(75, false).Render("load")
-	crit := processLoadStyle(95, false).Render("load")
-	if ok == warn || warn == crit || ok == crit {
-		t.Fatal("process load no longer uses the shared ok/warn/crit scale")
-	}
-	if processLoadStyle(0, false).Render("load") != ok || processLoadStyle(69, false).Render("load") != ok {
-		t.Fatal("healthy process load picked up a state color")
+}
+
+func TestProcessCPUAndMemoryUseSeparateLoadBands(t *testing.T) {
+	for _, metric := range []struct {
+		name   string
+		memory bool
+		values []float64
+	}{
+		{"CPU", false, []float64{0, 0.1, 10, 50, 90}},
+		{"memory", true, []float64{0, 0.1, 5, 15, 30}},
+	} {
+		for i, want := range []lipgloss.Style{gpuIdleStyle, gpuLightStyle, gpuActiveStyle, gpuBusyStyle, gpuMaxStyle} {
+			if got := processLoadStyle(metric.values[i], metric.memory); got.GetForeground() != want.GetForeground() {
+				t.Errorf("%s %.1f%%: got %v, want %v", metric.name, metric.values[i], got.GetForeground(), want.GetForeground())
+			}
+		}
 	}
 }
 

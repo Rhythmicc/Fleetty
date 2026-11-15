@@ -388,11 +388,11 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 	diskFree := counterDelta(m.snapshot.DiskTotal, m.snapshot.DiskUsed)
 	memoryState, memoryStateStyle := healthStatus(memoryUsage)
 	diskState, diskStateStyle := capacityStatus(diskUsage)
-	cpuHistoryLine := strings.Join(renderHistoryChart(m.cpuHistory, max(4, width-4), historyPlotHeight, "CPU %", 100, chartStyle), "\n")
+	cpuHistoryLine := strings.Join(renderHistoryChart(m.cpuHistory, max(4, width-4), historyPlotHeight, "CPU %", 100, utilizationStyle(m.snapshot.CPUPercent)), "\n")
 	lines := []string{
 		fmt.Sprintf("%s  %s  %s",
 			cpuTitleStyle.Render("CPU"),
-			valueStyle.Render(fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent)),
+			usageReading(m.snapshot.CPUPercent, fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent)),
 			valueStyle.Render(cpuClockSummary(m.snapshot.CPUFrequency))),
 		dimStyle.Render(truncate(m.snapshot.LoadAverage, max(4, width-4))),
 		cpuHistoryLine,
@@ -434,7 +434,7 @@ func (m *monitorModel) hostHealthPanelSpec(width int, rich bool) pagePanelSpec {
 
 func overviewCapacityLines(label string, used, total uint64, width int, style lipgloss.Style) []string {
 	usage := percent(used, total)
-	reading := style.Render(label+" ") + valueStyle.Render(fmt.Sprintf("%.1f%%", usage)) +
+	reading := style.Render(label+" ") + usageReading(usage, fmt.Sprintf("%.1f%%", usage)) +
 		dimStyle.Render("  "+compactByteCount(used)+" / "+compactByteCount(total))
 	return []string{ansi.Truncate(reading, width, "…"), bar(usage, width)}
 }
@@ -460,7 +460,7 @@ func (m *monitorModel) overviewCPUHeader(width int) []string {
 	}
 	hardware := alignedPageLine(cpuTitleStyle.Render("CPU")+"  "+dimStyle.Render(model),
 		dimStyle.Render(count), width)
-	readings := dimStyle.Render("USAGE ") + valueStyle.Render(fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent)) +
+	readings := dimStyle.Render("USAGE ") + usageReading(m.snapshot.CPUPercent, fmt.Sprintf("%.1f%%", m.snapshot.CPUPercent)) +
 		"  " + valueStyle.Render(cpuClockSummary(m.snapshot.CPUFrequency))
 	if frequency := m.snapshot.CPUFrequency; frequency != nil && validCPUFrequency(frequency.AverageMHz) {
 		clockRange := dimStyle.Render(fmt.Sprintf("  RANGE %.2f–%.2fGHz", frequency.MinMHz/1000, frequency.MaxMHz/1000))
@@ -481,7 +481,7 @@ func (m *monitorModel) overviewCPUHeader(width int) []string {
 	}
 	lines := []string{hardware, ansi.Truncate(readings, width, "…"), ansi.Truncate(trend, width, "…")}
 	if historyWidth > 0 {
-		history := renderHistoryChart(m.cpuHistory, historyWidth, historyPlotHeight, "CPU %", 100, chartStyle)
+		history := renderHistoryChart(m.cpuHistory, historyWidth, historyPlotHeight, "CPU %", 100, utilizationStyle(m.snapshot.CPUPercent))
 		return historyColumns(lines, history, width)
 	}
 	return lines
@@ -575,45 +575,51 @@ func multiGPUOverviewLines(gpus []gpuInfo, width int) []string {
 
 	lines = append(lines, pageRule(width))
 	average := totalUtil / float64(max(1, len(gpus)))
-	lines = append(lines, ansi.Truncate(
-		fmt.Sprintf("%s  %s  %s",
-			gpuTitleStyle.Render(fmt.Sprintf("ACTIVE %d/%d", active, len(gpus))),
-			dimStyle.Render(fmt.Sprintf("AVG %.0f%%", average)),
-			gpuLoadStyle(busiestUtil).Render(fmt.Sprintf("PEAK GPU %d  %.0f%%", busiestIndex, busiestUtil))),
-		width, "…",
-	))
-	power := fmt.Sprintf("%.0f W", totalPower)
+	leftSummary := fmt.Sprintf("%s  %s  %s",
+		gpuTitleStyle.Render(fmt.Sprintf("ACTIVE %d/%d", active, len(gpus))),
+		dimStyle.Render(fmt.Sprintf("AVG %.0f%%", average)),
+		gpuLoadStyle(busiestUtil).Render(fmt.Sprintf("PEAK #%d %.0f%%", busiestIndex, busiestUtil)))
+	power := fmt.Sprintf("%.0fW", totalPower)
 	if totalLimit > 0 {
-		power = fmt.Sprintf("%.0f/%.0f W", totalPower, totalLimit)
+		power = fmt.Sprintf("%.0f/%.0fW", totalPower, totalLimit)
 	}
-	lines = append(lines, ansi.Truncate(
-		fmt.Sprintf("%s  %s  %s",
-			memoryTitleStyle.Render("VRAM "+compactByteCount(usedMemory)+"/"+compactByteCount(totalMemory)),
-			dimStyle.Render("POWER "+power),
-			dimStyle.Render(fmt.Sprintf("JOBS %d", workloads))),
-		width, "…",
-	))
+	rightSummary := fmt.Sprintf("%s  %s  %s",
+		memoryTitleStyle.Render("VRAM "+compactByteCount(usedMemory)+"/"+compactByteCount(totalMemory)),
+		dimStyle.Render("PWR "+power),
+		dimStyle.Render(fmt.Sprintf("JOBS %d", workloads)))
+	lines = append(lines,
+		ansi.Truncate(leftSummary, width, "…"),
+		ansi.Truncate(rightSummary, width, "…"),
+	)
 	if len(gpus) > limit {
 		lines = append(lines, dimStyle.Render(fmt.Sprintf("+%d · [2 COMPUTE]", len(gpus)-limit)))
 	}
 	return lines
 }
 
+const (
+	multiGPUOverviewClockMinWidth = 80
+	multiGPUOverviewClockWidth    = 8
+)
+
 func multiGPUOverviewHeader(width int) string {
 	var header string
 	switch {
 	case width >= 68:
 		header = fixedCell("GPU", 3, false) + " " +
-			fixedCell("MODEL", 17, false) + " " +
-			fixedCell("LOAD", 12, false) + " " +
-			fixedCell("VRAM", 15, false) + " " +
-			fixedCell("PWR", 6, true) + " " +
-			fixedCell("TEMP", 5, true) + " JOB"
+			fixedCell("MODEL", 14, false) + " " +
+			fixedCell("LOAD", 9, false) + " " +
+			fixedCell("VRAM", 16, false) + " " +
+			fixedCell("PWR", 9, true)
+		if width >= multiGPUOverviewClockMinWidth {
+			header += " " + fixedCell("CLK", multiGPUOverviewClockWidth, true)
+		}
+		header += " " + fixedCell("TEMP", 5, true) + " WORKLOAD"
 	case width >= 50:
 		header = fixedCell("GPU", 3, false) + " " +
 			fixedCell("MODEL", 14, false) + " " +
-			fixedCell("LOAD", 11, false) + " " +
-			fixedCell("VRAM", 13, false) + " JOB"
+			fixedCell("LOAD", 9, false) + " " +
+			fixedCell("VRAM", 13, false) + " WORKLOAD"
 	default:
 		header = fixedCell("GPU / MODEL", max(10, width-17), false) + " LOAD / VRAM"
 	}
@@ -622,27 +628,45 @@ func multiGPUOverviewHeader(width int) string {
 
 func multiGPUOverviewRow(gpu gpuInfo, width int) string {
 	statusStyle := gpuLoadStyle(gpu.Utilization)
-	load := bar(gpu.Utilization, 5) + " " + fmt.Sprintf("%3.0f%%", gpu.Utilization)
+	load := loadBar(gpu.Utilization, 5, statusStyle) +
+		statusStyle.Render(fixedCell(fmt.Sprintf("%.0f%%", gpu.Utilization), 4, true))
 	memoryUsage := percent(gpu.MemoryUsed, gpu.MemoryTotal)
 	memoryStyle := gpuLoadStyle(memoryUsage)
 	memory := compactByteCount(gpu.MemoryUsed) + "/" + compactByteCount(gpu.MemoryTotal)
+	vramCell := loadBar(memoryUsage, 5, memoryStyle) + " " +
+		memoryStyle.Render(fixedCell(memory, 10, false))
+	powerText := fmt.Sprintf("%.0fW", gpu.Power)
+	if gpu.PowerLimit > 0 {
+		powerText = fmt.Sprintf("%.0f/%.0fW", gpu.Power, gpu.PowerLimit)
+	}
 	job := gpuOverviewWorkload(gpu)
-	id := valueStyle.Render(fmt.Sprintf("%d", gpu.Index))
+	id := valueStyle.Render(fmt.Sprintf("#%d", gpu.Index))
 	model := shortGPUName(gpu.Name)
 	var row string
 	switch {
 	case width >= 68:
 		row = fixedCell(id, 3, false) + " " +
-			fixedCell(model, 17, false) + " " +
-			fixedCell(load, 12, false) + " " +
-			memoryStyle.Render(fixedCell(memory, 15, false)) + " " +
-			valueStyle.Render(fixedCell(fmt.Sprintf("%.0fW", gpu.Power), 6, true)) + " " +
-			gpuTemperatureStyle(gpu.Temperature).Render(fixedCell(fmt.Sprintf("%d°C", gpu.Temperature), 5, true)) + " " +
-			valueStyle.Render(job)
+			fixedCell(model, 14, false) + " " +
+			load + " " +
+			vramCell + " " +
+			valueStyle.Render(fixedCell(powerText, 9, true))
+		if width >= multiGPUOverviewClockMinWidth {
+			clock, clockStyle := "--", dimStyle
+			if gpu.ClockMHz > 0 {
+				clock, clockStyle = fmt.Sprintf("%dMHz", gpu.ClockMHz), gpuClockStyle(gpu.ClockMHz)
+			}
+			row += " " + clockStyle.Render(fixedCell(clock, multiGPUOverviewClockWidth, true))
+		}
+		jobText := dimStyle.Render("—")
+		if job != "—" {
+			jobText = gpuTitleStyle.Render("● ") + valueStyle.Render(job)
+		}
+		row += " " + gpuTemperatureStyle(gpu.Temperature).Render(fixedCell(fmt.Sprintf("%d°C", gpu.Temperature), 5, true)) + " " +
+			jobText
 	case width >= 50:
 		row = fixedCell(id, 3, false) + " " +
 			fixedCell(model, 14, false) + " " +
-			fixedCell(load, 11, false) + " " +
+			load + " " +
 			memoryStyle.Render(fixedCell(memory, 13, false)) + " " +
 			valueStyle.Render(job)
 	default:
@@ -750,69 +774,65 @@ func compactGPUUUID(uuid string) string {
 }
 
 func (m *monitorModel) networkActivityPanelSpec(width int, rich bool, detailLimit int) pagePanelSpec {
-	detailWidth := max(24, width-4)
-	summary := networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
-		networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s") + "    " +
-		dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s",
-			bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)))
-	detailLimit = max(1, detailLimit)
+	contentWidth := max(24, width-4)
+	detailLimit = max(1, min(5, detailLimit))
 	if !rich || width < 70 {
 		detailLimit = min(detailLimit, 3)
 	}
-	detailTitle, details := m.networkOverviewDetails(detailWidth, detailLimit)
-	if !rich {
-		lines := []string{summary}
-		if m.height == 0 || m.height >= 34 {
-			lines = append(lines, strings.Join(renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, max(4, width-4)), "\n"))
+	live := dimStyle.Render("LIVE ") +
+		networkRXStyle.Render("↓ "+bytes(m.snapshot.NetworkRX)+"/s") + "  " +
+		networkTXStyle.Render("↑ "+bytes(m.snapshot.NetworkTX)+"/s")
+	totals := dimStyle.Render(fmt.Sprintf("TOTAL ↓ %s  ↑ %s",
+		bytes(m.snapshot.NetworkRXTotal), bytes(m.snapshot.NetworkTXTotal)))
+	windowLines := networkOverviewWindow(m.networkRXHistory, m.networkTXHistory, contentWidth)
+
+	lines := append([]string{}, windowLines...)
+	detailTitle, details := m.networkOverviewDetails(contentWidth, detailLimit)
+	if len(details) > 0 {
+		if detailTitle != "TRAFFIC SOURCES" {
+			lines = append(lines, m.networkOverviewHeader(contentWidth))
 		}
-		lines = append(lines, networkTitleStyle.Render(detailTitle))
 		lines = append(lines, details...)
-		return pagePanelSpec{
-			title: "NETWORK ACTIVITY", meta: m.primaryNetworkSource(),
-			lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
-		}
 	}
-
-	contentWidth := max(24, width-4)
-	if width >= 70 {
-		leftWidth := min(68, max(34, (contentWidth-3)/2))
-		rightWidth := contentWidth - leftWidth - 3
-		left := renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, leftWidth)
-		// Use every row beside the plots, but never make the summary taller.
-		_, details = m.networkOverviewDetails(rightWidth, min(detailLimit, len(left)-1))
-		right := []string{
-			m.networkOverviewHeader(rightWidth),
-		}
-		right = append(right, details...)
-		rowCount := max(len(left), len(right))
-		lines := make([]string, 0, rowCount+2)
-		for index := 0; index < rowCount; index++ {
-			leftLine, rightLine := "", ""
-			if index < len(left) {
-				leftLine = left[index]
-			}
-			if index < len(right) {
-				rightLine = right[index]
-			}
-			lines = append(lines, joinPageColumns(leftLine, rightLine, leftWidth, contentWidth))
-		}
-		lines = append(lines, pageRule(contentWidth), summary)
-		return pagePanelSpec{
-			title: "NETWORK ACTIVITY", meta: m.primaryNetworkSource() + " · 1m",
-			lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
-		}
+	if summary := live + "    " + totals; lipgloss.Width(summary) <= contentWidth {
+		lines = append(lines, alignedPageLine(live, totals, contentWidth))
+	} else {
+		lines = append(lines, ansi.Truncate(live, contentWidth, "…"), ansi.Truncate(totals, contentWidth, "…"))
 	}
-
-	lines := []string{
-		strings.Join(renderNetworkHistories(m.networkRXHistory, m.networkTXHistory, contentWidth), "\n"),
-		pageRule(contentWidth),
-		m.networkOverviewHeader(contentWidth),
-	}
-	lines = append(lines, details...)
-	lines = append(lines, pageRule(contentWidth), summary)
 	return pagePanelSpec{
-		title: "NETWORK ACTIVITY", meta: m.primaryNetworkSource() + " · 1m",
+		title: "NETWORK ACTIVITY", meta: m.primaryNetworkSource(),
 		lines: lines, titleStyle: networkTitleStyle, borderColor: colorNetworkBorder,
+	}
+}
+
+func networkOverviewWindow(rx, tx []float64, width int) []string {
+	rxAvg, rxPeak, rxOK := networkWindowRates(rx)
+	txAvg, txPeak, txOK := networkWindowRates(tx)
+	pair := func(down, up uint64, compact bool) string {
+		format := bytes
+		gap := " "
+		if compact {
+			format, gap = compactByteCount, ""
+		}
+		reading := func(value uint64, ok bool) string {
+			if !ok {
+				return "--"
+			}
+			return format(value) + "/s"
+		}
+		return networkRXStyle.Render("↓"+gap+reading(down, rxOK)) + "  " +
+			networkTXStyle.Render("↑"+gap+reading(up, txOK))
+	}
+	for _, compact := range []bool{false, true} {
+		avg := dimStyle.Render("1m AVG ") + pair(rxAvg, txAvg, compact)
+		peak := dimStyle.Render("PEAK ") + pair(rxPeak, txPeak, compact)
+		if line := avg + dimStyle.Render("  ·  ") + peak; lipgloss.Width(line) <= width {
+			return []string{line}
+		}
+	}
+	return []string{
+		ansi.Truncate(dimStyle.Render("1m AVG ")+pair(rxAvg, txAvg, true), width, "…"),
+		ansi.Truncate(dimStyle.Render("1m PEAK ")+pair(rxPeak, txPeak, true), width, "…"),
 	}
 }
 
@@ -848,9 +868,10 @@ func (m *monitorModel) networkOverviewDetails(width, limit int) (string, []strin
 		}
 		return "NETWORK INTERFACES", lines
 	default:
-		return "TRAFFIC SOURCES", []string{
-			dimStyle.Render(truncate(m.snapshot.NetworkProcessError, width)),
+		if m.snapshot.NetworkProcessError != "" {
+			return "TRAFFIC SOURCES", []string{dimStyle.Render(truncate(m.snapshot.NetworkProcessError, width))}
 		}
+		return "TRAFFIC SOURCES", nil
 	}
 }
 
@@ -870,7 +891,8 @@ func compactNetworkOverviewRow(name string, rx, tx uint64, available bool, width
 		down, up = bytes(rx)+"/s", bytes(tx)+"/s"
 	}
 	return valueStyle.Render(fixedCell(sanitizeTerminalText(name), max(1, width-22), false)) + " " +
-		networkRXStyle.Render(fixedCell(down, 10, true)) + " " + networkTXStyle.Render(fixedCell(up, 10, true))
+		networkRateStyle(rx, available, networkRXStyle).Render(fixedCell(down, 10, true)) + " " +
+		networkRateStyle(tx, available, networkTXStyle).Render(fixedCell(up, 10, true))
 }
 
 func (m *monitorModel) primaryNetworkSource() string {
@@ -880,37 +902,24 @@ func (m *monitorModel) primaryNetworkSource() string {
 	return "aggregate"
 }
 
-func joinPageColumns(left, right string, leftWidth, totalWidth int) string {
-	left = ansi.Truncate(left, leftWidth, "")
-	left += strings.Repeat(" ", max(0, leftWidth-lipgloss.Width(left)))
-	separator := dimStyle.Render(" │ ")
-	rightWidth := max(1, totalWidth-leftWidth-lipgloss.Width(separator))
-	return left + separator + ansi.Truncate(right, rightWidth, "…")
-}
-
 func (m *monitorModel) nodeQueuePanelSpec(rowLimit, width int) pagePanelSpec {
 	queue := m.slurmQueue
 	if queue == nil {
 		return pagePanelSpec{}
 	}
-	meta := fmt.Sprintf("%s · %s", queue.Cluster, queue.Node)
-	running, queued, next := 0, 0, 0
-	for _, display := range queue.Jobs {
-		switch {
-		case isSlurmRunning(display.Job.State):
-			running++
-		case display.Next:
-			next++
-		default:
-			queued++
+	meta := fmt.Sprintf("%d JOBS · %s · %s", len(queue.Jobs), queue.Cluster, queue.Node)
+	if !queue.CollectedAt.IsZero() {
+		age := time.Since(queue.CollectedAt)
+		if !m.snapshot.CollectedAt.IsZero() {
+			age = m.snapshot.CollectedAt.Sub(queue.CollectedAt)
+			if age < 0 {
+				age = 0
+			}
 		}
+		meta = fmt.Sprintf("%d JOBS · %s AGO · %s · %s", len(queue.Jobs), hubAge(age), queue.Cluster, queue.Node)
 	}
 	lines := []string{
-		strings.Join([]string{
-			processRunningStyle.Render(fmt.Sprintf("● RUNNING (%d)", running)),
-			processWaitingStyle.Render(fmt.Sprintf("◆ NEXT (%d)", next)),
-			gpuTitleStyle.Render(fmt.Sprintf("○ QUEUED (%d)", queued)),
-		}, dimStyle.Render(" · ")),
+		slurmNodeStateSummary(queue.Jobs, true),
 		slurmNodeJobHeader(max(20, width-4)),
 	}
 	if queue.Warning != "" {
@@ -1065,10 +1074,9 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 		layout := dashboardLayout{width: width, height: m.height, compactGPU: width < 112}
 		appendSection(m.gpuPanel(layout))
 	}
-	memoryCard, _ := m.metricWidgetCard(dashboardPanelMemory)
-	appendSection(renderMetricWidget(memoryCard, width, widgetSizeSmall))
+	appendSection(m.renderComputeMemoryAndStorage(width))
 	if m.slurmQueue != nil {
-		appendSection(m.slurmNodePanel(width, min(6, max(3, m.height/5))))
+		appendSection(renderPagePanel(width, m.nodeQueuePanelSpec(min(6, max(3, m.height/5)), width)))
 	}
 	const (
 		headerHeight    = 2
@@ -1085,6 +1093,82 @@ func (m *monitorModel) renderComputePage(width int) (string, []widgetPlacement) 
 	return strings.Join(sections, "\n"), append(placements, widgetPlacement{
 		ID: dashboardPanelProcesses, X: 0, Y: processY, Width: width,
 		Height: lipgloss.Height(workloads), ProcessRows: processRows, ProcessRowStart: 2,
+	})
+}
+
+func (m *monitorModel) renderComputeMemoryAndStorage(width int) string {
+	memPct := percent(m.snapshot.MemoryUsed, m.snapshot.MemoryTotal)
+	memAvail := uint64(0)
+	if m.snapshot.MemoryTotal > m.snapshot.MemoryUsed {
+		memAvail = m.snapshot.MemoryTotal - m.snapshot.MemoryUsed
+	}
+	diskPct := percent(m.snapshot.DiskUsed, m.snapshot.DiskTotal)
+	diskFree := uint64(0)
+	if m.snapshot.DiskTotal > m.snapshot.DiskUsed {
+		diskFree = m.snapshot.DiskTotal - m.snapshot.DiskUsed
+	}
+
+	topRSS := ""
+	rssCount := 0
+	for _, proc := range m.snapshot.Processes {
+		if proc.RSS > 0 && rssCount < 2 {
+			if topRSS != "" {
+				topRSS += " · "
+			}
+			topRSS += fmt.Sprintf("%s (%s)", proc.Command, compactByteCount(proc.RSS))
+			rssCount++
+		}
+	}
+
+	if width >= 88 {
+		available := width - 1
+		leftW := available/2 + available%2
+		rightW := available / 2
+		leftContentW := max(20, leftW-4)
+		rightContentW := max(20, rightW-4)
+
+		memLeft := memoryTitleStyle.Render("USED ") +
+			usageReading(memPct, fmt.Sprintf("%.1f%%", memPct)) +
+			dimStyle.Render("  "+bytes(m.snapshot.MemoryUsed)+" / "+bytes(m.snapshot.MemoryTotal))
+		memRight := dimStyle.Render("AVAIL ") + valueStyle.Render(bytes(memAvail))
+		if topRSS != "" {
+			memRight = dimStyle.Render("TOP RSS ") + valueStyle.Render(topRSS)
+		}
+		memSpec := pagePanelSpec{
+			title:       "MEMORY",
+			meta:        fmt.Sprintf("%.1f%% USED · %s AVAIL", memPct, bytes(memAvail)),
+			lines:       []string{alignedPageLine(memLeft, memRight, leftContentW), bar(memPct, leftContentW)},
+			titleStyle:  memoryTitleStyle,
+			borderColor: colorMemoryBorder,
+		}
+
+		diskLeft := diskTitleStyle.Render("DISK / ") +
+			usageReading(diskPct, fmt.Sprintf("%.1f%%", diskPct)) +
+			dimStyle.Render("  "+bytes(m.snapshot.DiskUsed)+" / "+bytes(m.snapshot.DiskTotal))
+		diskRight := dimStyle.Render("IO ") +
+			networkRXStyle.Render("↓ "+compactByteCount(m.snapshot.DiskRead)+"/s") + " " +
+			networkTXStyle.Render("↑ "+compactByteCount(m.snapshot.DiskWrite)+"/s")
+		diskSpec := pagePanelSpec{
+			title:       "STORAGE & IO",
+			meta:        fmt.Sprintf("%.1f%% USED · %s FREE", diskPct, bytes(diskFree)),
+			lines:       []string{alignedPageLine(diskLeft, diskRight, rightContentW), bar(diskPct, rightContentW)},
+			titleStyle:  diskTitleStyle,
+			borderColor: colorDiskBorder,
+		}
+		return renderPagePanelRow(width, memSpec, diskSpec)
+	}
+
+	contentW := max(20, width-4)
+	memLeft := memoryTitleStyle.Render("USED ") +
+		usageReading(memPct, fmt.Sprintf("%.1f%%", memPct)) +
+		dimStyle.Render("  "+bytes(m.snapshot.MemoryUsed)+" / "+bytes(m.snapshot.MemoryTotal))
+	memRight := dimStyle.Render("AVAIL ") + valueStyle.Render(bytes(memAvail))
+	return renderPagePanel(width, pagePanelSpec{
+		title:       "MEMORY",
+		meta:        fmt.Sprintf("%.1f%% USED", memPct),
+		lines:       []string{alignedPageLine(memLeft, memRight, contentW), bar(memPct, contentW)},
+		titleStyle:  memoryTitleStyle,
+		borderColor: colorMemoryBorder,
 	})
 }
 
@@ -1243,8 +1327,8 @@ func renderNetworkInterfaceDetailedRow(networkInterface networkInterfaceInfo, wi
 		networkInterface.RXDrops + networkInterface.TXDrops
 	return strings.Join([]string{
 		valueStyle.Render(fixedCell(networkInterface.Name, nameWidth, false)),
-		networkRXStyle.Render(fixedCell(bytes(networkInterface.RX)+"/s", 11, true)),
-		networkTXStyle.Render(fixedCell(bytes(networkInterface.TX)+"/s", 11, true)),
+		networkRateStyle(networkInterface.RX, true, networkRXStyle).Render(fixedCell(bytes(networkInterface.RX)+"/s", 11, true)),
+		networkRateStyle(networkInterface.TX, true, networkTXStyle).Render(fixedCell(bytes(networkInterface.TX)+"/s", 11, true)),
 		dimStyle.Render(fixedCell(bytes(networkInterface.RXTotal), 12, true)),
 		dimStyle.Render(fixedCell(bytes(networkInterface.TXTotal), 12, true)),
 		dimStyle.Render(fixedCell(fmt.Sprint(errorsAndDrops), 14, true)),

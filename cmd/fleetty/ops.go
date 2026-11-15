@@ -2,6 +2,7 @@ package main
 
 import (
 	byteutil "bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,8 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	deployassets "github.com/Rhythmicc/fleetty/deploy"
 	"github.com/Rhythmicc/fleetty/internal/buildinfo"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -151,6 +154,8 @@ func runOperationsWithInput(args []string, stdin io.Reader, stdout, stderr io.Wr
 	switch args[0] {
 	case "top":
 		return true, runTopCommand(args[1:], stdin, stdout, stderr)
+	case "progress":
+		return true, runProgressCommand(args[1:], stdout, stderr)
 	case "update":
 		return true, runUpdateCommand(args[1:], stdout, stderr)
 	case "dedupe-link":
@@ -196,6 +201,7 @@ func writeOperationsUsage(writer io.Writer) {
 Usage:
   fleetty
   fleetty top [--config PATH] [--theme auto|dark|light] [--layout PATH]
+  fleetty progress --paths
   fleetty update [--check] [--version latest|TAG]
   fleetty dedupe-link --keep PATH --replace PATH --sha256 HEX
   fleetty serve
@@ -914,15 +920,319 @@ func runSystemCommand(name string, args ...string) ([]byte, error) {
 	return command.CombinedOutput()
 }
 
-func commandSucceeds(runner systemCommandRunner, name string, args ...string) bool {
-	_, err := runner(name, args...)
-	return err == nil
-}
-
 func commandFailure(action string, output []byte, err error) error {
 	message := strings.TrimSpace(string(output))
 	if message == "" {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	return fmt.Errorf("%s: %w: %s", action, err, message)
+}
+
+const adminProcessRowStart = 7
+
+func (m *monitorModel) passwordView() string {
+	w := usableWidth(m.width)
+	masked := strings.Repeat("•", len([]rune(m.password)))
+	if masked == "" {
+		masked = dimStyle.Render("password")
+	}
+	content := strings.Join([]string{
+		titleStyle.Render("MANAGEMENT MODE"),
+		dimStyle.Render("Authentication is required before any host action."),
+		"",
+		"Password: " + inputStyle.Render(masked+" "),
+		"",
+		warningStyle.Render(m.status),
+	}, "\n")
+	footer := helpStyle.Render("[enter] continue  [esc] return") + "  " +
+		dimStyle.Render("Type or paste the management password.")
+	return centeredTerminalFrame(centeredPanel(w, content), footer, w, m.height)
+}
+
+func (m *monitorModel) adminView() string {
+	w := usableWidth(m.width)
+	processes := m.filteredProcesses()
+	rows := m.adminVisibleProcessRows()
+	end := min(len(processes), m.processOffset+rows)
+	if m.processOffset > end {
+		m.processOffset = 0
+	}
+	format := newProcessFormat(w)
+	table := []string{
+		processLegend(w - 4),
+		format.renderHeader(m.processSort),
+	}
+	for i := m.processOffset; i < end; i++ {
+		row := format.renderRow(processes[i], i+1, i == m.cursor && !m.filtering, m.colorMode, m.snapshot.MemoryTotal)
+		table = append(table, row)
+	}
+	if len(processes) == 0 {
+		table = append(table, warningStyle.Render("No processes match this filter."))
+	}
+
+	filterValue := m.filter
+	if filterValue == "" {
+		filterValue = "process name, user, or PID"
+	}
+	if m.filtering {
+		filterValue += "█"
+	}
+	filterLine := accentStyle.Render("FILTER /") + " " + inputStyle.Width(max(12, w-14)).Render(truncate(filterValue, max(8, w-18)))
+	actionButtons := make([]string, 0, len(m.admin.actions)*2)
+	for index, action := range m.admin.actions {
+		if index > 0 {
+			actionButtons = append(actionButtons, " ")
+		}
+		actionButtons = append(actionButtons,
+			compactButton(strconv.Itoa(index+1), m.adminActionLabel(index), action.dangerous))
+	}
+	actions := lipgloss.JoinHorizontal(lipgloss.Top, actionButtons...)
+	body := strings.Join([]string{
+		titleStyle.Render("MANAGEMENT MODE") + "  " + accentStyle.Render("AUTHORIZED"),
+		dimStyle.Render(truncate("Available actions reflect the service account permissions and require confirmation.", w)),
+		actions,
+		filterLine,
+		btopPanel(w, "PROCESS MANAGER", m.processTableMeta(m.processOffset, rows, w, "PROCESS MANAGER"), strings.Join(table, "\n"), processTitleStyle, colorProcessBorder),
+	}, "\n")
+	footer := helpStyle.Render("[o/O] sort/reverse  [/] filter  [↑/↓] select  [enter/click] details  [c] clear  [esc] monitor") + "  " + dimStyle.Render(m.status)
+	return terminalFrame(body, footer, w, m.height)
+}
+
+func (m *monitorModel) confirmView() string {
+	w := usableWidth(m.width)
+	if m.selectedAction == nil {
+		m.screen = screenAdmin
+		return m.adminView()
+	}
+	confirmLabel := "Confirm action"
+	if m.busy {
+		confirmLabel = "Running…"
+	}
+	body := strings.Join([]string{
+		titleStyle.Render("CONFIRM MANAGEMENT ACTION"),
+		warningStyle.Render("This runs on the host immediately: " + m.selectedAction.label),
+		"",
+		panelStyle(w).Render(sectionStyle.Render(m.selectedAction.label) + "\n" + m.selectedAction.description),
+		"",
+		actionCard(w, "Y", confirmLabel, "Click to execute", true),
+		"",
+		actionCard(w, "N", "Cancel", "Return without making a change", false),
+	}, "\n")
+	footer := helpStyle.Render("[y/enter] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status)
+	return terminalFrame(body, footer, w, m.height)
+}
+
+func (m *monitorModel) processDetailView() string {
+	w := usableWidth(m.width)
+	if m.selectedProcess == nil {
+		if m.processReadOnly {
+			m.screen = screenMonitor
+			return m.monitorView()
+		}
+		m.screen = screenAdmin
+		return m.adminView()
+	}
+	pid := m.selectedProcess.PID
+	action := compactButton("Esc", "Back to monitor", false)
+	description := "Read-only process information. Sensitive arguments and the working directory are redacted."
+	help := "[r] reload  [esc] back"
+	if !m.processReadOnly {
+		action = compactButton("T", "Terminate process", true)
+		if !m.selectedProcessCanTerminate() {
+			action = dimStyle.Render("Termination unavailable until details are loaded, or for protected processes")
+		}
+		action += "  " + compactButton("Esc", "Back to process manager", false)
+		description = "Inspect the selected process before taking action."
+		help = "[t/click] terminate  [r] reload  [esc] back"
+	}
+	body := "Loading process details…"
+	if m.detailErr != nil {
+		body = warningStyle.Render("Unable to read process details: " + m.detailErr.Error())
+	} else if m.processDetail != nil {
+		d := m.processDetail
+		lines := []string{
+			sectionStyle.Render(fmt.Sprintf("%s  PID %d", d.Name, d.PID)),
+			fmt.Sprintf("%s %d    %s %d    %s %s    %s %d", dimStyle.Render("PPID"), d.PPID, dimStyle.Render("UID"), d.UID, dimStyle.Render("USER"), d.User, dimStyle.Render("THREADS"), d.Threads),
+			fmt.Sprintf("%s %s    %s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("STATE"), d.State, dimStyle.Render("CPU"), d.CPU, dimStyle.Render("MEM"), d.Memory, dimStyle.Render("RSS"), bytes(d.RSS)),
+			fmt.Sprintf("%s %s", dimStyle.Render("ELAPSED"), elapsed(d.Elapsed)),
+			"",
+			dimStyle.Render("COMMAND") + "  " + truncate(d.CommandLine, max(12, w-14)),
+			dimStyle.Render("EXEC") + "     " + truncate(d.Executable, max(12, w-14)),
+			dimStyle.Render("CWD") + "      " + truncate(d.CWD, max(12, w-14)),
+		}
+		if d.Progress != nil && d.Progress.Total > 0 {
+			p := d.Progress
+			progress := fmt.Sprintf("%s %d / %d · %d%%", dimStyle.Render("PROGRESS"), p.Done, p.Total, int(percent(p.Done, p.Total)))
+			if p.Label != "" {
+				progress += " · " + p.Label
+			}
+			lines = append(lines, "", progress)
+			if p.ObservedAt != nil {
+				age := time.Since(*p.ObservedAt).Round(time.Second)
+				if age < 0 {
+					age = 0
+				}
+				observed := fmt.Sprintf("%s · %s · %s ago", p.Source, p.ObservedAt.UTC().Format(time.RFC3339), age)
+				if p.Stale {
+					observed += " · stale"
+				}
+				lines = append(lines, truncate(observed, max(20, w-6)))
+			}
+			if p.Error != "" {
+				lines = append(lines, warningStyle.Render(truncate(p.Error, max(20, w-6))))
+			}
+		}
+		if d.Redacted {
+			lines = append([]string{warningStyle.Render("REDACTED  Authenticate for sensitive process details."), ""}, lines...)
+		}
+		body = strings.Join(lines, "\n")
+	}
+	pageBody := strings.Join([]string{
+		titleStyle.Render("PROCESS DETAILS") + "  " + accentStyle.Render(fmt.Sprintf("PID %d", pid)),
+		dimStyle.Render(description),
+		action,
+		panelStyle(w).Render(body),
+	}, "\n")
+	footer := helpStyle.Render(help) + "  " + dimStyle.Render(m.status)
+	return terminalFrame(pageBody, footer, w, m.height)
+}
+
+func (m *monitorModel) processTerminateConfirmView() string {
+	w := usableWidth(m.width)
+	if m.selectedProcess == nil {
+		m.screen = screenAdmin
+		return m.adminView()
+	}
+	p := m.selectedProcess
+	confirm := compactButton("Y", "Send SIGTERM", true)
+	if m.busy {
+		confirm = compactButton("…", "Sending SIGTERM", true)
+	}
+	body := strings.Join([]string{
+		titleStyle.Render("CONFIRM PROCESS TERMINATION"),
+		warningStyle.Render(fmt.Sprintf("PID %d (%s) will receive SIGTERM.", p.PID, p.Command)),
+		confirm + "  " + compactButton("N", "Cancel", false),
+		panelStyle(w).Render(strings.Join([]string{
+			sectionStyle.Render(fmt.Sprintf("PID %d", p.PID)),
+			fmt.Sprintf("%s %s", dimStyle.Render("USER"), p.User),
+			fmt.Sprintf("%s %.1f%%    %s %.1f%%    %s %s", dimStyle.Render("CPU"), p.CPU, dimStyle.Render("MEM"), p.Memory, dimStyle.Render("RSS"), bytes(p.RSS)),
+			dimStyle.Render("COMMAND") + "  " + truncate(p.Command, max(12, w-14)),
+		}, "\n")),
+	}, "\n")
+	footer := helpStyle.Render("[y/enter/click] confirm  [n/esc] cancel") + "  " + dimStyle.Render(m.status)
+	return terminalFrame(body, footer, w, m.height)
+}
+
+func actionCard(width int, key, title, detail string, dangerous bool) string {
+	style := clickableStyle(width)
+	label := accentStyle.Render("["+key+"] ") + title
+	if dangerous {
+		label = dangerStyle.Render("["+key+"] ") + title
+	}
+	return style.Render(label + "\n" + dimStyle.Render(detail))
+}
+
+func compactButton(key, label string, dangerous bool) string {
+	style := compactButtonStyle
+	keyStyle := accentStyle
+	if dangerous {
+		style = compactDangerButtonStyle
+		keyStyle = dangerStyle
+	}
+	return style.Render(keyStyle.Render("["+key+"]") + " " + label)
+}
+
+func compactButtonWidth(key, label string) int {
+	return lipgloss.Width(compactButton(key, label, false))
+}
+
+func centeredPanel(width int, content string) string {
+	return "\n" + panelStyle(min(68, width)).Render(content)
+}
+
+type adminAction struct {
+	ID          int
+	label       string
+	description string
+	operation   managementOperation
+	target      string
+	privileged  bool
+	dangerous   bool
+}
+
+type adminController struct {
+	password     string
+	passwordHash string
+	actions      []adminAction
+}
+
+func newAdminController() *adminController {
+	scope := strings.ToLower(strings.TrimSpace(os.Getenv("FLEETTY_INSTALL_SCOPE")))
+	return &adminController{
+		password:     os.Getenv("ADMIN_PASSWORD"),
+		passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
+		actions:      defaultAdminActions(runtime.GOOS, scope, os.Geteuid(), privilegedSocketPath()),
+	}
+}
+
+func defaultAdminActions(goos, scope string, effectiveUID int, privilegedSocket string) []adminAction {
+	if goos != "linux" {
+		return nil
+	}
+	userScope := scope == "user" || scope == "" && effectiveUID != 0
+	actions := []adminAction{
+		{
+			ID: 0, label: "Restart Fleetty", description: "Restart the Fleetty node service.",
+			operation: managementRestartService, target: "fleetty.service",
+			privileged: !userScope && effectiveUID != 0,
+		},
+	}
+	if (!userScope && effectiveUID == 0) || strings.TrimSpace(privilegedSocket) != "" {
+		actions = append(actions, adminAction{
+			ID: 1, label: "Reboot machine",
+			description: "Restart the entire host. Active workloads will be interrupted.",
+			operation:   managementRebootHost,
+			privileged:  effectiveUID != 0,
+			dangerous:   true,
+		})
+	}
+	return actions
+}
+
+func newRemoteAdminController() *adminController {
+	admin := newAdminController()
+	admin.password = "remote"
+	admin.passwordHash = ""
+	return admin
+}
+
+func (a *adminController) enabled() bool { return a.password != "" || a.passwordHash != "" }
+
+func (a *adminController) actionInfo() []managementActionInfo {
+	result := make([]managementActionInfo, 0, len(a.actions))
+	for _, action := range a.actions {
+		result = append(result, managementActionInfo{
+			ID: action.ID, Label: action.label,
+			Description: action.description, Dangerous: action.dangerous,
+		})
+	}
+	return result
+}
+
+func actionsFromInfo(infos []managementActionInfo) []adminAction {
+	result := make([]adminAction, 0, len(infos))
+	for _, info := range infos {
+		result = append(result, adminAction{
+			ID: info.ID, label: info.Label,
+			description: info.Description, dangerous: info.Dangerous,
+		})
+	}
+	return result
+}
+
+func (a *adminController) authenticate(password string) bool {
+	if a.passwordHash != "" {
+		return bcrypt.CompareHashAndPassword([]byte(a.passwordHash), []byte(password)) == nil
+	}
+	return a.password != "" && subtle.ConstantTimeCompare([]byte(a.password), []byte(password)) == 1
 }

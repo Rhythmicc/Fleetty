@@ -11,177 +11,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-func wideTestHub(width, height int) *hubModel {
-	nodes := make([]hubNodeConfig, 31)
-	for i := range nodes {
-		nodes[i] = hubNodeConfig{Name: fmt.Sprintf("node%02d", i), Group: "gpu"}
-	}
-	return &hubModel{
-		width: width, height: height,
-		config: hubConfig{
-			Name:   "Grid test",
-			Groups: []hubGroupConfig{{ID: "gpu", Title: "GPU COMPUTE", Style: hubGroupStyleGPU}},
-			Nodes:  nodes,
-		},
-	}
-}
-
-func TestHubAdaptiveCardsAndClickTargets(t *testing.T) {
-	for _, width := range []int{
-		36, 48, 60, 72, 73, 80, 92, 93, 116, 117, 139, 140, 160, 186, 187, 220,
-		233, 234, 238, 244, 300, 512, 1024,
-	} {
-		t.Run(fmt.Sprint(width), func(t *testing.T) {
-			m := wideTestHub(width, 24)
-			columns, cardWidth := m.columns(), m.cardWidth()
-			if width == 140 && columns != 3 {
-				t.Fatalf("columns = %d, want 3", columns)
-			}
-			if width == 220 && columns != 4 {
-				t.Fatalf("columns = %d, want 4", columns)
-			}
-			if gap := width - (columns*(cardWidth+1) - 1); gap < 0 || gap >= columns {
-				t.Fatalf("unused grid width = %d, want less than column count", gap)
-			}
-			if got := lipgloss.Width(m.renderNodeCard(0, cardWidth)); got != cardWidth {
-				t.Fatalf("rendered card width = %d, want %d", got, cardWidth)
-			}
-			view := m.hubView()
-			lines := strings.Split(ansi.Strip(view), "\n")
-			if got := strings.Count(lines[2], "╭"); got != columns {
-				t.Fatalf("visible first-row cards = %d, want %d", got, columns)
-			}
-			if lipgloss.Height(view) != 24 {
-				t.Fatal("view changed terminal height")
-			}
-			for _, line := range lines {
-				if lipgloss.Width(line) > width {
-					t.Fatalf("view overflows: %q", line)
-				}
-			}
-			// Check every card on every page, including the partial last row.
-			seen := make(map[int]bool)
-			for pageIndex, page := range m.pages() {
-				m.offset = pageIndex
-				y := 1
-				for _, row := range page.rows {
-					if len(row.headings) > 0 {
-						if _, ok := m.nodeAt(0, y); ok {
-							t.Fatal("heading is clickable")
-						}
-						y++
-						continue
-					}
-					for col, index := range row.nodes {
-						x := col * (cardWidth + 1)
-						for _, dx := range []int{0, cardWidth - 1} {
-							if got, ok := m.nodeAt(x+dx, y); !ok || got != index {
-								t.Fatalf("click (%d,%d) = %d,%v, want %d", x+dx, y, got, ok, index)
-							}
-						}
-						if _, ok := m.nodeAt(x+cardWidth, y); ok {
-							t.Fatal("gap is clickable")
-						}
-						seen[index] = true
-					}
-					if _, ok := m.nodeAt(len(row.nodes)*(cardWidth+1), y); ok {
-						t.Fatal("unused row space is clickable")
-					}
-					if _, ok := m.nodeAt(-1, y); ok {
-						t.Fatal("negative coordinate is clickable")
-					}
-					y += hubCardHeight
-				}
-			}
-			if len(seen) != 31 {
-				t.Fatalf("only %d nodes reachable", len(seen))
-			}
-		})
-	}
-}
-
-func TestHubWideGridNavigationAndResize(t *testing.T) {
-	m := wideTestHub(244, 24)
-	m.cursor = 4
-	m.moveCursorVertical(1)
-	if m.cursor != 9 {
-		t.Fatalf("down from column 5 selected %d, want 9", m.cursor)
-	}
-	m.moveCursorVertical(-1)
-	m.moveCursorHorizontal(1)
-	if m.cursor != 5 {
-		t.Fatalf("right across row selected %d, want 5", m.cursor)
-	}
-	m.moveCursorHorizontal(-1)
-	if m.cursor != 4 {
-		t.Fatalf("left across row selected %d, want 4", m.cursor)
-	}
-	m.cursor = 27
-	for _, width := range []int{97, 512, 36, 300} {
-		m.Update(tea.WindowSizeMsg{Width: width, Height: 24})
-		if m.cursor != 27 || !strings.Contains(m.hubView(), "node27") {
-			t.Fatalf("resize to %d lost selected node (cursor=%d, page=%d)", width, m.cursor, m.offset)
-		}
-	}
-}
-
-func TestHubOfflineReasonStaysShort(t *testing.T) {
-	state := hubNodeState{
-		Error:     "connect n3: dial tcp 192.168.31.180:23234: i/o timeout",
-		LastSeen:  time.Now().Add(-time.Minute),
-		NextRetry: time.Now().Add(26 * time.Second),
-	}
-	card := ansi.Strip(strings.Join(renderOfflineHubCard(state, 40), "\n"))
-	if !strings.Contains(card, "i/o timeout") || strings.Contains(card, "dial tcp") || strings.Contains(card, "…") {
-		t.Fatalf("offline reason was not shortened cleanly: %s", card)
-	}
-	if got := hubShortError("connection refused", 40); got != "connection refused" {
-		t.Fatalf("short reason = %q", got)
-	}
-}
-
-func TestHubCardsShowAddressWithoutOpenHint(t *testing.T) {
-	for _, profile := range []string{machineProfileGPU, machineProfileCPU, machineProfileNAS} {
-		for _, status := range []string{"waiting", "live", "offline", "warning"} {
-			t.Run(profile+"/"+status, func(t *testing.T) {
-				state := hubNodeState{}
-				if status == "live" || status == "warning" {
-					state.Snapshot.CollectedAt = time.Now()
-				}
-				if status == "offline" {
-					state.Error = "connection refused"
-				}
-				if status == "warning" {
-					state.Warning = "partial snapshot"
-				}
-				m := &hubModel{
-					config: hubConfig{Nodes: []hubNodeConfig{{Name: "node", Address: "192.168.31.141:23234", Profile: profile}}},
-					states: []hubNodeState{state},
-				}
-				card := m.renderNodeCard(0, hubPreferredCardWidth)
-				plain := ansi.Strip(card)
-				if !strings.Contains(plain, "IP 192.168.31.141") || strings.Contains(plain, "Enter or click") {
-					t.Fatalf("wrong address footer: %s", plain)
-				}
-				if lipgloss.Width(card) != hubPreferredCardWidth || lipgloss.Height(card) != hubCardHeight {
-					t.Fatalf("card dimensions changed: %s", plain)
-				}
-				if status == "warning" && !strings.Contains(plain, "WARN") {
-					t.Fatal("warning indicator lost")
-				}
-			})
-		}
-	}
-	for address, want := range map[string]string{
-		"": "IP --", "10.18.19.162": "IP 10.18.19.162",
-		"[2001:db8::1]:23234": "IP 2001:db8::1", "node.local:23234": "HOST node.local",
-	} {
-		if got := hubNodeAddressLabel(address); got != want {
-			t.Errorf("address %q = %q, want %q", address, got, want)
-		}
-	}
-}
-
 func compactTestHub(width, height int) *hubModel {
 	names := []string{"A100", "4090", "5090", "B580", "n1", "n2", "n3", "n4", "s80", "Z100", "9070XT", "7G100", "LG200", "intel9462", "NAS", "ssslab-login-1"}
 	m := &hubModel{width: width, height: height, config: hubConfig{Name: "SSSLab Machine Hub", Groups: productionHubGroups()}}
@@ -207,192 +36,265 @@ func compactTestHub(width, height int) *hubModel {
 	return m
 }
 
-func TestHubPackedGroupsAndPagination(t *testing.T) {
-	for _, width := range []int{36, 93, 160, 187, 238, 512, 1024} {
-		for _, height := range []int{10, 18, 26, 48} {
+func TestHubRackPaginationGeometryAndClickTargets(t *testing.T) {
+	for _, width := range []int{24, 36, 60, 80, 93, 94, 140, 220, 512} {
+		for _, height := range []int{8, 10, 18, 26, 48} {
 			m := compactTestHub(width, height)
-			seen := make(map[int]bool)
-			for pageIndex, page := range m.pages() {
-				if len(page.rows) == 0 || len(page.rows[0].headings) == 0 {
-					t.Fatal("page must start with group context")
+			left, right := hubRackWidths(width)
+			var seen []int
+			for page, rows := range m.pages() {
+				if len(rows) < 2 || rows[0].group < 0 || rows[0].node >= 0 {
+					t.Fatalf("page %d missing group context: %v", page, rows)
 				}
-				m.offset = pageIndex
-				y := 1
-				for _, row := range page.rows {
-					if len(row.headings) > 0 {
-						y++
-						continue
-					}
-					for column, index := range row.nodes {
-						if seen[index] {
-							t.Fatalf("node %d occurs twice", index)
-						}
-						seen[index] = true
-						if got, ok := m.nodeAt(column*(m.cardWidth()+1), y); !ok || got != index {
-							t.Fatalf("packed card hit test: %d %v, want %d", got, ok, index)
-						}
-					}
-					y += hubCardHeight
-				}
+				m.cursor = rows[1].node
 				view := m.hubView()
-				if lipgloss.Height(view) != height {
-					t.Fatalf("%dx%d has wrong height", width, height)
+				if lipgloss.Height(view) != height || lipgloss.Width(view) > width {
+					t.Fatalf("%dx%d overflow: %dx%d", width, height, lipgloss.Width(view), lipgloss.Height(view))
 				}
-				for _, line := range strings.Split(view, "\n") {
-					if lipgloss.Width(line) > width {
-						t.Fatalf("%dx%d overflow: %q", width, height, line)
-					}
+				plain := ansi.Strip(view)
+				startRow := m.hubRackStartRow()
+				firstRackLine := strings.TrimPrefix(strings.Split(plain, "\n")[startRow], "│ ")
+				if !strings.HasPrefix(firstRackLine, m.nodeGroups()[rows[0].group].title) {
+					t.Fatalf("rack should start immediately after its header rule:\n%s", plain)
 				}
-			}
-			if len(seen) != 16 {
-				t.Fatalf("%dx%d: only %d nodes reachable", width, height, len(seen))
-			}
-		}
-	}
-	// Cards pack left to right across groups. A label stays inside its card
-	// column, so two group names can share a row without running together.
-	for _, width := range []int{140, 187, 220, 238} {
-		m := compactTestHub(width, 48)
-		var rows [][]int
-		var plain string
-		for pageIndex, page := range m.pages() {
-			m.offset = pageIndex
-			plain += ansi.Strip(m.hubView()) + "\n"
-			rows = append(rows, m.pageNodeRows(page)...)
-		}
-		if err := hubRowsArePacked(rows, m.nodeGroups(), m.columns()); err != nil {
-			t.Fatalf("width %d: %v", width, err)
-		}
-		if strings.Count(plain, "GPU COMPUTE") != 1 || strings.Count(plain, "CPU COMPUTE") != 1 || strings.Count(plain, "CLUSTER SERVICES") != 1 {
-			t.Fatalf("width %d lost or repeated a group label:\n%s", width, plain)
-		}
-		for _, line := range strings.Split(plain, "\n") {
-			cpu := strings.Index(line, "CPU COMPUTE")
-			services := strings.Index(line, "CLUSTER SERVICES")
-			if cpu >= 0 && services >= 0 && services-cpu < len("CPU COMPUTE")+2 {
-				t.Fatalf("width %d jammed two group labels: %s", width, line)
-			}
-		}
-		if width == 140 && (m.columns() != 3 || len(m.pages()) != 1) {
-			t.Fatalf("140x48 columns=%d pages=%d", m.columns(), len(m.pages()))
-		}
-	}
-}
-
-func hubRowsArePacked(rows [][]int, groups []hubNodeGroup, columns int) error {
-	var got, want []int
-	for index, row := range rows {
-		if len(row) == 0 {
-			return fmt.Errorf("empty card row")
-		}
-		if index < len(rows)-1 && len(row) != columns {
-			return fmt.Errorf("row %d left a hole: %v", index, row)
-		}
-		got = append(got, row...)
-	}
-	for _, group := range groups {
-		want = append(want, group.nodes...)
-	}
-	if len(got) != len(want) {
-		return fmt.Errorf("packed %d nodes, want %d", len(got), len(want))
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			return fmt.Errorf("packed order %v, want %v", got, want)
-		}
-	}
-	return nil
-}
-
-func TestHubLiveCardShowsFullWidthBlockBarWithoutDuplicateLoad(t *testing.T) {
-	m := compactTestHub(238, 48)
-	card := ansi.Strip(m.renderNodeCard(2, hubPreferredCardWidth))
-	for _, want := range []string{"CPU", "MEM", "GPU×1", "100%", "IP"} {
-		if !strings.Contains(card, want) {
-			t.Fatalf("missing %s: %s", want, card)
-		}
-	}
-	if strings.Contains(card, "░") || strings.Contains(card, "▕") || strings.Contains(card, "cpu ") {
-		t.Fatalf("hub card kept the old meter: %s", card)
-	}
-	if hubCapacityStyle(96, diskTitleStyle).Render("96%") != dangerStyle.Render("96%") {
-		t.Fatal("real capacity risk lost its warning color")
-	}
-}
-
-func TestHubAdaptiveGridAvoidsWidthCliffs(t *testing.T) {
-	for width := 36; width <= 1200; width++ {
-		m := wideTestHub(width, 24)
-		columns, cardWidth := m.columns(), m.cardWidth()
-		if cardWidth < hubMinimumCardWidth {
-			t.Fatalf("%d: card too narrow: %d", width, cardWidth)
-		}
-		gap := width - (columns*cardWidth + columns - 1)
-		if gap < 0 || gap >= columns {
-			t.Fatalf("%d: excessive unused width: %d", width, gap)
-		}
-	}
-	m := compactTestHub(73, 24)
-	// Narrow cards must keep the temperature visible, even with many GPUs.
-	m.states[0].Snapshot.GPUs = make([]gpuInfo, 16)
-	m.states[0].Snapshot.GPUs[0] = gpuInfo{Utilization: 100, Temperature: 100}
-	card := ansi.Strip(m.renderNodeCard(0, m.cardWidth()))
-	if !strings.Contains(card, "GPU×16") || !strings.Contains(card, "100%") || !strings.Contains(card, "100°C") {
-		t.Fatalf("important GPU fields clipped at minimum width: %s", card)
-	}
-}
-
-func TestHubBlockBarReflectsBusyCPUAndGPUAcrossWidths(t *testing.T) {
-	for _, profile := range []string{machineProfileGPU, machineProfileCPU} {
-		for _, width := range []int{36, 39, 46, 52, 72} {
-			for _, cpu := range []float64{0, 50, 100} {
-				for _, gpu := range []float64{0, 50, 100} {
-					m := compactTestHub(238, 48)
-					m.config.Nodes[0].Profile = profile
-					m.states[0].Snapshot.CPUPercent = cpu
-					m.states[0].Snapshot.GPUs[0].Utilization = gpu
-					m.states[0].Snapshot.NetworkRX = 120 << 20
-					m.states[0].Snapshot.NetworkTX = 120 << 20
-					card := m.renderNodeCard(0, width)
-					if lipgloss.Width(card) != width || lipgloss.Height(card) != hubCardHeight {
-						t.Fatalf("%s width %d changed card geometry", profile, width)
-					}
-					plain := ansi.Strip(card)
-					if !strings.Contains(plain, "CPU") || !strings.Contains(plain, "MEM") {
-						t.Fatalf("%s cpu %.0f gpu %.0f: missing meters: %s", profile, cpu, gpu, plain)
-					}
-					if profile == machineProfileGPU && !strings.Contains(plain, "GPU") {
-						t.Fatalf("gpu profile lost the GPU meter: %s", plain)
-					}
-					if profile == machineProfileCPU && !strings.Contains(plain, "DSK") {
-						t.Fatalf("cpu profile lost the disk meter: %s", plain)
-					}
-					cpuLine := hubMeterLine(plain, "CPU")
-					if !meterMatches(cpuLine, cpu) {
-						t.Fatalf("%s cpu %.0f: meter %q", profile, cpu, cpuLine)
-					}
-					if profile == machineProfileGPU {
-						if gpuLine := hubMeterLine(plain, "GPU"); !meterMatches(gpuLine, gpu) {
-							t.Fatalf("gpu %.0f: meter %q", gpu, gpuLine)
+				if strings.Contains(plain, "NODE ·") != (right > 0) {
+					t.Fatalf("%dx%d wrong sidebar visibility: %s", width, height, plain)
+				}
+				for i, row := range rows {
+					y := startRow + i
+					for _, x := range []int{0, left - 1} {
+						got, ok := m.nodeAt(x, y)
+						if ok != (row.node >= 0) || ok && got != row.node {
+							t.Fatalf("%dx%d page %d click (%d,%d) = %d,%v want row %v", width, height, page, x, y, got, ok, row)
 						}
 					}
+					if _, ok := m.nodeAt(left, y); ok {
+						t.Fatal("sidebar or outside list is clickable")
+					}
+					if row.node >= 0 {
+						seen = append(seen, row.node)
+					}
 				}
+				if _, ok := m.nodeAt(0, height-1); ok {
+					t.Fatal("footer is clickable")
+				}
+			}
+			if fmt.Sprint(seen) != fmt.Sprint(m.nodeOrder()) {
+				t.Fatalf("%dx%d pagination lost, reordered or repeated nodes: %v", width, height, seen)
 			}
 		}
 	}
 }
 
-func hubMeterLine(card, label string) string {
-	for _, line := range strings.Split(card, "\n") {
-		if strings.Contains(line, label) && strings.Contains(line, "%") {
-			return line
+func TestHubRackKeepsSelectionVisibleOnResize(t *testing.T) {
+	m := compactTestHub(140, 48)
+	m.cursor = 13
+	for _, size := range []struct{ w, h int }{{140, 9}, {60, 10}, {100, 18}, {220, 48}} {
+		m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+		if m.cursor != 13 || !strings.Contains(ansi.Strip(m.hubView()), "intel9462") {
+			t.Fatalf("resize to %dx%d lost selection", size.w, size.h)
 		}
 	}
-	return ""
 }
 
-func meterMatches(line string, value float64) bool {
-	return strings.Contains(line, fmt.Sprintf("%3.0f%%", value))
+func TestHubRackOnlineOfflineAndChecking(t *testing.T) {
+	m := compactTestHub(140, 30)
+	m.states[1] = hubNodeState{Error: "connect 4090: dial tcp 192.168.31.142:23234: i/o timeout", LastSeen: time.Now().Add(-time.Minute), NextRetry: time.Now().Add(26 * time.Second)}
+	m.states[2] = hubNodeState{}
+	m.cursor = 1
+	view := ansi.Strip(m.hubView())
+	for _, want := range []string{"13/16 LIVE", "2 OFFLINE", "i/o timeout", "CHECKING", "Last seen", "Retry in", "192.168.31.142"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("missing %q in view:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "dial tcp") {
+		t.Fatal("shown raw offline address error")
+	}
+}
+
+func TestHubRackKeepsStaleReadingsAndNodeAccess(t *testing.T) {
+	m := compactTestHub(140, 30)
+	m.cursor = 2
+	state := &m.states[2]
+	state.Delay = "context deadline exceeded"
+	now := time.Now()
+	state.LastSeen = now.Add(-4 * time.Second)
+	for _, width := range []int{42, 52, 100} {
+		row := m.renderHubRackRow(2, width, now)
+		plain := ansi.Strip(row)
+		if !strings.Contains(plain, "! 5090") || !strings.Contains(plain, "STALE") ||
+			!strings.Contains(plain, "GPU×1") || !strings.Contains(plain, "100%") ||
+			strings.Contains(plain, "OFFLINE") || lipgloss.Width(row) > width {
+			t.Errorf("width %d: stale reading should still be visible: %q", width, plain)
+		}
+	}
+	if head := strings.SplitN(ansi.Strip(m.hubView()), "\n", 2)[0]; !strings.Contains(head, "14/16 LIVE") || !strings.Contains(head, "1 STALE") {
+		t.Errorf("header does not separate stale data from live: %q", head)
+	}
+	detail := ansi.Strip(strings.Join(m.renderHubRackDetail(2, 36), "\n"))
+	for _, want := range []string{"! STALE", "4s ago", state.Delay, "MEMORY"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("stale detail missing %q: %q", want, detail)
+		}
+	}
+	if command := m.openSelected(); command == nil || m.detail == nil {
+		t.Fatal("a stale node should still open its live dashboard")
+	}
+}
+
+func TestHubRackPrimaryMetricAndDetail(t *testing.T) {
+	m := compactTestHub(140, 30)
+	m.cursor = 2
+	width, detailWidth := hubRackWidths(m.width)
+	now := time.Now()
+	m.states[2].Spark = []hubSparkSample{{At: now, GPU: 100}}
+	row := ansi.Strip(m.renderHubRackRow(2, width, now))
+	for _, want := range []string{"5090", "ONLINE", "GPU×1", "100%", "·█", "0/64G", "3%", "6%", "48°C"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("missing %q in %q", want, row)
+		}
+	}
+	if strings.Count(row, "█") != 1 {
+		t.Fatalf("one 100%% sample should fill exactly one column: %q", row)
+	}
+	m.states[2].Snapshot.Processes = []processInfo{{User: "alice", CPU: 60, Command: "protein-fold"}}
+	if row := ansi.Strip(m.renderHubRackRow(2, width, now)); !strings.Contains(row, "alice") || strings.Contains(row, "protein-fold") {
+		t.Fatalf("rack row should show the active user, not the command: %s", row)
+	}
+	detail := ansi.Strip(strings.Join(m.renderHubRackDetail(2, detailWidth), "\n"))
+	for _, want := range []string{"192.168.31.143", "CPU", "MEMORY", "6%", "DEVICES", "0/64G", "48°C", "alice", "↓18M ↑1K"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("missing %q in %q", want, detail)
+		}
+	}
+	if strings.Contains(detail, "protein-fold") {
+		t.Fatal("preview should display the user, not command")
+	}
+	m.cursor = 13
+	m.states[13].Snapshot.GPUs = nil
+	cpu := ansi.Strip(m.renderHubRackRow(13, width, now))
+	if !strings.Contains(cpu, "CPU") || strings.Contains(cpu, "GPU×") || !strings.Contains(cpu, "DSK 10%") {
+		t.Fatalf("CPU row: %s", cpu)
+	}
+}
+
+func TestHubSlurmStateDoesNotImplyGPUAvailability(t *testing.T) {
+	now := time.Now()
+	m := compactTestHub(165, 40)
+	m.config.Nodes[1].SlurmCluster = "GPU"
+	m.config.Nodes[1].SlurmNode = "worker"
+	m.config.SlurmClusters = []slurmClusterConfig{{Name: "GPU"}}
+	m.states[1].Snapshot.GPUs[0].Utilization = 0
+	m.slurmStates = []slurmClusterState{{Snapshot: slurmSnapshot{
+		CollectedAt: now, Nodes: []slurmNode{{Name: "worker", State: "drng"}},
+	}}}
+	for _, width := range []int{36, 62, 114, 160} {
+		row := func() string { return ansi.Strip(m.renderHubRackRow(1, width, now)) }
+		m.slurmStates[0].Snapshot.Nodes[0].State = "drng"
+		got := row()
+		if !strings.Contains(got, "4090 DRAIN") || !strings.Contains(got, "GPU×1") || !strings.Contains(got, "0%") {
+			t.Fatalf("width %d: expected both scheduler exception and telemetry: %q", width, got)
+		}
+		if detail := ansi.Strip(strings.Join(m.renderHubRackDetail(1, 48), "\n")); !strings.Contains(detail, "DRNG") {
+			t.Fatalf("node metrics must show the full reported state: %q", detail)
+		}
+		m.slurmStates[0].Snapshot.Nodes[0].State = "idle"
+		if got := row(); strings.Contains(got, "IDLE") {
+			t.Fatalf("routine scheduler states should not clutter the rack: %q", got)
+		}
+		m.slurmStates[0].Snapshot.Nodes[0].State = "drng"
+		m.slurmStates[0].Warning = "timeout"
+		if got := row(); strings.Contains(got, "—") || strings.Contains(got, "DRAIN") {
+			t.Fatalf("stale scheduler state must not add rack placeholders or alerts: %q", got)
+		}
+		m.slurmStates[0].Warning = ""
+	}
+}
+
+func TestHubRackTemperature(t *testing.T) {
+	for _, tc := range []struct {
+		temp int
+		want string
+	}{
+		{0, "   —"},
+		{42, "42°C"},
+		{71, "71°C"},
+		{87, "87°C"},
+	} {
+		got := hubRackTemperature(tc.temp)
+		if ansi.Strip(got) != tc.want || lipgloss.Width(got) != 4 {
+			t.Errorf("%d: got %q, want 4-cell %q", tc.temp, ansi.Strip(got), tc.want)
+		}
+	}
+}
+
+func TestHubRackMeterIsProportional(t *testing.T) {
+	for _, width := range []int{5, 18, 40} {
+		for _, value := range []float64{0, 50, 100} {
+			_, styled := hubRackMeter(value, width)
+			meter := ansi.Strip(styled)
+			if lipgloss.Width(meter) != width || strings.Count(meter, "█") != int(value)*width/100 {
+				t.Fatalf("width %d, value %.0f: %q", width, value, meter)
+			}
+		}
+	}
+}
+
+func TestNASHubRackShowsNetworkAndKeepsStorageWarning(t *testing.T) {
+	m := compactTestHub(140, 30)
+	m.cursor = 14
+	s := &m.states[14].Snapshot
+	s.Filesystems = []filesystemInfo{{Mount: "/mnt/NAS01", Used: 75, Total: 100}, {Mount: "/mnt/NAS02", Used: 100, Total: 100}}
+	sample := hubSparkFrom(*s)
+	if sample.Net != s.NetworkRX+s.NetworkTX {
+		t.Fatalf("NAS history should include both network directions: %v", sample)
+	}
+	sample.At = time.Now()
+	m.states[14].Spark = []hubSparkSample{sample}
+	width, detailWidth := hubRackWidths(m.width)
+	row := m.renderHubRackRow(14, width, sample.At)
+	plain := ansi.Strip(row)
+	if !strings.HasPrefix(plain, "▸▲ NAS") || !strings.Contains(row, warningStyle.Render("▲")) ||
+		!strings.Contains(plain, "NET") || !strings.Contains(plain, "18M/s") ||
+		!strings.Contains(plain, "·█") || !strings.Contains(plain, "DISK!") || strings.Contains(plain, "HTTP") {
+		t.Fatalf("NAS row should show a yellow storage warning, network history and DISK!: %s", row)
+	}
+	detail := ansi.Strip(strings.Join(m.renderHubRackDetail(14, detailWidth), "\n"))
+	if !strings.Contains(detail, "Disk /mnt/NAS02 100% used") || !strings.Contains(detail, "▲ WARN") {
+		t.Fatalf("NAS panel lost the storage warning: %s", detail)
+	}
+}
+
+func TestHubRackUsersFromSlurmGPUAndCPU(t *testing.T) {
+	m := compactTestHub(160, 30)
+	node := &m.config.Nodes[0]
+	node.SlurmNode, node.SlurmCluster = "node2", "cluster"
+	m.config.SlurmClusters = []slurmClusterConfig{{Name: "cluster"}}
+	m.slurmStates = []slurmClusterState{{Snapshot: slurmSnapshot{Jobs: []slurmJob{
+		{State: "PENDING", NodeList: "node2", User: "pending-user"},
+		{State: "RUNNING", NodeList: "node[1-3]", User: "alice"},
+		{State: "RUNNING", NodeList: "node4", User: "other-node"},
+	}}}}
+	s := &m.states[0].Snapshot
+	s.GPUs[0].Workloads = []gpuWorkloadInfo{{User: "alice", Name: "train"}, {User: "bob", Name: "work"}}
+	s.Processes = []processInfo{{CPU: 30, User: "carol", Command: "build"}, {CPU: 1, User: "idle-user", Command: "sshd"}}
+	if got := m.hubOccupant(0, *s); got != "alice +2" {
+		t.Fatalf("active users = %q, want Slurm first and two distinct others", got)
+	}
+}
+
+func TestHubNetworkHistoryUsesVisibleRateRange(t *testing.T) {
+	at := time.Unix(100, 0)
+	samples := []hubSparkSample{
+		{At: at.Add(-4 * time.Second), Net: 1024 << 20}, // outside the window
+		{At: at.Add(-2 * time.Second), Net: 2 << 20},
+		{At: at, Net: 4 << 20},
+	}
+	chart := hubSparkline(samples, sparkNet, 4, time.Second, at)
+	if got := ansi.Strip(chart); got != "·▅·█" || !strings.Contains(chart, networkRXStyle.Render("█")) {
+		t.Fatalf("network history lost its scale or timing: %q", chart)
+	}
 }
 
 func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
@@ -429,13 +331,6 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	if !strings.Contains(hot, "38;2;255;138;128") {
 		t.Fatalf("crit sample stayed gray: %q", hot)
 	}
-	busy := appendSpark(nil, hubSparkSample{CPU: 10})
-	for i := 0; i < hubSparkCap+5; i++ {
-		busy = appendSpark(busy, hubSparkSample{CPU: float64(i)})
-	}
-	if len(busy) != hubSparkCap || busy[len(busy)-1].CPU != float64(hubSparkCap+4) {
-		t.Fatalf("spark ring = %d last %.0f", len(busy), busy[len(busy)-1].CPU)
-	}
 	if throughputBand(100<<20, 0) != loadNeutral || throughputBand(200<<20, 0) != loadGreen || throughputBand(600<<20, 0) != loadWarn || throughputBand(1<<30, 0) != loadCrit {
 		t.Fatal("absolute throughput bands drifted")
 	}
@@ -451,91 +346,46 @@ func TestHubSparklineIsFixedScaleAndOneColumnPerSample(t *testing.T) {
 	}
 }
 
-func TestHubFactsFollowTheirMetricRow(t *testing.T) {
-	rate := func(mib float64) uint64 { return uint64(mib * 1024 * 1024) }
-	spark := make([]hubSparkSample, 30)
-	for index := range spark {
-		spark[index] = hubSparkSample{CPU: 1, Mem: 40, Disk: 12, GPU: 2}
+func TestHubRackHistoryKeepsRefreshSlots(t *testing.T) {
+	interval := 2 * time.Second
+	at := time.Unix(100, 0)
+	first := appendSpark(nil, hubSparkSample{At: at, GPU: 0})
+	samples := appendSpark(first, hubSparkSample{At: at, GPU: 20})
+	samples = appendSpark(samples, hubSparkSample{At: at.Add(2 * interval), GPU: 100})
+	if first[0].GPU != 0 || len(samples) != 2 {
+		t.Fatalf("same-interval refresh grew or mutated shared history: first=%v new=%v", first, samples)
 	}
-	gpu := &hubModel{
-		width: 140, height: 48,
-		config: hubConfig{Nodes: []hubNodeConfig{{Name: "gpu-a01", Profile: machineProfileGPU}}},
-		states: []hubNodeState{{
-			Spark: spark,
-			Snapshot: monitorSnapshot{
-				CollectedAt: time.Now(), Profile: machineProfileGPU,
-				CPUPercent: 62, MemoryUsed: 71, MemoryTotal: 100,
-				NetworkRX: rate(12.3), NetworkTX: rate(1.2),
-				GPUs: []gpuInfo{
-					{Utilization: 91, MemoryUsed: 30 << 30, MemoryTotal: 48 << 30},
-					{Utilization: 47, MemoryUsed: 29 << 30, MemoryTotal: 48 << 30},
-				},
-				Processes: []processInfo{{User: "alice", Command: "protein-fold", CPU: 40}},
-			},
-		}},
+	if got := ansi.Strip(hubSparkline(samples, sparkGPU, 4, interval, at.Add(2*interval))); got != "·▂·█" {
+		t.Fatalf("wide chart lost missing interval or latest value: %q", got)
 	}
-	if gpu.columns() != 3 {
-		t.Fatalf("140-col hub uses %d columns, want 3", gpu.columns())
+	if got := ansi.Strip(hubSparkline(samples, sparkGPU, 2, interval, at.Add(2*interval))); got != "·█" {
+		t.Fatalf("narrow chart should show only the newest intervals: %q", got)
 	}
-	plain := ansi.Strip(gpu.renderNodeCard(0, gpu.cardWidth()))
-	cpuLine, memLine, gpuLine := hubMeterLine(plain, "CPU"), hubMeterLine(plain, "MEM"), hubMeterLine(plain, "GPU")
-	if !strings.Contains(cpuLine, "alice") || strings.Contains(cpuLine, "protein") || strings.Contains(cpuLine, "vram") {
-		t.Fatalf("CPU row: %s", cpuLine)
+	if got := ansi.Strip(hubSparkline(samples, sparkGPU, 4, interval, at.Add(3*interval))); got != "▂·█·" {
+		t.Fatalf("missing latest slot should appear at the right: %q", got)
 	}
-	if glyphs := sparkGlyphs(cpuLine); glyphs < 15 || glyphs > 18 {
-		t.Fatalf("CPU sparkline is %d columns:\n%s", glyphs, cpuLine)
+	for i := 3; i < hubSparkCap+5; i++ {
+		samples = appendSpark(samples, hubSparkSample{At: at.Add(time.Duration(i) * interval), CPU: float64(i)})
 	}
-	if !strings.Contains(memLine, "↓12M ↑1M") {
-		t.Fatalf("MEM row: %s", memLine)
-	}
-	if !strings.Contains(gpuLine, "vram 59/96G") {
-		t.Fatalf("GPU row: %s", gpuLine)
-	}
-	gpu.states[0].Snapshot.GPUs = nil
-	gpu.states[0].Snapshot.Processes = []processInfo{
-		{User: "alice", Command: "a", CPU: 40},
-		{User: "bob", Command: "b", CPU: 30},
-		{User: "carol", Command: "c", CPU: 20},
-		{User: "alice", Command: "d", CPU: 10},
-	}
-	if got := ansi.Strip(gpu.hubOccupant(0, gpu.states[0].Snapshot, 20)); got != "alice +2" {
-		t.Fatalf("users = %q", got)
-	}
-	if strings.Contains(plain, "up ") || strings.Contains(plain, "load ") {
-		t.Fatalf("hub card still shows uptime or load:\n%s", plain)
-	}
-
-	cpu := &hubModel{
-		width: 140, height: 48,
-		config: hubConfig{Nodes: []hubNodeConfig{{Name: "cpu-01", Profile: machineProfileCPU}}},
-		states: []hubNodeState{{
-			Spark: spark,
-			Snapshot: monitorSnapshot{
-				CollectedAt: time.Now(), Profile: machineProfileCPU,
-				CPUPercent: 18, MemoryUsed: 30, MemoryTotal: 100, DiskUsed: 20, DiskTotal: 100,
-				DiskRead: rate(40), DiskWrite: rate(8),
-				NetworkRX: rate(12.3), NetworkTX: rate(1.2),
-			},
-		}},
-	}
-	cpuPlain := ansi.Strip(cpu.renderNodeCard(0, cpu.cardWidth()))
-	dsk := hubMeterLine(cpuPlain, "DSK")
-	if !strings.Contains(dsk, "r40M w8M") {
-		t.Fatalf("DSK row: %s", dsk)
-	}
-	idle := ansi.Strip(hubFixedSparkline([]float64{0, 0, 0}, 8))
-	if idle != "·····▁▁▁" {
-		t.Fatalf("missing samples should stay faint and zeros should baseline: %q", idle)
+	if len(samples) != hubSparkCap || samples[len(samples)-1].CPU != float64(hubSparkCap+4) {
+		t.Fatalf("spark ring = %d last %.0f", len(samples), samples[len(samples)-1].CPU)
 	}
 }
 
-func sparkGlyphs(line string) int {
-	count := 0
-	for _, glyph := range line {
-		switch glyph {
-		case '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '·':
-			count++
+func TestHubRackWindowMatchesVisibleHistoryWidth(t *testing.T) {
+	for _, width := range []int{80, 100, 140, 220} {
+		m := compactTestHub(width, 30)
+		m.config.RefreshSeconds = 3
+		list, _ := hubRackWidths(width)
+		rackWidth := list
+		if m.hubFramedMode() {
+			rackWidth = max(20, list-4)
+		}
+		cells := hubRackLayout(rackWidth).history
+		window := fmt.Sprintf("HIST %s", time.Duration(cells)*m.config.refreshInterval())
+		view := ansi.Strip(m.hubView())
+		if !strings.Contains(view, window) || !strings.Contains(view, strings.Repeat("·", cells)) {
+			t.Fatalf("%d columns: want %q and %d chart cells:\n%s", width, window, cells, view)
 		}
 	}
-	return count
 }

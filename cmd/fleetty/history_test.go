@@ -123,7 +123,7 @@ func TestHourHistoryCmdRefreshesOncePerMinute(t *testing.T) {
 	}
 }
 
-func TestHubCardKeepsBlockLoadBarWhenHistoryExists(t *testing.T) {
+func TestHubRackKeepsCurrentGPUNumberBesideHistory(t *testing.T) {
 	model := &hubModel{
 		config: hubConfig{Nodes: []hubNodeConfig{{
 			Name: "gpu-1", Profile: machineProfileGPU, Description: "Training node",
@@ -134,29 +134,23 @@ func TestHubCardKeepsBlockLoadBarWhenHistoryExists(t *testing.T) {
 				CPUPercent: 10, MemoryTotal: 1, DiskTotal: 1,
 				GPUs: []gpuInfo{{Utilization: 10, MemoryTotal: 1}},
 			},
-			History: []historySample{
-				{Timestamp: time.Now().Add(-2 * time.Minute), CPUPercent: 10},
-				{Timestamp: time.Now().Add(-time.Minute), CPUPercent: 20},
-				{Timestamp: time.Now(), CPUPercent: 30},
-			},
 		}},
 		cursor: 0,
 		width:  80, height: 30,
 	}
-	model.states[0].Spark = []hubSparkSample{{CPU: 10}, {CPU: 20}, {CPU: 30}}
-	rendered := model.renderNodeCard(0, 40)
-	if strings.Contains(rendered, "cpu ") || strings.Contains(rendered, "━") {
-		t.Fatalf("hub card kept the separate meter:\n%s", rendered)
+	at := time.Now()
+	model.states[0].Spark = []hubSparkSample{{At: at.Add(-time.Second), GPU: 100}, {At: at, GPU: 10}}
+	rendered := model.renderHubRackRow(0, 60, at)
+	if !strings.Contains(rendered, "GPU×1") || !strings.Contains(rendered, "10%") || !strings.Contains(rendered, "█") {
+		t.Fatalf("rack row lost either the current percentage or history:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "10%") || !strings.Contains(rendered, "vram") || !strings.Contains(rendered, "↓") {
-		t.Fatalf("hub card lost sparkline row or facts:\n%s", rendered)
-	}
-	if strings.Contains(rendered, "up ") {
-		t.Fatalf("hub card still shows uptime:\n%s", rendered)
+	detail := strings.Join(model.renderHubRackDetail(0, 36), "\n")
+	if strings.Contains(detail, "HISTORY") || !strings.Contains(detail, "VRAM") || !strings.Contains(detail, "↓") {
+		t.Fatalf("detail should keep facts without repeating history:\n%s", detail)
 	}
 }
 
-func TestHubCPUProfileRendersDedicatedSectionAndCard(t *testing.T) {
+func TestHubCPUProfileRendersDedicatedSectionAndDetail(t *testing.T) {
 	model := &hubModel{
 		config: hubConfig{
 			Groups: []hubGroupConfig{{ID: "cpu", Title: "CPU COMPUTE", Style: hubGroupStyleCPU}},
@@ -176,14 +170,14 @@ func TestHubCPUProfileRendersDedicatedSectionAndCard(t *testing.T) {
 	if len(groups) != 1 || groups[0].style != hubGroupStyleCPU || groups[0].title != "CPU COMPUTE" {
 		t.Fatalf("CPU node groups = %#v", groups)
 	}
-	rendered := model.renderNodeCard(0, 48)
-	for _, expected := range []string{"CPU", "MEM", "DSK"} {
+	rendered := strings.Join(model.renderHubRackDetail(0, 36), "\n")
+	for _, expected := range []string{"CPU", "MEMORY", "DISK"} {
 		if !strings.Contains(rendered, expected) {
-			t.Fatalf("CPU Hub card missing %q:\n%s", expected, rendered)
+			t.Fatalf("CPU Hub detail missing %q:\n%s", expected, rendered)
 		}
 	}
 	if strings.Contains(rendered, "VRAM") {
-		t.Fatalf("CPU Hub card should not render GPU metrics:\n%s", rendered)
+		t.Fatalf("CPU Hub detail should not render GPU metrics:\n%s", rendered)
 	}
 }
 

@@ -42,16 +42,15 @@ func newTestHubModel(width, height int, cursor int) *hubModel {
 	return model
 }
 
-func TestHubUpFromCPUNodeFollowsVisualGrid(t *testing.T) {
-	// Three columns, packed: [A100 4090 5090] [n1 n2 n3] [n4 intel NAS].
+func TestHubUpFromCPUNodeFollowsRackOrder(t *testing.T) {
 	model := newTestHubModel(160, 24, 8)
 	model.moveCursorVertical(-1)
-	if model.cursor != 4 {
-		t.Fatalf("up from intel9462 selected index %d, want n2 (4)", model.cursor)
+	if model.cursor != 6 {
+		t.Fatalf("up from intel9462 selected index %d, want n4 (6)", model.cursor)
 	}
 	model.moveCursorVertical(-1)
-	if model.cursor != 1 {
-		t.Fatalf("up from n2 selected index %d, want 4090 (1)", model.cursor)
+	if model.cursor != 5 {
+		t.Fatalf("up from n4 selected index %d, want n3 (5)", model.cursor)
 	}
 }
 
@@ -72,29 +71,33 @@ func TestHubUsesDeclarativeGroupMembership(t *testing.T) {
 	}
 }
 
-func TestHubDownFromN3StaysInSameColumn(t *testing.T) {
-	model := newTestHubModel(160, 24, 5)
+func TestHubDownMovesAcrossSections(t *testing.T) {
+	model := newTestHubModel(160, 24, 6)
+	model.moveCursorVertical(1)
+	if model.cursor != 8 {
+		t.Fatalf("down from n4 selected index %d, want intel9462 (8)", model.cursor)
+	}
 	model.moveCursorVertical(1)
 	if model.cursor != 7 {
-		t.Fatalf("down from n3 selected index %d, want NAS (7)", model.cursor)
+		t.Fatalf("down from intel9462 selected index %d, want NAS (7)", model.cursor)
 	}
 }
 
-func TestHubHorizontalNavigationWrapsAcrossRows(t *testing.T) {
+func TestHubNavigationMovesOneNodeAtATime(t *testing.T) {
 	model := newTestHubModel(160, 24, 0)
-	model.moveCursorHorizontal(1)
+	model.moveCursorVertical(1)
 	if model.cursor != 1 {
 		t.Fatalf("right from A100 selected index %d, want 4090 (1)", model.cursor)
 	}
-	model.moveCursorHorizontal(1)
+	model.moveCursorVertical(1)
 	if model.cursor != 2 {
 		t.Fatalf("right from 4090 selected index %d, want 5090 (2)", model.cursor)
 	}
-	model.moveCursorHorizontal(1)
+	model.moveCursorVertical(1)
 	if model.cursor != 3 {
 		t.Fatalf("right from 5090 selected index %d, want n1 (3)", model.cursor)
 	}
-	model.moveCursorHorizontal(-1)
+	model.moveCursorVertical(-1)
 	if model.cursor != 2 {
 		t.Fatalf("left from n1 selected index %d, want 5090 (2)", model.cursor)
 	}

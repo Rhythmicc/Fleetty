@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -87,6 +88,57 @@ func TestThemeVisualHierarchy(t *testing.T) {
 	}
 }
 
+func TestLoadPaletteContrastAndDistinctBands(t *testing.T) {
+	for _, mode := range []colorMode{colorModeDark, colorModeLight} {
+		for _, indexed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/256=%t", mode, indexed), func(t *testing.T) {
+				convert := func(c color.Color) color.Color {
+					if indexed {
+						return ansi.Convert256(c)
+					}
+					return c
+				}
+				canvas, _ := viewColors(mode)
+				selection := selectedProcessStyle(mode).GetBackground()
+				seen := map[color.Color]float64{}
+				for _, load := range []float64{0, 10, 40, 70, 90, 100} {
+					_, style := gpuLoadStatus(load)
+					fg := convert(themeForeground(t, style, mode))
+					if previous, exists := seen[fg]; exists {
+						t.Errorf("GPU %.0f%% and %.0f%% lost their color distinction", previous, load)
+					}
+					seen[fg] = load
+					if got := themeContrast(fg, convert(canvas)); got < 4.5 {
+						t.Errorf("GPU %.0f%% text contrast %.2f < 4.5", load, got)
+					}
+				}
+				for _, load := range []float64{0, 5, 20, 68.5, 99} {
+					fg := convert(themeForeground(t, processLoadStyle(load, false), mode))
+					if got := themeContrast(fg, selection); got < 4.5 {
+						t.Errorf("selected process %.1f%% contrast %.2f < 4.5", load, got)
+					}
+				}
+				rx := convert(themeForeground(t, networkRXStyle, mode))
+				tx := convert(themeForeground(t, networkTXStyle, mode))
+				if rx == tx || themeContrast(rx, convert(canvas)) < 4.5 || themeContrast(tx, convert(canvas)) < 4.5 {
+					t.Error("RX and TX colors must stay distinct and readable")
+				}
+			})
+		}
+	}
+}
+
+func TestGPUOverviewUsesSameLoadBandForNumberAndBar(t *testing.T) {
+	gpu := gpuInfo{Name: "GPU", Utilization: 91}
+	style := gpuLoadStyle(gpu.Utilization)
+	for _, width := range []int{50, 68, 140} {
+		row := multiGPUOverviewRow(gpu, width)
+		if !strings.Contains(row, style.Render(" 91%")) || !strings.Contains(row, style.Render("████")) {
+			t.Errorf("width %d: GPU number and bar must both use the GPU load band: %q", width, row)
+		}
+	}
+}
+
 func TestLoadBarsUseIndependentTrackStyle(t *testing.T) {
 	for name, render := range map[string]func(float64, int) string{
 		"load": bar, "battery": batteryBar, "GPU": shortGPUBar,
@@ -112,13 +164,19 @@ func TestLoadBarsUseIndependentTrackStyle(t *testing.T) {
 
 func TestHubSelectionHasNonColorCueInBothThemes(t *testing.T) {
 	for _, width := range []int{36, 52, 80} {
-		for _, state := range []string{"live", "offline", "waiting"} {
+		for _, state := range []string{"live", "warning", "offline", "waiting"} {
 			m := compactTestHub(160, 40)
+			glyph, markerStyle := "●", okStyle
 			switch state {
+			case "warning":
+				m.states[0].Snapshot.DiskUsed = m.states[0].Snapshot.DiskTotal
+				glyph, markerStyle = "▲", warningStyle
 			case "offline":
 				m.states[0] = hubNodeState{Error: "connection refused"}
+				markerStyle = dangerStyle
 			case "waiting":
 				m.states[0] = hubNodeState{}
+				glyph, markerStyle = "○", dimStyle
 			}
 			for _, mode := range []colorMode{colorModeDark, colorModeLight} {
 				for _, selected := range []bool{true, false} {
@@ -126,19 +184,64 @@ func TestHubSelectionHasNonColorCueInBothThemes(t *testing.T) {
 					if selected {
 						m.cursor = 0
 					}
-					card := m.renderNodeCard(0, width)
+					row := m.renderHubRackRow(0, width, time.Time{})
+					marker := markerStyle.Render(glyph)
 					if mode == colorModeLight {
-						card = applyLightTheme(card)
+						row = applyLightTheme(row)
+						marker = applyLightTheme(marker)
 					}
-					if strings.Contains(ansi.Strip(card), "▸ A100") != selected {
-						t.Errorf("%s/%s: incorrect selection marker", mode, state)
+					prefix := " "
+					if selected {
+						prefix = "▸"
 					}
-					if lipgloss.Width(card) != width || lipgloss.Height(card) != hubCardHeight {
-						t.Errorf("%s/%s: selection changed card size at width %d", mode, state, width)
+					if !strings.HasPrefix(ansi.Strip(row), prefix+glyph+" A100") || strings.Count(row, marker) != 1 {
+						t.Errorf("%s/%s: missing or misplaced health/selection marker at width %d: %q", mode, state, width, ansi.Strip(row))
+					}
+					if lipgloss.Width(row) > width || lipgloss.Height(row) != 1 {
+						t.Errorf("%s/%s: selection changed row geometry at width %d", mode, state, width)
 					}
 				}
 			}
 		}
+	}
+}
+
+func TestHubRackNameShowsPeakTemperatureInBothThemes(t *testing.T) {
+	m := compactTestHub(160, 40)
+	for _, mode := range []colorMode{colorModeDark, colorModeLight} {
+		canvas, _ := viewColors(mode)
+		for _, tc := range []struct {
+			temp  int
+			style lipgloss.Style
+		}{
+			{0, valueStyle},
+			{59, valueStyle},
+			{60, okStyle},
+			{75, warningStyle},
+			{85, dangerStyle},
+		} {
+			m.states[0].Snapshot.GPUs = []gpuInfo{{Temperature: tc.temp}, {Temperature: 0}}
+			if got := themeContrast(themeForeground(t, tc.style, mode), canvas); got < 4.5 {
+				t.Errorf("%s/%d: node name contrast %.2f < 4.5", mode, tc.temp, got)
+			}
+			for _, cursor := range []int{0, 1} {
+				m.cursor = cursor
+				row := m.renderHubRackRow(0, 100, time.Time{})
+				want := tc.style.Underline(cursor == 0).Render("A100")
+				if mode == colorModeLight {
+					row, want = applyLightTheme(row), applyLightTheme(want)
+				}
+				if !strings.Contains(row, want) {
+					t.Errorf("%s/%d: temperature color missing with cursor %d", mode, tc.temp, cursor)
+				}
+			}
+		}
+	}
+	// An offline node may still have its last snapshot, but must not show stale heat.
+	m.states[0].Error = "i/o timeout"
+	row := m.renderHubRackRow(0, 100, time.Time{})
+	if !strings.Contains(row, valueStyle.Render("A100")) || !strings.Contains(row, dangerStyle.Render("●")) {
+		t.Error("offline row must show a neutral name and a red status marker")
 	}
 }
 

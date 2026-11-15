@@ -207,14 +207,15 @@ type gpuWorkloadExport struct {
 }
 
 type processExport struct {
-	PID     int     `json:"pid"`
-	User    string  `json:"user,omitempty"`
-	State   string  `json:"state,omitempty"`
-	Command string  `json:"command,omitempty"`
-	CPU     float64 `json:"cpu_percent"`
-	Memory  float64 `json:"memory_percent"`
-	RSS     uint64  `json:"rss_bytes"`
-	Elapsed uint64  `json:"elapsed_seconds"`
+	PID      int              `json:"pid"`
+	User     string           `json:"user,omitempty"`
+	State    string           `json:"state,omitempty"`
+	Command  string           `json:"command,omitempty"`
+	CPU      float64          `json:"cpu_percent"`
+	Memory   float64          `json:"memory_percent"`
+	RSS      uint64           `json:"rss_bytes"`
+	Elapsed  uint64           `json:"elapsed_seconds"`
+	Progress *processProgress `json:"progress,omitempty"`
 }
 
 func exportSnapshot(snapshot monitorSnapshot) snapshotExport {
@@ -302,7 +303,7 @@ func exportSnapshot(snapshot monitorSnapshot) snapshotExport {
 		export.Processes = append(export.Processes, processExport{
 			PID: process.PID, User: process.User, State: process.State,
 			Command: process.Command, CPU: process.CPU, Memory: process.Memory,
-			RSS: process.RSS, Elapsed: process.Elapsed,
+			RSS: process.RSS, Elapsed: process.Elapsed, Progress: process.Progress,
 		})
 	}
 	return export

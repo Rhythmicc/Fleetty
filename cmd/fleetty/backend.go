@@ -68,6 +68,9 @@ func (b *localMonitorBackend) ProcessDetail(pid int, password string) (processDe
 	detail, err := readProcessDetailWithSensitive(pid, includeSensitive)
 	if err == nil {
 		detail.CanTerminate = os.Geteuid() == 0 || detail.UID == os.Geteuid() || b.privileged != nil
+		if b.cache != nil {
+			detail.Progress = b.cache.progress.detail(pid, detail.UID, detail.State)
+		}
 	}
 	return detail, err
 }

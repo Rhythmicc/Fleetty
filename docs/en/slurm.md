@@ -49,15 +49,15 @@ A compute node joins the queue with `slurm_cluster` and `slurm_node`. `slurm_clu
 }
 ```
 
-With that link, a compute-node panel opened from the Hub shows a short list: jobs running on this node, the earliest eligible candidate whose partition includes this node, and a few jobs still waiting behind it. The standalone Slurm page uses the same colors:
+With that link, the compute-node panel lists jobs running on the node and pending jobs whose requests match the node. The queue uses these labels:
 
 | State | Meaning |
 | --- | --- |
 | `RUNNING` | Allocated to this node, or running somewhere in the cluster |
-| `NEXT` | The earliest eligible candidate in this partition's queue |
-| `QUEUED` | Other jobs still waiting |
+| `NEXT` | Still pending, but Slurm reports an estimated start |
+| `PENDING` | Waiting without an estimated start; the blocker explains why when known |
 
-`NEXT` is computed per cluster and partition. It is the first eligible pending job in the order `squeue` returned for that partition. A cluster can have several `NEXT` jobs at once. A job whose dependency is unmet, or that is held by a job-array concurrency limit, does not take the mark. It is a hint for reading the queue. Slurm still decides, using priority, resources, dependencies, and backfill.
+`NEXT` is a display label, not a Slurm state or a promise of scheduling order. It uses the estimated start from `squeue %S`, shown in the job details. The time can change as the scheduler reevaluates the queue.
 
 `WEIGHT` is the raw total priority from `squeue %Q`. A higher number usually means a higher scheduling priority. It is not a promise of a start time. Resources, dependencies, and backfill still change the real order.
 
@@ -65,7 +65,11 @@ With that link, a compute-node panel opened from the Hub shows a short list: job
 
 ## Queue display
 
-When the queue's content width is under 112 columns, the table becomes compact. WEIGHT and the separate QOS column are hidden. A colored dot to the left of the job id stands for QOS, then the columns are JOB ID, USER, S, ELAPSED, and NAME. USER stays on a narrow screen. A long user name is truncated. The state column is one letter: R for RUNNING, N for NEXT, Q for QUEUED, in the same colors as the full names. CLUSTER is added when there is room. The fleet-wide queue and a node's queue follow the same rule. The legend under the table names the QOS values in this queue. `normal` is cyan, `high` is yellow, `urgent` is red, `long` is purple, and `low` or a missing name is gray. Any other site-defined name gets a stable color, and two custom names may share one. Color distinguishes the name. It is not Slurm's priority order. Enter on the fleet-wide queue still opens a detail with the full QOS name and PRIORITY. A wide screen keeps the full columns and the full state names.
+In the Hub queue from 112 content columns, `TIME` shows elapsed time / wall-time limit reported by Slurm (for example, `4:20 / 30:00`). On narrower screens, the table only shows elapsed time. Expand the queue with `s` and press Enter on a job to see both values in full.
+
+Under 112 content columns, WEIGHT and the separate QOS column are hidden. A colored dot indicates QOS. The table keeps JOB ID, USER, abbreviated STATE (R for RUNNING, N for NEXT, P for PENDING), ELAPSED, and NAME. The Hub's final NODE column shows allocated nodes from 72 columns, or `—` before allocation. The legend names the QOS values; their colors are not the scheduling order. CLUSTER appears when multiple clusters are shown and there is room. Array suffixes are hidden unless multiple distinct rows in the cluster would otherwise share an ID. Enter in the full queue opens the exact ID, priority, and blocker reason.
+
+A running job with a fresh Fleetty socket report shows a progress bar beside its name (percentage only when space is tight). The reporting Linux node must run the updated Fleetty service, be mapped to the Slurm cluster and node in the Hub, and use numeric Slurm job cgroups. Fleetty verifies the allocation ID, owner UID, and allocated node. If several processes report for one job, the row shows a count rather than inventing a job-wide percentage. Job details show individual counters.
 
 The selected row is highlighted across its whole width, including the gaps between columns and the trailing space. The QOS dot and the state text keep their own colors when the row is selected.
 

@@ -6,13 +6,23 @@ English | [简体中文](../zh-CN/hub.md)
 
 The Hub is the same binary. It reads each node through that node's existing SSH port, 23234. After you connect, the first screen is a summary of every server. Sections, their order, and which node belongs where come from `groups` and `group` in `nodes.json`. Choose a server to open its full monitor and management screens. The Hub's name is the `name` in that file, so two labs can have two titles.
 
-A node card aims for 46 columns and picks the column count closest to that, then shares the width evenly. A card is never narrower than 36 columns. A wide terminal adds columns. The leftover space on a full row is smaller than the number of columns, so a fixed width cannot leave a hole almost the size of another card. Small neighboring groups share a row, and a group that fits stays on one row. A section title spans only that group's cards. Paging keeps the group context. A GPU card shows the peak load once, and keeps memory, temperature, the two traffic directions, and the address. GPU and CPU cards use a full-width block bar, colored from quiet to busy. On a GPU node the bar is the higher of CPU utilization and peak GPU utilization. On a CPU node it is host CPU utilization. Red means busy, not failed. Offline, overheating, and capacity risk have their own warnings. A narrow card shortens decimals and the space before a unit, and still prints B, KiB, MiB, and the rest.
+The rack lists one node per row. The current reading is peak GPU usage, host CPU usage, or combined receive and transmit rate (`NET`) for NAS nodes. The history beside it uses one cell per Hub refresh interval, newest on the right. When space permits, rows also show active users and a one-cell memory pie: `○` empty, `◔` lightly used, `◑` about half, `◕` about three quarters, `●` near full (87.5% or higher), and `—` when unavailable. Node name color follows the highest reported GPU temperature: default below 60°C or when unavailable, green from 60°C, amber from 75°C, and red from 85°C. The separate marker before the name still shows node health. Press `n` in a wide terminal to see exact memory usage, GPU temperature, and warning details. NAS details still show disk usage and service counts.
+
+The Links sidebar lists active pairs in order of combined traffic. Each row names both endpoints, with separate `A → B` and `B → A` rates in bytes per second. Pairs with two zero rates are hidden; pairs without rate data are counted separately. `≥` marks partial measurements. Press `n` to switch between Links and selected node metrics, and `PgUp` / `PgDn` to see more pairs. Link samples are shared across sessions. Only peers matching a unique IP in `nodes.json` are shown; aliases, loopback, shared addresses, and traffic on Fleetty monitoring ports are excluded.
+
+On narrow terminals, the rack takes the full width and `n` toggles the paged link list in that space. The Slurm queue stays below either view. While Links is open, each node follows the Hub refresh setting, shown in the header. A node with a request already in flight is not polled again until it responds or times out. Service nodes have reserved capacity, so slow compute nodes cannot block their samples.
+
+The header's `VIEWERS` count includes all open interactive Hub sessions, including yours. Two open terminals count as two sessions; background polling is not counted.
+
+`LIVE` means the last overview poll succeeded, not that the machine can take a new job. `STALE` is counted separately and keeps the last reading. The rack history shares a common time axis: dots are missing samples, not zero usage. Slurm exceptions such as `DRAIN` or `DOWN` appear beside the node name. The metrics sidebar shows the full reported state when available; stale scheduler data is flagged in the queue heading. GPU percentage is peak utilization, not how many GPUs are available for scheduling.
+
+The Hub keeps a Slurm summary below the rack and shows a few jobs when there is room. The `CLUSTER` column is only needed when viewing multiple clusters together. Press `s` to expand the same table in place. It takes more rows while keeping the selected rack node in view when space allows. Press `Enter` on a job for its details and blocker; `Esc` returns to the table, then collapses it without changing the selected node.
 
 The Hub does not need a system SSH account, and it does not store node management passwords on disk. When you enter management mode on a node, the password is sent to that node over the SSH session already in use and checked there. It lives only in the memory of this Hub session.
 
 The Hub connects to nodes with its own RPC key. That key cannot open the interactive monitor, and an operator's key cannot impersonate the Hub RPC identity.
 
-A node that is off, or unreachable for the moment, is shown as `OFFLINE` and does not stall the one-second refresh of the others. The Hub backs off probes to an offline node and brings it back when it answers. Select it and press `r` to try immediately.
+Each node is polled independently. A summary request can take up to three seconds without delaying the other nodes. After a failed request, the rack keeps the last successful reading and marks it `STALE`; three consecutive failures mark the node `OFFLINE`. The Hub backs off probes to an offline node and brings it back when it answers. Press `r` to try again immediately.
 
 Upgrade the monitor nodes to the same version before you deploy the Hub.
 
@@ -157,19 +167,18 @@ ssh -p 23235 monitor@hub-host
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` / `←` / `→` | Select a server |
-| `Enter` | Open the selected server |
-| `Esc` | From a server, back to the Hub home. From a Slurm job explanation, back to the queue. From the queue, back to the home. From the home, quit |
-| `s` | Open the Slurm queue |
-| `Tab` | Switch between servers and the Slurm page, when clusters are configured |
-| `←` / `→` | On the Slurm page, filter by cluster |
-| `a` | On the Slurm page, show every cluster |
+| `↑` / `↓` | Select a server, or select a job while the queue is expanded |
+| `Enter` | Open the selected server or explain the selected job |
+| `n` | Toggle between Links and the node metrics or rack |
+| `PgUp` / `PgDn` | Page through jobs while the queue is expanded, or through cluster links |
+| `Esc` | Return from a server or job details, collapse the expanded queue, or quit from the home |
+| `s` | Expand or collapse the Slurm queue on the home screen |
+| `←` / `→` | In the expanded queue, filter by cluster |
+| `a` | In the expanded queue, show every cluster |
 | `r` | Refresh servers and Slurm queues now |
 | `t` | Toggle this session's dark or light theme |
 | `q` | Same as `Esc`: leave a job explanation, then the queue, then quit from the home |
 
-The home page and the cards accept clicks.
-
-The bottom of each card is the address from the Hub config, without the port. A hostname is shown as HOST. The address is there while the node is online, offline, or still waiting for a sample. The card does not repeat a hint about how to open the detail.
+Click a row to select it. Click the selected row again or press Enter to open it. When there is room, the list shows the address from the Hub config without the port.
 
 [Configure a Slurm queue](slurm.md) · [Push updates from the Hub](deployment.md#updating-nodes-from-a-hub) · [What the node pages do](usage.md)

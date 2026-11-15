@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -16,6 +17,17 @@ import (
 	gopsnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
 )
+
+type connectionNetworkCounters struct {
+	cookie    uint64
+	rx, tx    uint64
+	uid       uint32
+	available bool
+}
+
+func connectionNetworkKey(protocol, local, remote string) string {
+	return protocol + "/" + local + "/" + remote
+}
 
 type networkConnectionInfo struct {
 	PID              int    `json:"pid"`
@@ -84,8 +96,27 @@ func (c *metricsCollector) collectLinuxNetworkConnections(snapshot *monitorSnaps
 		snapshot.NetworkProcessError = "Cannot read TCP/UDP connections: " + sanitizeTerminalText(err.Error())
 		return
 	}
-	names := make(map[int32]string)
-	owners := make(map[int32]string)
+	names := make(map[int32]string, len(c.cachedProcesses))
+	owners := make(map[int32]string, len(c.cachedProcesses))
+	for _, proc := range c.cachedProcesses {
+		if proc.PID <= 0 {
+			continue
+		}
+		pid := int32(proc.PID)
+		cmd := proc.Command
+		if field, _, found := strings.Cut(cmd, " "); found {
+			cmd = field
+		}
+		if slash := strings.LastIndexByte(cmd, '/'); slash >= 0 {
+			cmd = cmd[slash+1:]
+		}
+		if cmd != "" {
+			names[pid] = cmd
+		}
+		if proc.User != "" {
+			owners[pid] = proc.User
+		}
+	}
 	unattributed := false
 	for _, connection := range connections {
 		if _, ok := names[connection.Pid]; !ok {
@@ -160,7 +191,12 @@ func summarizeNetworkConnections(connections []gopsnet.ConnectionStat, names map
 		if a.PID != b.PID {
 			return a.PID < b.PID
 		}
-		return a.Protocol+"/"+a.Local+"/"+a.Remote+"/"+a.State < b.Protocol+"/"+b.Local+"/"+b.Remote+"/"+b.State
+		return cmp.Or(
+			strings.Compare(a.Protocol, b.Protocol),
+			strings.Compare(a.Local, b.Local),
+			strings.Compare(a.Remote, b.Remote),
+			strings.Compare(a.State, b.State),
+		) < 0
 	})
 	return result
 }
@@ -196,11 +232,44 @@ func networkConnectionColumns(width int) []connectionColumn {
 	return columns
 }
 
-func networkConnectionCells(width int, values map[string]string, connection *networkConnectionInfo) string {
+func networkConnectionCells(width int, pid, procName, owner, down, up string, connection *networkConnectionInfo) string {
 	header := connection == nil
-	var cells []string
-	for _, col := range networkConnectionColumns(width) {
-		cell := fixedCell(values[col.label], col.size, !header && (col.label == "DOWN" || col.label == "UP"))
+	columns := networkConnectionColumns(width)
+	cells := make([]string, 0, len(columns))
+	for _, col := range columns {
+		var value string
+		if header {
+			switch col.label {
+			case "DOWN":
+				value = networkRXStyle.Render("DOWN")
+			case "UP":
+				value = networkTXStyle.Render("UP")
+			default:
+				value = col.label
+			}
+		} else {
+			switch col.label {
+			case "PID":
+				value = pid
+			case "PROCESS":
+				value = procName
+			case "USER":
+				value = owner
+			case "TYPE":
+				value = connection.Protocol
+			case "STATE":
+				value = connection.State
+			case "LOCAL":
+				value = connection.Local
+			case "REMOTE":
+				value = connection.Remote
+			case "DOWN":
+				value = down
+			case "UP":
+				value = up
+			}
+		}
+		cell := fixedCell(value, col.size, !header && (col.label == "DOWN" || col.label == "UP"))
 		if !header {
 			switch col.label {
 			case "DOWN":
@@ -219,27 +288,31 @@ func networkConnectionCells(width int, values map[string]string, connection *net
 }
 
 func networkConnectionHeader(width int) string {
-	values := make(map[string]string)
-	for _, col := range networkConnectionColumns(width) {
-		values[col.label] = col.label
-	}
-	values["DOWN"] = networkRXStyle.Render("DOWN")
-	values["UP"] = networkTXStyle.Render("UP")
-	return dimStyle.Copy().Bold(true).Render(networkConnectionCells(width, values, nil))
+	return dimStyle.Copy().Bold(true).Render(networkConnectionCells(width, "", "", "", "", "", nil))
 }
 
 // These are absolute traffic levels, not link saturation or health alarms:
 // the speed of a socket's underlying link is not known here.
-func networkRateStyle(rate uint64, available bool, _ lipgloss.Style) lipgloss.Style {
-	// A fast socket is not a fault. Only a missing sample stays muted.
-	if !available || rate < 1024 {
+func networkRateStyle(rate uint64, available bool, direction lipgloss.Style) lipgloss.Style {
+	switch {
+	case !available || rate < 1024:
 		return dimStyle
+	case rate >= 10<<20:
+		return gpuHighStyle
+	case rate >= 1<<20:
+		return gpuBusyStyle
+	case rate >= 100<<10:
+		return gpuActiveStyle
+	default:
+		return direction
 	}
-	return valueStyle
 }
 
 func networkConnectionRateLegend(width int) string {
-	return ansi.Truncate(dimStyle.Render("↓ DOWN+UP · rates are per second"), width, "")
+	return ansi.Truncate(dimStyle.Render("↓ DOWN+UP · RATE/s ")+
+		dimStyle.Render("<1KiB ")+networkRXStyle.Render("1KiB+ ")+
+		gpuActiveStyle.Render("100KiB+ ")+gpuBusyStyle.Render("1MiB+ ")+
+		gpuHighStyle.Render("10MiB+"), width, "")
 }
 
 func renderNetworkConnectionRow(connection networkConnectionInfo, width int) string {
@@ -258,8 +331,7 @@ func renderNetworkConnectionRow(connection networkConnectionInfo, width int) str
 	if owner == "" {
 		owner = "--"
 	}
-	values := map[string]string{"PID": pid, "PROCESS": sanitizeTerminalText(connection.Name), "USER": sanitizeTerminalText(owner), "TYPE": connection.Protocol, "STATE": connection.State, "LOCAL": connection.Local, "REMOTE": connection.Remote, "DOWN": down, "UP": up}
-	return networkConnectionCells(width, values, &connection)
+	return networkConnectionCells(width, pid, sanitizeTerminalText(connection.Name), sanitizeTerminalText(owner), down, up, &connection)
 }
 
 func (m *monitorModel) networkApplicationCount() int {

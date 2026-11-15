@@ -32,7 +32,32 @@ const (
 	serviceCheckTimeout    = 700 * time.Millisecond
 )
 
-var errPM2DaemonNotFound = errors.New("running PM2 daemon not found")
+var (
+	errPM2DaemonNotFound = errors.New("running PM2 daemon not found")
+
+	serviceHTTPClient = &http.Client{
+		Timeout: serviceCheckTimeout,
+		Transport: &http.Transport{
+			Proxy:             nil,
+			MaxIdleConns:      16,
+			IdleConnTimeout:   30 * time.Second,
+			DisableKeepAlives: false,
+		},
+	}
+
+	dockerSocketDialer     = &net.Dialer{Timeout: serviceCheckTimeout}
+	dockerSocketHTTPClient = &http.Client{
+		Timeout: serviceCheckTimeout,
+		Transport: &http.Transport{
+			MaxIdleConns:      4,
+			IdleConnTimeout:   30 * time.Second,
+			DisableKeepAlives: false,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dockerSocketDialer.DialContext(ctx, "unix", "/var/run/docker.sock")
+			},
+		},
+	}
+)
 
 type machineConfig struct {
 	Name              string            `json:"name,omitempty"`
@@ -493,14 +518,7 @@ func checkHTTPServices(checks []httpCheckConfig) []serviceHealth {
 				results[index] = serviceHealth{Name: check.Name, Kind: "http", Detail: "invalid request"}
 				return
 			}
-			client := &http.Client{
-				Timeout: serviceCheckTimeout,
-				Transport: &http.Transport{
-					Proxy:             nil,
-					DisableKeepAlives: true,
-				},
-			}
-			response, err := client.Do(request)
+			response, err := serviceHTTPClient.Do(request)
 			latency := time.Since(started)
 			if err != nil {
 				results[index] = serviceHealth{Name: check.Name, Kind: "http", Detail: "unreachable", Latency: latency}
@@ -521,17 +539,7 @@ func checkHTTPServices(checks []httpCheckConfig) []serviceHealth {
 func readDockerContainers() ([]containerInfo, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCheckTimeout)
 	defer cancel()
-	dialer := &net.Dialer{Timeout: serviceCheckTimeout}
-	client := &http.Client{
-		Timeout: serviceCheckTimeout,
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialer.DialContext(ctx, "unix", "/var/run/docker.sock")
-			},
-		},
-	}
-	containers, err := readDockerContainersFrom(ctx, client, "http://docker")
+	containers, err := readDockerContainersFrom(ctx, dockerSocketHTTPClient, "http://docker")
 	if err != nil {
 		return nil, compactCommandError(err)
 	}
@@ -900,4 +908,506 @@ func parsePM2Processes(data []byte, now time.Time) ([]pm2ProcessInfo, error) {
 	}
 	sort.SliceStable(processes, func(i, j int) bool { return processes[i].ID < processes[j].ID })
 	return processes, nil
+}
+
+type metricsCollector struct {
+	config                     machineConfig
+	identity                   systemIdentity
+	previousCPU                map[string]cpuCounters
+	cpuFrequencyReader         cpuFrequencyReader
+	cpuFrequencyInitialized    bool
+	previousNet                netCounters
+	previousDiskRead           uint64
+	previousDiskWrite          uint64
+	haveDiskIO                 bool
+	lastDiskIOAt               time.Time
+	previousInterfaces         map[string]networkDeviceCounters
+	previousProcessNet         map[int]processNetworkCounters
+	previousConnectionNet      map[string]connectionNetworkCounters
+	haveCPU                    bool
+	haveNet                    bool
+	lastNetAt                  time.Time
+	lastProcessNetAt           time.Time
+	lastServiceAt              time.Time
+	cachedServices             []serviceHealth
+	cachedContainers           []containerInfo
+	cachedDockerError          string
+	cachedPM2Processes         []pm2ProcessInfo
+	cachedPM2Error             string
+	processRefreshInterval     time.Duration
+	gpuWorkloadRefreshInterval time.Duration
+	processNetRefreshInterval  time.Duration
+	lastProcessesAt            time.Time
+	cachedProcesses            []processInfo
+	lastGPUWorkloadsAt         time.Time
+	cachedGPUWorkloads         map[string][]gpuWorkloadInfo
+	cachedNetworkProcesses     []processNetworkInfo
+	cachedNetworkConnections   []networkConnectionInfo
+	cachedConnectionWarning    string
+	progress                   *progressReceiver
+}
+
+type netCounters struct{ rx, tx uint64 }
+
+func counterDelta(current, previous uint64) uint64 {
+	if current < previous {
+		return 0
+	}
+	return current - previous
+}
+
+func newMetricsCollector(config machineConfig) *metricsCollector {
+	processNetInterval := 5 * time.Second
+	if runtime.GOOS == "linux" {
+		processNetInterval = time.Second
+	}
+	return &metricsCollector{
+		config:                     config,
+		identity:                   readSystemIdentity(),
+		previousInterfaces:         make(map[string]networkDeviceCounters),
+		previousProcessNet:         make(map[int]processNetworkCounters),
+		processRefreshInterval:     3 * time.Second,
+		gpuWorkloadRefreshInterval: 5 * time.Second,
+		processNetRefreshInterval:  processNetInterval,
+	}
+}
+
+func (c *metricsCollector) needsWarmup() bool {
+	return !c.haveCPU || !c.haveNet
+}
+
+func (c *metricsCollector) collect() (monitorSnapshot, error) {
+	return c.collectWithProcesses(true)
+}
+
+func (c *metricsCollector) collectSummary() (monitorSnapshot, error) {
+	return c.collectWithProcesses(false)
+}
+
+func (c *metricsCollector) collectWithProcesses(includeProcesses bool) (monitorSnapshot, error) {
+	s := monitorSnapshot{CollectedAt: time.Now()}
+	s.OSName = c.identity.OSName
+	s.CPUModel = c.identity.CPUModel
+	s.CPUCores = c.identity.CPUCores
+	s.Uptime = uptimeSeconds(c.identity, s.CollectedAt)
+	var errs []string
+	if err := c.collectCPU(&s); err != nil {
+		errs = append(errs, "cpu: "+err.Error())
+	}
+	c.collectCPUFrequency(&s)
+	if used, total, err := readMemory(); err != nil {
+		errs = append(errs, "memory: "+err.Error())
+	} else {
+		s.MemoryUsed, s.MemoryTotal = used, total
+	}
+	if used, total, err := readDisk(); err != nil {
+		errs = append(errs, "disk: "+err.Error())
+	} else {
+		s.DiskUsed, s.DiskTotal = used, total
+	}
+	c.collectDiskIO(&s)
+	if err := c.collectNetwork(&s); err != nil {
+		errs = append(errs, "network: "+err.Error())
+	}
+	if includeProcesses {
+		c.collectProcessNetwork(&s)
+	}
+	s.LoadAverage = readLoadAverage()
+	if runtime.GOOS == "darwin" {
+		s.Battery, _ = readDarwinBattery()
+		s.GPUs, _ = readDarwinAppleGPU()
+	} else if c.config.Profile == machineProfileGPU {
+		s.GPUs, s.GPUError = c.collectGPUs()
+	}
+	c.collectMachineDetails(&s)
+	if includeProcesses {
+		c.collectProcesses(&s, &errs)
+		attachGPUWorkloadUsers(s.GPUs, s.Processes)
+	} else {
+		// The hub card names who is on the machine without shipping the
+		// full process table. Older hubs ignore a short Processes list.
+		var ignored []string
+		c.collectProcesses(&s, &ignored)
+		attachGPUWorkloadUsers(s.GPUs, s.Processes)
+		s.Processes = topProcesses(s.Processes, 3)
+	}
+	if len(errs) > 0 {
+		return s, errors.New(strings.Join(errs, "; "))
+	}
+	return s, nil
+}
+
+func readMemory() (used, total uint64, err error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinMemory()
+	}
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0, err
+	}
+	values := map[string]uint64{}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, _ := strconv.ParseUint(fields[1], 10, 64)
+		values[strings.TrimSuffix(fields[0], ":")] = value * 1024
+	}
+	total = values["MemTotal"]
+	available := values["MemAvailable"]
+	if total == 0 {
+		return 0, 0, errors.New("MemTotal missing")
+	}
+	return total - available, total, nil
+}
+
+func readDisk() (used, total uint64, err error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err != nil {
+		return 0, 0, err
+	}
+	total = stat.Blocks * uint64(stat.Bsize)
+	used = (stat.Blocks - stat.Bavail) * uint64(stat.Bsize)
+	return used, total, nil
+}
+
+func readLoadAverage() string {
+	if runtime.GOOS == "darwin" {
+		return readDarwinLoadAverage()
+	}
+	b, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return "load unavailable"
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) < 3 {
+		return "load unavailable"
+	}
+	return "load " + strings.Join(fields[:3], " · ")
+}
+
+// collectGPUs refreshes the per-GPU summary on every cycle and reuses the
+// heavier compute-apps attribution until gpuWorkloadRefreshInterval elapses.
+func (c *metricsCollector) collectGPUs() ([]gpuInfo, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics,power.draw,power.limit,driver_version", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return nil, gpuMetricsError(err, "/sys/bus/pci/devices")
+	}
+	gpus := parseGPUs(output)
+	c.attachGPUWorkloads(gpus)
+	return gpus, ""
+}
+
+func (c *metricsCollector) attachGPUWorkloads(gpus []gpuInfo) {
+	due := c.lastGPUWorkloadsAt.IsZero() ||
+		time.Since(c.lastGPUWorkloadsAt) >= c.gpuWorkloadRefreshInterval
+	if !due {
+		for index := range gpus {
+			gpus[index].Workloads = append(
+				[]gpuWorkloadInfo(nil), c.cachedGPUWorkloads[gpus[index].UUID]...,
+			)
+		}
+		return
+	}
+	workloadCtx, workloadCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer workloadCancel()
+	workloadOutput, workloadErr := exec.CommandContext(
+		workloadCtx, "nvidia-smi",
+		"--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+		"--format=csv,noheader,nounits",
+	).Output()
+	if workloadErr == nil {
+		workloads := parseGPUWorkloads(workloadOutput)
+		c.cachedGPUWorkloads = workloads
+	}
+	c.lastGPUWorkloadsAt = time.Now()
+	for index := range gpus {
+		gpus[index].Workloads = append(
+			[]gpuWorkloadInfo(nil), c.cachedGPUWorkloads[gpus[index].UUID]...,
+		)
+	}
+}
+
+// collectProcesses refreshes the full process table at a lower cadence than
+// the host metrics and reuses the last successful table in between.
+func (c *metricsCollector) collectProcesses(snapshot *monitorSnapshot, errs *[]string) {
+	if c.lastProcessesAt.IsZero() ||
+		time.Since(c.lastProcessesAt) >= c.processRefreshInterval {
+		processes, err := readProcesses()
+		if err != nil {
+			*errs = append(*errs, "processes: "+err.Error())
+		} else {
+			c.cachedProcesses = processes
+			c.lastProcessesAt = time.Now()
+		}
+	}
+	snapshot.Processes = append([]processInfo(nil), c.cachedProcesses...)
+	c.progress.attach(snapshot.Processes)
+}
+
+func parseGPUs(output []byte) []gpuInfo {
+	var gpus []gpuInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) != 9 && len(parts) != 11 {
+			continue
+		}
+		for index := range parts {
+			parts[index] = strings.TrimSpace(parts[index])
+		}
+		index, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+		nameIndex, utilIndex := 1, 2
+		uuid, driver := "", ""
+		if len(parts) == 11 {
+			uuid, nameIndex, utilIndex, driver = parts[1], 2, 3, parts[10]
+		}
+		memUsed, _ := strconv.ParseUint(parts[utilIndex+1], 10, 64)
+		memTotal, _ := strconv.ParseUint(parts[utilIndex+2], 10, 64)
+		util, _ := strconv.ParseFloat(parts[utilIndex], 64)
+		temp, _ := strconv.Atoi(parts[utilIndex+3])
+		clockMHz, _ := strconv.Atoi(parts[utilIndex+4])
+		power, _ := strconv.ParseFloat(parts[utilIndex+5], 64)
+		powerLimit, _ := strconv.ParseFloat(parts[utilIndex+6], 64)
+		gpus = append(gpus, gpuInfo{
+			Index: index, UUID: uuid, Name: parts[nameIndex], DriverVersion: driver,
+			Utilization: util,
+			MemoryUsed:  memUsed * 1024 * 1024, MemoryTotal: memTotal * 1024 * 1024,
+			Temperature: temp, ClockMHz: clockMHz, Power: power, PowerLimit: powerLimit,
+		})
+	}
+	return gpus
+}
+
+func parseGPUWorkloads(output []byte) map[string][]gpuWorkloadInfo {
+	workloads := make(map[string][]gpuWorkloadInfo)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) != 4 {
+			continue
+		}
+		uuid := strings.TrimSpace(parts[0])
+		pid, pidErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+		memoryMiB, memoryErr := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
+		if uuid == "" || pidErr != nil || pid <= 0 || memoryErr != nil {
+			continue
+		}
+		workloads[uuid] = append(workloads[uuid], gpuWorkloadInfo{
+			PID: pid, Name: sanitizeTerminalText(parts[2]), MemoryUsed: memoryMiB << 20,
+		})
+	}
+	return workloads
+}
+
+func topProcesses(processes []processInfo, limit int) []processInfo {
+	if limit <= 0 || len(processes) == 0 {
+		return nil
+	}
+	remaining := append([]processInfo(nil), processes...)
+	picked := make([]processInfo, 0, min(limit, len(remaining)))
+	for len(picked) < limit && len(remaining) > 0 {
+		best := 0
+		for index := 1; index < len(remaining); index++ {
+			if remaining[index].CPU > remaining[best].CPU {
+				best = index
+			}
+		}
+		if remaining[best].CPU <= 0 {
+			break
+		}
+		picked = append(picked, remaining[best])
+		remaining = append(remaining[:best], remaining[best+1:]...)
+	}
+	return picked
+}
+
+func attachGPUWorkloadUsers(gpus []gpuInfo, processes []processInfo) {
+	users := make(map[int]string, len(processes))
+	for _, process := range processes {
+		users[process.PID] = process.User
+	}
+	for gpuIndex := range gpus {
+		for workloadIndex := range gpus[gpuIndex].Workloads {
+			gpus[gpuIndex].Workloads[workloadIndex].User =
+				users[gpus[gpuIndex].Workloads[workloadIndex].PID]
+		}
+	}
+}
+
+func readProcesses() ([]processInfo, error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinProcesses()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,uid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,comm=", "--sort=-pcpu").Output()
+	if err != nil {
+		return nil, err
+	}
+	var processes []processInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 9 {
+			continue
+		}
+		pid, _ := strconv.Atoi(fields[0])
+		uid, uidErr := strconv.Atoi(fields[1])
+		if uidErr != nil {
+			uid = -1
+		}
+		cpu, _ := strconv.ParseFloat(fields[4], 64)
+		memory, _ := strconv.ParseFloat(fields[5], 64)
+		rss, _ := strconv.ParseUint(fields[6], 10, 64)
+		elapsed, _ := strconv.ParseUint(fields[7], 10, 64)
+		// ps can briefly appear as the busiest process because it is sampling
+		// the whole process table. It is collector noise, not a useful host task.
+		if fields[8] == "ps" {
+			continue
+		}
+		processes = append(processes, processInfo{
+			PID: pid, UID: uid, User: sanitizeTerminalText(fields[2]), State: sanitizeTerminalText(fields[3]), CPU: cpu, Memory: memory,
+			RSS: rss * 1024, Elapsed: elapsed, Command: sanitizeTerminalText(strings.Join(fields[8:], " ")),
+		})
+	}
+	sort.SliceStable(processes, func(i, j int) bool { return processes[i].CPU > processes[j].CPU })
+	return processes, nil
+}
+
+func readProcessDetailWithSensitive(pid int, includeSensitive bool) (processDetail, error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinProcessDetail(pid, includeSensitive)
+	}
+	if pid <= 0 {
+		return processDetail{}, errors.New("invalid PID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,uid=,user=,stat=,pcpu=,pmem=,rss=,etimes=,nlwp=,comm=").Output()
+	if err != nil {
+		return processDetail{}, fmt.Errorf("process no longer exists")
+	}
+	fields := strings.Fields(strings.TrimSpace(string(output)))
+	if len(fields) < 11 {
+		return processDetail{}, errors.New("incomplete process information")
+	}
+	detail := processDetail{}
+	detail.PID, _ = strconv.Atoi(fields[0])
+	detail.PPID, _ = strconv.Atoi(fields[1])
+	detail.UID, _ = strconv.Atoi(fields[2])
+	detail.User = sanitizeTerminalText(fields[3])
+	detail.State = sanitizeTerminalText(fields[4])
+	detail.CPU, _ = strconv.ParseFloat(fields[5], 64)
+	detail.Memory, _ = strconv.ParseFloat(fields[6], 64)
+	rss, _ := strconv.ParseUint(fields[7], 10, 64)
+	detail.RSS = rss * 1024
+	detail.Elapsed, _ = strconv.ParseUint(fields[8], 10, 64)
+	detail.Threads, _ = strconv.Atoi(fields[9])
+	detail.Name = sanitizeTerminalText(strings.Join(fields[10:], " "))
+
+	procRoot := fmt.Sprintf("/proc/%d", pid)
+	if commandLine, readErr := os.ReadFile(procRoot + "/cmdline"); readErr == nil {
+		detail.CommandLine = sanitizeTerminalText(strings.ReplaceAll(string(commandLine), "\x00", " "))
+	}
+	if detail.CommandLine == "" {
+		detail.CommandLine = detail.Name
+	}
+	if executable, readErr := os.Readlink(procRoot + "/exe"); readErr == nil {
+		detail.Executable = sanitizeTerminalText(executable)
+	} else {
+		detail.Executable = "unavailable"
+	}
+	if cwd, readErr := os.Readlink(procRoot + "/cwd"); readErr == nil {
+		detail.CWD = sanitizeTerminalText(cwd)
+	} else {
+		detail.CWD = "unavailable"
+	}
+	applyProcessDetailPolicy(&detail, includeSensitive)
+	detail.StartTimeTicks, _ = readProcessStartTicks(pid)
+	return detail, nil
+}
+
+func applyProcessDetailPolicy(detail *processDetail, includeSensitive bool) {
+	if detail == nil || includeSensitive {
+		return
+	}
+	detail.CommandLine = redactProcessCommandLine(detail.CommandLine)
+	detail.CWD = redactedProcessDetailMessage
+	detail.Redacted = true
+}
+
+func readProcessStartTicks(pid int) (uint64, error) {
+	if runtime.GOOS == "darwin" {
+		return readDarwinProcessStart(pid)
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	return parseProcessStartTicks(stat)
+}
+
+func parseProcessStartTicks(stat []byte) (uint64, error) {
+	// The command name in field 2 may contain spaces. Everything after its
+	// closing parenthesis starts at field 3; starttime is field 22.
+	closing := strings.LastIndexByte(string(stat), ')')
+	if closing < 0 || closing+2 >= len(stat) {
+		return 0, errors.New("invalid process stat")
+	}
+	fields := strings.Fields(string(stat[closing+2:]))
+	if len(fields) <= 19 {
+		return 0, errors.New("incomplete process stat")
+	}
+	return strconv.ParseUint(fields[19], 10, 64)
+}
+
+func compactCommandError(err error) string {
+	if errors.Is(err, exec.ErrNotFound) {
+		return "command not found"
+	}
+	return "not available"
+}
+
+func gpuMetricsError(commandErr error, pciRoot string) string {
+	// Missing tools or broken drivers do not prove that hardware is absent.
+	// Clear the error only when Linux's PCI inventory confirms there is no
+	// NVIDIA display/3D controller. Unreadable inventories retain the warning.
+	present, err := hasNVIDIAGPU(pciRoot)
+	if err == nil && !present {
+		return ""
+	}
+	return compactCommandError(commandErr)
+}
+
+func hasNVIDIAGPU(pciRoot string) (bool, error) {
+	devices, err := os.ReadDir(pciRoot)
+	if err != nil {
+		return false, err
+	}
+	for _, device := range devices {
+		class, err := readPCIAttribute(filepath.Join(pciRoot, device.Name(), "class"), 24)
+		if err != nil {
+			return false, err
+		}
+		if class>>16 != 0x03 {
+			continue
+		}
+		vendor, err := readPCIAttribute(filepath.Join(pciRoot, device.Name(), "vendor"), 16)
+		if err != nil {
+			return false, err
+		}
+		if vendor == 0x10de {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func readPCIAttribute(path string, bits int) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(strings.TrimSpace(string(data)), 0, bits)
 }
