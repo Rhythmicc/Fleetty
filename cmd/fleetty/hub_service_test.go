@@ -7,7 +7,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/x/ansi"
@@ -34,29 +33,17 @@ func TestHubModelReadsSharedServiceSnapshot(t *testing.T) {
 	}
 }
 
-func TestHubLoginDefaultsToLinks(t *testing.T) {
+func TestHubLoginDefaultsToNodeInspector(t *testing.T) {
 	service := newHubService(hubConfig{
 		Nodes: []hubNodeConfig{{Name: "worker"}},
 	})
 	model := newHubModel(service, 120, 30)
 	model.Init()
-	if len(service.linksWake) != 1 || !strings.Contains(ansi.Strip(model.hubView()), "CLUSTER LINKS") {
-		t.Fatal("wide login should show links and request a sample immediately")
-	}
-	model.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
-	if !strings.Contains(ansi.Strip(model.hubView()), "NODE ·") {
-		t.Fatal("n should switch back to the selected node's metrics")
-	}
-	narrow := newHubModel(service, 62, 30)
-	if strings.Contains(ansi.Strip(narrow.hubView()), "CLUSTER LINKS") {
-		t.Fatal("narrow login should keep the node list")
-	}
-	narrow.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	if !strings.Contains(ansi.Strip(narrow.hubView()), "CLUSTER LINKS") {
-		t.Fatal("widening a fresh session should reveal its default links panel")
+	if !strings.Contains(ansi.Strip(model.hubView()), "NODE · worker") {
+		t.Fatal("wide login should show the selected node's inspector immediately")
 	}
 	queueOnly := newHubModel(newHubService(hubConfig{SlurmClusters: []slurmClusterConfig{{Name: "CPU"}}}), 120, 30)
-	if !queueOnly.queueExpanded || queueOnly.linksView {
+	if !queueOnly.queueExpanded {
 		t.Fatal("a queue-only Hub should still open the queue")
 	}
 }

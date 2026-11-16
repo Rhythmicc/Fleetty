@@ -6,11 +6,7 @@ English | [简体中文](../zh-CN/hub.md)
 
 The Hub is the same binary. It reads each node through that node's existing SSH port, 23234. After you connect, the first screen is a summary of every server. Sections, their order, and which node belongs where come from `groups` and `group` in `nodes.json`. Choose a server to open its full monitor and management screens. The Hub's name is the `name` in that file, so two labs can have two titles.
 
-The rack lists one node per row. The current reading is peak GPU usage, host CPU usage, or combined receive and transmit rate (`NET`) for NAS nodes. The history beside it uses one cell per Hub refresh interval, newest on the right. When space permits, rows also show active users and a one-cell memory pie: `○` empty, `◔` lightly used, `◑` about half, `◕` about three quarters, `●` near full (87.5% or higher), and `—` when unavailable. Node name color follows the highest reported GPU temperature: default below 60°C or when unavailable, green from 60°C, amber from 75°C, and red from 85°C. The separate marker before the name still shows node health. Press `n` in a wide terminal to see exact memory usage, GPU temperature, and warning details. NAS details still show disk usage and service counts.
-
-The Links sidebar lists active pairs in order of combined traffic. Each row names both endpoints, with separate `A → B` and `B → A` rates in bytes per second. Pairs with two zero rates are hidden; pairs without rate data are counted separately. `≥` marks partial measurements. Press `n` to switch between Links and selected node metrics, and `PgUp` / `PgDn` to see more pairs. Link samples are shared across sessions. Only peers matching a unique IP in `nodes.json` are shown; aliases, loopback, shared addresses, and traffic on Fleetty monitoring ports are excluded.
-
-On narrow terminals, the rack takes the full width and `n` toggles the paged link list in that space. The Slurm queue stays below either view. While Links is open, each node follows the Hub refresh setting, shown in the header. A node with a request already in flight is not polled again until it responds or times out. Service nodes have reserved capacity, so slow compute nodes cannot block their samples.
+The rack lists one node per row. The current reading is peak GPU usage, host CPU usage, or combined receive and transmit rate (`NET`) for NAS nodes. The history beside it uses one cell per Hub refresh interval, newest on the right. When space permits, rows also show active users and a one-cell memory pie: `○` empty, `◔` lightly used, `◑` about half, `◕` about three quarters, `●` near full (87.5% or higher), and `—` when unavailable. Node name color follows the highest reported GPU temperature: default below 60°C or when unavailable, green from 60°C, amber from 75°C, and red from 85°C. The separate marker before the name still shows node health. In a wide terminal, the right sidebar displays exact memory usage, GPU temperature, and warning details for the selected node. NAS details still show disk usage and service counts.
 
 The header's `VIEWERS` count includes all open interactive Hub sessions, including yours. Two open terminals count as two sessions; background polling is not counted.
 
@@ -169,8 +165,7 @@ ssh -p 23235 monitor@hub-host
 | --- | --- |
 | `↑` / `↓` | Select a server, or select a job while the queue is expanded |
 | `Enter` | Open the selected server or explain the selected job |
-| `n` | Toggle between Links and the node metrics or rack |
-| `PgUp` / `PgDn` | Page through jobs while the queue is expanded, or through cluster links |
+| `PgUp` / `PgDn` | Page through servers or through jobs while the queue is expanded |
 | `Esc` | Return from a server or job details, collapse the expanded queue, or quit from the home |
 | `s` | Expand or collapse the Slurm queue on the home screen |
 | `←` / `→` | In the expanded queue, filter by cluster |

@@ -39,7 +39,7 @@ func dispatchDemo(args []string, stdout, stderr io.Writer) (bool, error) {
 func runDemoCommand(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("demo", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	screen := flags.String("screen", "hub", "hub, hub-links, hub-queue, gpu, gpu-compute, or nas")
+	screen := flags.String("screen", "hub", "hub, hub-queue, gpu, gpu-compute, or nas")
 	theme := flags.String("theme", "dark", "dark or light")
 	width := flags.Int("width", 0, "terminal columns (0 uses the screen default)")
 	height := flags.Int("height", 0, "terminal rows (0 uses the screen default)")
@@ -82,8 +82,6 @@ func renderDemoFrame(screen, theme string, width, height int) (string, error) {
 	switch screen {
 	case "hub":
 		return demoHub(mode, width, height).View().Content, nil
-	case "hub-links":
-		return demoHubWithLinks(mode, width, height).View().Content, nil
 	case "hub-queue":
 		m := demoHubSession(mode, width, height)
 		m.queueExpanded = true
@@ -101,46 +99,19 @@ func renderDemoFrame(screen, theme string, width, height int) (string, error) {
 	case "nas":
 		return demoNASNode(mode, width, height).View().Content, nil
 	default:
-		return "", fmt.Errorf("unknown demo screen %q (hub, hub-links, hub-queue, gpu, gpu-compute, gpu-network, gpu-storage, or nas)", screen)
+		return "", fmt.Errorf("unknown demo screen %q (hub, hub-queue, gpu, gpu-compute, gpu-network, gpu-storage, or nas)", screen)
 	}
 }
 
-func demoHubWithLinks(mode colorMode, width, height int) *hubModel {
+func demoHubSession(mode colorMode, width, height int) *hubModel {
 	m := demoHub(mode, width, height)
-	m.linksView, m.linksExplicit = true, true
+	m.config.Name = "Fleetty Hub · DEMO"
 	m.config.Nodes[14].Name = "NAS"
 	m.config.Nodes[15].Name = "login-01"
-	// Give the preview both a stale measurement and a distinct Slurm state.
 	m.states[3].Delay = "context deadline exceeded"
 	m.states[3].LastSeen = time.Now().Add(-4 * time.Second)
 	m.states[3].Spark = m.states[3].Spark[:len(m.states[3].Spark)-4]
 	m.updateOnlineStatus()
-	m.links = mergeHubLinks([]hubLinkObservation{
-		{node: 14, available: true, peers: []hubPeerLink{
-			{node: 0, sockets: 3, sampled: 3, rx: mib(82), tx: mib(6)},
-			{node: 5, sockets: 1, sampled: 1, rx: mib(1), tx: mib(28)},
-			{node: 1, sockets: 1, sampled: 1},
-			{node: 2, sockets: 1, sampled: 1, rx: 470},
-			{node: 4, sockets: 1, sampled: 1, tx: 32000},
-			{node: 15, sockets: 1, sampled: 1, rx: mib(13), tx: mib(4)},
-			{node: 13, sockets: 1},
-		}},
-		{node: 15, available: true, peers: []hubPeerLink{
-			{node: 0, sockets: 2, sampled: 2, rx: mib(11), tx: mib(2)},
-			{node: 1, sockets: 2, sampled: 2, rx: mib(7), tx: mib(18)},
-			{node: 2, sockets: 2, sampled: 1, rx: mib(5), tx: mib(2)},
-			{node: 5, sockets: 1, sampled: 1},
-		}},
-	})
-	m.links.eligible, m.links.sampled, m.links.sampledAt = 14, 12, time.Now()
-	return m
-}
-
-func demoHubSession(mode colorMode, width, height int) *hubModel {
-	m := demoHubWithLinks(mode, width, height)
-	m.config.Name = "Fleetty Hub · DEMO"
-	m.config.Nodes[14].Name = "NAS"
-	m.config.Nodes[15].Name = "login-01"
 	for i := range 36 {
 		m.slurmStates[i%2].Snapshot.Jobs = append(m.slurmStates[i%2].Snapshot.Jobs,
 			slurmJob{ID: strconv.Itoa(18600 + i), User: []string{"sam", "lee", "kai"}[i%3],
@@ -222,7 +193,7 @@ func serveDemoSSH(port int, screen string, mode colorMode, stderr io.Writer) err
 		return errors.New("demo port must be between 1 and 65535")
 	}
 	switch screen {
-	case "hub", "hub-links", "hub-queue", "gpu", "gpu-compute", "gpu-network", "gpu-storage", "storage", "nas":
+	case "hub", "hub-queue", "gpu", "gpu-compute", "gpu-network", "gpu-storage", "storage", "nas":
 	default:
 		return fmt.Errorf("unknown demo screen %q", screen)
 	}
@@ -361,24 +332,6 @@ func demoHub(mode colorMode, width, height int) *hubModel {
 	model.states[5].Snapshot.SlurmProgress = []slurmProcessProgress{
 		{JobID: 18455, UID: 1001, PID: 5104, Value: processProgress{Done: 7, Total: 32, Label: "shard 7/32"}},
 	}
-	model.links = mergeHubLinks([]hubLinkObservation{
-		{node: 14, available: true, peers: []hubPeerLink{
-			{node: 0, sockets: 3, sampled: 3, rx: mib(82), tx: mib(6)},
-			{node: 5, sockets: 1, sampled: 1, rx: mib(1), tx: mib(28)},
-			{node: 1, sockets: 1, sampled: 1},
-			{node: 2, sockets: 1, sampled: 1, rx: 470},
-			{node: 4, sockets: 1, sampled: 1, tx: 32000},
-			{node: 15, sockets: 1, sampled: 1, rx: mib(13), tx: mib(4)},
-			{node: 13, sockets: 1},
-		}},
-		{node: 15, available: true, peers: []hubPeerLink{
-			{node: 0, sockets: 2, sampled: 2, rx: mib(11), tx: mib(2)},
-			{node: 1, sockets: 2, sampled: 2, rx: mib(7), tx: mib(18)},
-			{node: 2, sockets: 2, sampled: 1, rx: mib(5), tx: mib(2)},
-			{node: 5, sockets: 1, sampled: 1},
-		}},
-	})
-	model.links.eligible, model.links.sampled, model.links.sampledAt = 14, 12, now
 	model.updateOnlineStatus()
 	return model
 }

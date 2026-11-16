@@ -85,12 +85,6 @@ func (m *hubModel) hubRackBudget() int {
 	if m.hubFramedMode() {
 		// Need 2 border rows + 1 column header + group headings + node rows.
 		natural := 3 + len(m.nodeGroups()) + len(m.config.Nodes)
-		if m.showHubLinks() && len(m.links.edges) > 0 {
-			linksNeeded := 4 + len(m.links.edges)
-			if linksNeeded > natural {
-				return min(body-3, linksNeeded)
-			}
-		}
 		minQueue := 7
 		if body < 18 {
 			minQueue = 4
@@ -99,9 +93,6 @@ func (m *hubModel) hubRackBudget() int {
 			return natural
 		}
 		return max(6, body-minQueue)
-	}
-	if m.showHubLinks() && m.width >= 48 && body >= 25 {
-		return body - 4
 	}
 	return max(0, body-1)
 }
@@ -164,9 +155,6 @@ func hubRackWidths(width int) (list, detail int) {
 }
 
 func (m *hubModel) nodeAt(x, y int) (int, bool) {
-	if m.hubCompactLinks() {
-		return 0, false
-	}
 	width := max(1, m.width)
 	left, _ := hubRackWidths(width)
 	start := m.hubRackStartRow()
@@ -196,16 +184,12 @@ func (m *hubModel) hubView() string {
 	var bodySections []string
 
 	if rackOuterHeight > 0 {
-		if m.hubCompactLinks() {
-			bodySections = append(bodySections, m.renderHubLinksPanel(listWidth, rackOuterHeight))
+		leftPanel := m.renderHubRackPanel(listWidth, rackOuterHeight, columns)
+		if detailWidth > 0 && m.cursor >= 0 && m.cursor < len(m.config.Nodes) {
+			rightPanel := m.renderHubInspectorPanel(detailWidth, rackOuterHeight)
+			bodySections = append(bodySections, lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
 		} else {
-			leftPanel := m.renderHubRackPanel(listWidth, rackOuterHeight, columns)
-			if detailWidth > 0 && m.cursor >= 0 && m.cursor < len(m.config.Nodes) {
-				rightPanel := m.renderHubSidebarPanels(detailWidth, rackOuterHeight)
-				bodySections = append(bodySections, lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
-			} else {
-				bodySections = append(bodySections, leftPanel)
-			}
+			bodySections = append(bodySections, leftPanel)
 		}
 	}
 
@@ -368,11 +352,6 @@ func (m *hubModel) renderHubTopHeader(width int, historyCells int) string {
 			modePills = append(modePills, accentStyle.Render(qLabel))
 		}
 	}
-	sidebarMode := "[n LINKS]"
-	if m.showHubLinks() {
-		sidebarMode = "[n INSPECTOR]"
-	}
-	modePills = append(modePills, dimStyle.Render(sidebarMode))
 	line2 := hubRackAlign(pulseLeft, strings.Join(modePills, "  "), width)
 	return line1 + "\n" + line2
 }
@@ -486,21 +465,6 @@ func (m *hubModel) renderHubRackTableHeader(width int, columns hubRackColumns) s
 	}
 	line := strings.Join(parts, " ")
 	return processHeaderStyle.Render(hubRackPad(line, width))
-}
-
-func (m *hubModel) renderHubSidebarPanels(width, outerHeight int) string {
-	if !m.linksView {
-		return m.renderHubInspectorPanel(width, outerHeight)
-	}
-	linksNeeded := 4 + len(m.links.edges)
-	if outerHeight >= 22 && outerHeight-linksNeeded >= 12 {
-		inspectorHeight := min(outerHeight-7, max(12, outerHeight*58/100))
-		linksHeight := outerHeight - inspectorHeight
-		topPanel := m.renderHubInspectorPanel(width, inspectorHeight)
-		bottomPanel := m.renderHubLinksPanel(width, linksHeight)
-		return topPanel + "\n" + bottomPanel
-	}
-	return m.renderHubLinksPanel(width, outerHeight)
 }
 
 func (m *hubModel) renderHubInspectorPanel(width, outerHeight int) string {
@@ -760,39 +724,7 @@ func hubGPUModelsSummary(gpus []gpuInfo) (summary string, homogeneous bool) {
 	return strings.Join(parts, " + "), false
 }
 
-func (m *hubModel) renderHubLinksPanel(width, outerHeight int) string {
-	innerWidth := max(16, width-4)
-	contentRows := max(1, outerHeight-2)
-	meta := fmt.Sprintf("%d/%d observed", m.links.sampled, m.links.eligible)
-	if count := len(m.links.edges); count > 0 {
-		pageSize := max(1, contentRows-1)
-		if m.links.unmeasured > 0 || count > pageSize {
-			pageSize = max(1, contentRows-2)
-		}
-		page := min(m.linksPage, (count-1)/pageSize)
-		first, last := page*pageSize, min((page+1)*pageSize, count)
-		if pageSize < count {
-			meta += fmt.Sprintf(" · %d–%d / %d", first+1, last, count)
-		} else {
-			meta += fmt.Sprintf(" · %d ACTIVE", count)
-		}
-	}
-	if m.links.sampledAt.IsZero() {
-		meta = "SAMPLING"
-	}
-	lines := m.renderHubLinksContent(innerWidth, contentRows)
-	for len(lines) < contentRows {
-		lines = append(lines, "")
-	}
-	borderColor := color.Color(colorBorder)
-	if m.linksExplicit && m.linksView {
-		borderColor = colorBorderFocus
-	}
-	return btopPanel(width, "CLUSTER LINKS", meta, strings.Join(lines[:contentRows], "\n"), networkRXStyle, borderColor)
-}
-
 func (m *hubModel) renderHubFooter(width, detailWidth int) string {
-	compactLinks := m.hubCompactLinks()
 	var hints []string
 	if len(m.config.SlurmClusters) > 0 {
 		label := "expand queue"
@@ -801,16 +733,7 @@ func (m *hubModel) renderHubFooter(width, detailWidth int) string {
 		}
 		hints = append(hints, keyHint("s", label))
 	}
-	if detailWidth == 0 && !compactLinks && len(m.config.Nodes) > 0 {
-		hints = append(hints, keyHint("n", "links"))
-	}
 	hints = append(hints, keyHint("↑↓", "select"), keyHint("enter", "open"))
-	if compactLinks {
-		hints = []string{keyHint("n", "rack"), keyHint("pg↑↓", "links")}
-		if len(m.config.SlurmClusters) > 0 {
-			hints = append(hints, keyHint("s", "queue"))
-		}
-	}
 	if m.queueExpanded {
 		hints = []string{keyHint("↑↓", "jobs"), keyHint("enter", "explain")}
 		if len(m.config.Nodes) > 0 {
@@ -823,16 +746,6 @@ func (m *hubModel) renderHubFooter(width, detailWidth int) string {
 			if len(m.config.SlurmClusters) > 1 {
 				hints = append(hints, keyHint("←→", "cluster"), keyHint("a", "all"))
 			}
-		}
-	}
-	if detailWidth > 0 {
-		target := "links"
-		if m.linksView {
-			target = "metrics"
-		}
-		hints = append(hints, keyHint("n", target))
-		if m.linksView && !m.queueExpanded && len(m.links.edges) > m.hubLinksPageSize() {
-			hints = append(hints, keyHint("pg↑↓", "links"))
 		}
 	}
 	quitLabel := "quit"
@@ -856,7 +769,7 @@ func (m *hubModel) renderHubFooter(width, detailWidth int) string {
 	footer := strings.Join(visibleHints, "  ")
 	pages := m.pages()
 	page := hubCursorPage(pages, m.cursor)
-	if !m.queueExpanded && !compactLinks && len(pages) > 1 {
+	if !m.queueExpanded && len(pages) > 1 {
 		paging := dimStyle.Render(fmt.Sprintf("PAGE %d/%d", page+1, len(pages)))
 		footer = hubRackAlign(footer, paging, width)
 	} else if room := width - lipgloss.Width(footer) - 2; room >= 12 {
@@ -868,7 +781,6 @@ func (m *hubModel) renderHubFooter(width, detailWidth int) string {
 // hubCompactFallbackView handles ultra-small terminals (<60x16) so small viewport tests continue to pass.
 func (m *hubModel) hubCompactFallbackView(width int) string {
 	listWidth, detailWidth := hubRackWidths(width)
-	compactLinks := m.hubCompactLinks()
 	columns := hubRackLayout(listWidth)
 	live, stale, offline := 0, 0, 0
 	for _, state := range m.states {
@@ -917,20 +829,9 @@ func (m *hubModel) hubCompactFallbackView(width int) string {
 		}
 	}
 	rackBudget := m.hubRackBudget()
-	if compactLinks {
-		details := m.renderHubLinks(width)
-		rows = rows[:0]
-		for _, line := range details[:min(len(details), rackBudget)] {
-			rows = append(rows, ansi.Truncate(line, width, "…"))
-		}
-	} else if detailWidth > 0 && !m.queueExpanded && m.cursor >= 0 && m.cursor < len(m.config.Nodes) {
+	if detailWidth > 0 && !m.queueExpanded && m.cursor >= 0 && m.cursor < len(m.config.Nodes) {
 		detailW := max(1, width-listWidth-4)
-		var details []string
-		if m.linksView {
-			details = m.renderHubLinks(detailW)
-		} else {
-			details = append([]string{accentStyle.Render("NODE · " + m.config.Nodes[m.cursor].Name)}, m.renderHubRackDetail(m.cursor, detailW)...)
-		}
+		details := append([]string{accentStyle.Render("NODE · " + m.config.Nodes[m.cursor].Name)}, m.renderHubRackDetail(m.cursor, detailW)...)
 		for len(rows) < min(len(details), rackBudget) {
 			rows = append(rows, "")
 		}

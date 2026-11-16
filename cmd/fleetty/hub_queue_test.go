@@ -141,8 +141,6 @@ func TestHubQueuePreviewUsesSpareRowsAndAllClusters(t *testing.T) {
 		}}},
 	}
 	m.slurmFilter = 1
-	m.linksView = true
-	m.links = hubLinkGraph{sampledAt: now, eligible: 1, sampled: 1, edges: []hubLinkEdge{{a: 0, b: 14, known: true, ab: 1}}}
 	for _, width := range []int{160, 62} {
 		for _, mode := range []colorMode{colorModeDark, colorModeLight} {
 			m.width, m.colorMode = width, mode
@@ -153,10 +151,9 @@ func TestHubQueuePreviewUsesSpareRowsAndAllClusters(t *testing.T) {
 					t.Errorf("width %d, theme %v: missing %q in %s", width, mode, want, plain)
 				}
 			}
-			if width >= 94 && (strings.Index(plain, "A100 ↔ NAS") < 0 ||
-				strings.Index(plain, "A100 ↔ NAS") > strings.Index(plain, "SLURM QUEUE") ||
+			if width >= 94 && (!strings.Contains(plain, "NODE · A100") ||
 				!strings.Contains(plain, "PARTITION") || strings.Contains(plain, "BLOCKER") || strings.Contains(plain, "DEPENDENCY")) {
-				t.Errorf("queue must follow the complete links sidebar: %s", plain)
+				t.Errorf("queue must follow the inspector sidebar: %s", plain)
 			}
 			if strings.Contains(plain, "stale-job") || strings.Contains(plain, "12345_3") || m.slurmFilter != 1 {
 				t.Errorf("preview changed filtering or used stale/unformatted jobs: %s", plain)
@@ -176,16 +173,8 @@ func TestHubQueuePreviewUsesSpareRowsAndAllClusters(t *testing.T) {
 	}
 	m.Update(tea.WindowSizeMsg{Width: 160, Height: 25})
 	plain := ansi.Strip(m.hubView())
-	if !strings.Contains(plain, "SLURM QUEUE") || !strings.Contains(plain, "192.168.31.156") || !strings.Contains(plain, "CLUSTER LINKS") {
-		t.Fatalf("compact terminal must keep nodes, links, and a queue summary: %s", plain)
-	}
-	m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
-	for i := 0; i < 48; i++ {
-		m.links.edges = append(m.links.edges, hubLinkEdge{a: 0, b: 14, known: true, ab: 1})
-	}
-	plain = ansi.Strip(m.hubView())
-	if !strings.Contains(plain, "SLURM QUEUE") || !strings.Contains(plain, "1–30 / 49") {
-		t.Fatalf("a full links page should leave one row for the queue summary: %s", plain)
+	if !strings.Contains(plain, "SLURM QUEUE") || !strings.Contains(plain, "NODE · A100") {
+		t.Fatalf("compact terminal must keep nodes, inspector, and a queue summary: %s", plain)
 	}
 }
 
