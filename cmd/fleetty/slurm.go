@@ -1624,17 +1624,13 @@ func renderSlurmJobTableLine(display slurmDisplayJob, width int, showCluster, he
 	add("QOS", slurmQOSLabel(job.QOS), columnWidth(7, 12), false, slurmQOSStyle(job.QOS))
 	timeWidth := columnWidth(17, 19)
 	add("TIME", slurmQueueTime(job, timeWidth), timeWidth, true, base)
-	add("NODES", strconv.Itoa(job.Nodes), 5, true, base)
-	if full {
-		add("PARTITION", job.Partition, 16, false, base)
-	}
-	nodeWidth := columnWidth(12, 18)
-	nameWidth := remaining - 2 - nodeWidth
+	partWidth := columnWidth(14, 18)
+	add("PARTITION", slurmQueuePartition(job, partWidth), partWidth, false, base)
+	nameWidth := max(0, remaining-1)
 	add("NAME", job.Name, nameWidth, false, base)
 	if !header && len(display.Reports) > 0 {
 		cells[len(cells)-1] = renderSlurmJobName(display, nameWidth, base)
 	}
-	add("NODE", slurmQueueNode(job), nodeWidth, false, dimStyle)
 	if header {
 		return dimStyle.Copy().Bold(true).Render(strings.Join(cells, " "))
 	}
@@ -1664,11 +1660,25 @@ func slurmDisplayReason(display slurmDisplayJob) string {
 	return explainSlurmJob(display.Job, display.Snapshot).Badge
 }
 
-func slurmQueueNode(job slurmJob) string {
-	if !isSlurmPending(job.State) && slurmNodeExpressionPresent(job.NodeList) {
-		return job.NodeList
+func slurmQueuePartition(job slurmJob, width int) string {
+	part := strings.TrimSpace(job.Partition)
+	if strings.EqualFold(part, "(null)") || strings.EqualFold(part, "N/A") {
+		part = ""
 	}
-	return "—"
+	if job.Nodes <= 0 {
+		if part == "" {
+			return "—"
+		}
+		return ansi.Truncate(part, max(1, width), "…")
+	}
+	if part == "" {
+		return fmt.Sprintf("×%d", job.Nodes)
+	}
+	suffix := fmt.Sprintf(" ×%d", job.Nodes)
+	if width > len(suffix) && lipgloss.Width(part)+len(suffix) > width {
+		part = ansi.Truncate(part, max(1, width-len(suffix)), "…")
+	}
+	return part + suffix
 }
 
 func slurmQOSLabel(qos string) string {

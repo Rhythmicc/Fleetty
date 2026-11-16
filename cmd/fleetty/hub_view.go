@@ -631,19 +631,22 @@ func (m *hubModel) renderHubInspectorLines(index, width, budget int) []string {
 			totalPower += g.Power
 			totalLimit += g.PowerLimit
 		}
-		modelName := "GPU"
-		if len(s.GPUs) > 0 && s.GPUs[0].Name != "" {
-			modelName = strings.TrimPrefix(s.GPUs[0].Name, "NVIDIA ")
-		}
+		modelSummary, homogeneous := hubGPUModelsSummary(s.GPUs)
 		pwrText := ""
 		if totalPower > 0 {
 			pwrText = dimStyle.Render(fmt.Sprintf("%.0f/%.0fW", totalPower, totalLimit))
 		}
+		maxSummaryWidth := max(8, width-12-lipgloss.Width(pwrText))
 		lines = append(lines, hubRackAlign(
-			sectionStyle.Bold(true).Render(fmt.Sprintf("DEVICES (%d × %s)", len(s.GPUs), modelName)),
+			sectionStyle.Bold(true).Render(fmt.Sprintf("DEVICES (%s)", ansi.Truncate(modelSummary, maxSummaryWidth, "…"))),
 			pwrText, width,
 		))
 		devBarWidth := max(6, min(12, width-32))
+		nameCellWidth := 0
+		if !homogeneous && width >= 36 {
+			nameCellWidth = min(14, max(8, width-34))
+			devBarWidth = max(5, min(10, width-33-nameCellWidth))
+		}
 		for _, g := range s.GPUs {
 			if len(lines) >= budget-1 {
 				break
@@ -651,7 +654,15 @@ func (m *hubModel) renderHubInspectorLines(index, width, budget int) []string {
 			gStyle, gBar := hubCompactInlineBar(g.Utilization, devBarWidth)
 			vram := loadBandStyle(vramBand(g.MemoryUsed, g.MemoryTotal), false).Render(hubVRAM(g.MemoryUsed, g.MemoryTotal))
 			temp := hubRackTemperature(g.Temperature)
-			left := valueStyle.Render(fmt.Sprintf("#%-2d", g.Index)) + " " + gBar + " " + gStyle.Render(fmt.Sprintf("%3.0f%%", g.Utilization))
+			left := valueStyle.Render(fmt.Sprintf("#%-2d", g.Index))
+			if nameCellWidth > 0 {
+				devName := compactGPUModelName(g.Name)
+				if devName == "" {
+					devName = "GPU"
+				}
+				left += " " + dimStyle.Render(fixedCell(devName, nameCellWidth, false))
+			}
+			left += " " + gBar + " " + gStyle.Render(fmt.Sprintf("%3.0f%%", g.Utilization))
 			right := vram + "  " + temp
 			lines = append(lines, hubRackAlign(left, right, width))
 		}
@@ -699,6 +710,54 @@ func (m *hubModel) renderHubInspectorLines(index, width, budget int) []string {
 		}
 	}
 	return lines
+}
+
+func compactGPUModelName(name string) string {
+	name = strings.TrimSpace(name)
+	for _, prefix := range []string{"NVIDIA ", "GeForce ", "AMD ", "Radeon ", "Intel(R) ", "Intel "} {
+		name = strings.TrimPrefix(name, prefix)
+	}
+	return strings.TrimSpace(name)
+}
+
+func hubGPUModelsSummary(gpus []gpuInfo) (summary string, homogeneous bool) {
+	if len(gpus) == 0 {
+		return "GPU", true
+	}
+	type modelGroup struct {
+		name  string
+		count int
+	}
+	var groups []modelGroup
+	for _, g := range gpus {
+		name := compactGPUModelName(g.Name)
+		if name == "" {
+			name = "GPU"
+		}
+		found := false
+		for i := range groups {
+			if groups[i].name == name {
+				groups[i].count++
+				found = true
+				break
+			}
+		}
+		if !found {
+			groups = append(groups, modelGroup{name: name, count: 1})
+		}
+	}
+	if len(groups) == 1 {
+		return fmt.Sprintf("%d × %s", groups[0].count, groups[0].name), true
+	}
+	parts := make([]string, 0, len(groups))
+	for _, gr := range groups {
+		if gr.count > 1 {
+			parts = append(parts, fmt.Sprintf("%d×%s", gr.count, gr.name))
+		} else {
+			parts = append(parts, gr.name)
+		}
+	}
+	return strings.Join(parts, " + "), false
 }
 
 func (m *hubModel) renderHubLinksPanel(width, outerHeight int) string {

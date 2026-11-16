@@ -65,7 +65,7 @@ func TestHubSlurmReportsMatchAllocationAndRender(t *testing.T) {
 		if lipgloss.Width(row) != width || !strings.Contains(row, "62%") ||
 			strings.Contains(row, "━") != (width >= 92) ||
 			strings.Contains(header, "BLOCKER") || strings.Contains(waiting, "DEPENDENCY") ||
-			strings.Contains(waiting, "gpu01") || strings.HasSuffix(waiting, "—") != (width >= 72) {
+			strings.Contains(waiting, "gpu01") || strings.Contains(header, " NODE") {
 			t.Fatalf("width %d: unexpected queue:\n%s\n%s\n%s", width, header, row, waiting)
 		}
 	}

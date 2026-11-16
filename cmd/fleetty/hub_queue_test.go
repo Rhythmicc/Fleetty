@@ -155,7 +155,7 @@ func TestHubQueuePreviewUsesSpareRowsAndAllClusters(t *testing.T) {
 			}
 			if width >= 94 && (strings.Index(plain, "A100 ↔ NAS") < 0 ||
 				strings.Index(plain, "A100 ↔ NAS") > strings.Index(plain, "SLURM QUEUE") ||
-				!strings.Contains(plain, "NODE") || strings.Contains(plain, "BLOCKER") || strings.Contains(plain, "DEPENDENCY")) {
+				!strings.Contains(plain, "PARTITION") || strings.Contains(plain, "BLOCKER") || strings.Contains(plain, "DEPENDENCY")) {
 				t.Errorf("queue must follow the complete links sidebar: %s", plain)
 			}
 			if strings.Contains(plain, "stale-job") || strings.Contains(plain, "12345_3") || m.slurmFilter != 1 {
@@ -250,15 +250,16 @@ func TestHubQueuePreviewMatchesFullQueueAtSameWidth(t *testing.T) {
 			firstJob := strings.TrimPrefix(strings.TrimSpace(preview[1]), "● ")
 			if strings.Contains(preview[0], "CLUSTER") || !strings.HasPrefix(firstJob, "22001") ||
 				strings.Contains(preview[0], "WEIGHT") != wide ||
-				strings.HasSuffix(preview[2], "—") != (width-4 >= 72) ||
+				strings.Contains(preview[0], "PARTITION") != wide ||
+				strings.Contains(preview[2], "gpu ×1") != wide ||
 				strings.Contains(preview[0], "LIMIT") ||
 				strings.Contains(preview[0], "TIME") != wide ||
 				strings.Contains(preview[1], "4:20 / 30:00") != wide ||
 				strings.Contains(preview[2], "0:00 / UNLIMITED") != wide {
 				t.Errorf("width %d: wrong column tier or blocker: %q", width, preview)
 			}
-			if wide && !strings.Contains(strings.Join(strings.Fields(preview[0]), " "), "TIME NODES") {
-				t.Errorf("width %d: expected a single time column: %q", width, preview[0])
+			if wide && !strings.Contains(strings.Join(strings.Fields(preview[0]), " "), "TIME PARTITION NAME") {
+				t.Errorf("width %d: expected merged partition and time columns: %q", width, preview[0])
 			}
 			if width >= 117 && !strings.Contains(preview[1], jobName) {
 				t.Errorf("width %d: the combined time column should leave space for the full job name: %q", width, preview[1])
@@ -291,8 +292,8 @@ func TestHubQueueClusterColumnOnlyForCombinedView(t *testing.T) {
 			if !strings.Contains(view, "CLUSTER") || !strings.Contains(view, "Alpha") || !strings.Contains(view, "Beta") {
 				t.Fatalf("%d: combined queue needs cluster names: %q", width, view)
 			}
-			if width >= 116 && (!strings.Contains(view, "TIME") || !strings.Contains(view, "NODE") || strings.Contains(view, "BLOCKER")) {
-				t.Fatalf("%d: combined queue must show time and a node-only column: %q", width, view)
+			if width >= 116 && (!strings.Contains(view, "TIME") || !strings.Contains(view, "PARTITION") || strings.Contains(view, "BLOCKER")) {
+				t.Fatalf("%d: combined queue must show time and partition without blocker: %q", width, view)
 			}
 		}
 		m.slurmFilter = 0

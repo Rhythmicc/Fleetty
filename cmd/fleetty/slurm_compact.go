@@ -24,12 +24,8 @@ func newCompactSlurmFormat(width int, cluster, hub bool) compactSlurmFormat {
 	if cluster && width >= 92 {
 		f.cluster = 10
 	}
-	if width >= 72 {
-		tailLimit := 20
-		if hub {
-			tailLimit = 12
-		}
-		f.tail = min(tailLimit, width-f.id-f.user-f.cluster-39)
+	if !hub && width >= 72 {
+		f.tail = min(20, width-f.id-f.user-f.cluster-39)
 	}
 	return f
 }
@@ -51,13 +47,9 @@ func (f compactSlurmFormat) render(display slurmDisplayJob, header bool, base li
 	marker := slurmQOSStyle(job.QOS).Inherit(base).Render("●")
 	reason, reasonStyle := "", dimStyle
 	if !header && f.tail > 0 {
-		if f.hub {
-			reason = slurmQueueNode(job)
-		} else {
-			reason = slurmDisplayReason(display)
-			if isSlurmPending(job.State) && reason != "—" {
-				reasonStyle = warningStyle
-			}
+		reason = slurmDisplayReason(display)
+		if isSlurmPending(job.State) && reason != "—" {
+			reasonStyle = warningStyle
 		}
 	}
 	if header {
@@ -65,9 +57,6 @@ func (f compactSlurmFormat) render(display slurmDisplayJob, header bool, base li
 		display.Cluster, state, marker = "CLUSTER", "S", " "
 		stateStyle = dimStyle
 		reason = "NODE / BLOCKER"
-		if f.hub {
-			reason = "NODE"
-		}
 	}
 	parts := []string{}
 	if f.cluster > 0 {
