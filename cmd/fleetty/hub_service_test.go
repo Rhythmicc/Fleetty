@@ -33,14 +33,18 @@ func TestHubModelReadsSharedServiceSnapshot(t *testing.T) {
 	}
 }
 
-func TestHubLoginDefaultsToNodeInspector(t *testing.T) {
+func TestHubLoginDefaultsToLinks(t *testing.T) {
 	service := newHubService(hubConfig{
 		Nodes: []hubNodeConfig{{Name: "worker"}},
 	})
 	model := newHubModel(service, 120, 30)
 	model.Init()
-	if !strings.Contains(ansi.Strip(model.hubView()), "NODE · worker") {
-		t.Fatal("wide login should show the selected node's inspector immediately")
+	if len(service.linksWake) != 1 || !strings.Contains(ansi.Strip(model.hubView()), "CLUSTER LINKS") {
+		t.Fatal("wide login should show links and request a sample immediately")
+	}
+	narrow := newHubModel(service, 62, 30)
+	if strings.Contains(ansi.Strip(narrow.hubView()), "CLUSTER LINKS") {
+		t.Fatal("narrow login should keep the node list")
 	}
 	queueOnly := newHubModel(newHubService(hubConfig{SlurmClusters: []slurmClusterConfig{{Name: "CPU"}}}), 120, 30)
 	if !queueOnly.queueExpanded {

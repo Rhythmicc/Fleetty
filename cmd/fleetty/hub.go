@@ -295,6 +295,9 @@ type hubService struct {
 	viewers        atomic.Int64
 	nodeWake       []chan struct{}
 	slurmWake      chan struct{}
+	linksWake      chan struct{}
+	linksViewUntil time.Time
+	links          hubLinkGraph
 	slurmRunners   []slurmCommandRunner
 	states         []hubNodeState
 	slurmStates    []slurmClusterState
@@ -311,6 +314,7 @@ func newHubService(config hubConfig) *hubService {
 		slurmRunners: make([]slurmCommandRunner, len(config.SlurmClusters)),
 		nodeWake:     nodeWake,
 		slurmWake:    make(chan struct{}, 1),
+		linksWake:    make(chan struct{}, 1),
 	}
 }
 
@@ -335,6 +339,7 @@ func (s *hubService) start(ctx context.Context) {
 			go s.runNode(ctx, index, fetchHubNodeSnapshot)
 		}
 		go s.runSlurm(ctx)
+		go s.runLinks(ctx)
 	})
 }
 
@@ -455,6 +460,8 @@ type hubModel struct {
 	theme           terminalTheme
 	status          string
 	detail          *monitorModel
+	links           hubLinkGraph
+	linksPage       int
 	queueExpanded   bool
 	slurmFilter     int
 	slurmOffset     int
@@ -490,6 +497,7 @@ func newHubModel(service *hubService, width, height int) *hubModel {
 }
 
 func (m *hubModel) Init() tea.Cmd {
+	m.refreshHubLinks()
 	return tea.Batch(m.theme.init(), m.startCollect(), hubTick(m.config.refreshInterval()))
 }
 
@@ -536,6 +544,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case hubTickMsg:
+		m.refreshHubLinks()
 		return m, tea.Batch(m.startCollect(), hubTick(m.config.refreshInterval()))
 	}
 
@@ -666,12 +675,16 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgup":
 			if m.queueExpanded {
 				m.moveSlurmCursor(-m.hubQueuePageSize())
+			} else if m.showHubLinks() && len(m.links.edges) > m.hubLinksPageSize() {
+				m.moveHubLinksPage(-1)
 			} else {
 				m.moveCursorVertical(-max(1, m.height-5))
 			}
 		case "pgdown":
 			if m.queueExpanded {
 				m.moveSlurmCursor(m.hubQueuePageSize())
+			} else if m.showHubLinks() && len(m.links.edges) > m.hubLinksPageSize() {
+				m.moveHubLinksPage(1)
 			} else {
 				m.moveCursorVertical(max(1, m.height-5))
 			}
@@ -686,6 +699,7 @@ func (m *hubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.openSelected()
 		}
 	}
+	m.refreshHubLinks()
 	return m, nil
 }
 

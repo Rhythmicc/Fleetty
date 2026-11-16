@@ -12,7 +12,7 @@ import (
 
 func TestDemoFramesUseFictionalData(t *testing.T) {
 	forbidden := []string{"SSSLab", "ssslab", "NAS01", "4090", "5090", "A100"}
-	for _, screen := range []string{"hub", "hub-queue", "gpu", "gpu-compute", "nas"} {
+	for _, screen := range []string{"hub", "hub-links", "hub-queue", "gpu", "gpu-compute", "nas"} {
 		for _, theme := range []string{"dark", "light"} {
 			frame, err := renderDemoFrame(screen, theme, 0, 0)
 			if err != nil {
@@ -73,6 +73,15 @@ func TestDemoFramesUseFictionalData(t *testing.T) {
 	}
 	if strings.Contains(widePlain, "PAGE ") {
 		t.Fatal("220-col hub spilled onto a second page")
+	}
+	links, err := renderDemoFrame("hub-links", "dark", 140, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"CLUSTER LINKS", "12/14 observed", "HIST ", "gpu-a01 ↔ NAS", "gpu-a01 ↔ login-01", "82M      6M", "11M      2M", "1 unmeasured", "SLURM QUEUE"} {
+		if !strings.Contains(ansi.Strip(links), text) {
+			t.Fatalf("links frame missing %q", text)
+		}
 	}
 
 	gpu, err := renderDemoFrame("gpu", "dark", 0, 0)

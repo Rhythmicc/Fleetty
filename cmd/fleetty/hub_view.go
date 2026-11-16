@@ -94,6 +94,9 @@ func (m *hubModel) hubRackBudget() int {
 		}
 		return max(6, body-minQueue)
 	}
+	if m.showHubLinks() && len(m.links.edges) > 0 && body >= 25 {
+		return body - 4
+	}
 	return max(0, body-1)
 }
 
@@ -186,7 +189,7 @@ func (m *hubModel) hubView() string {
 	if rackOuterHeight > 0 {
 		leftPanel := m.renderHubRackPanel(listWidth, rackOuterHeight, columns)
 		if detailWidth > 0 && m.cursor >= 0 && m.cursor < len(m.config.Nodes) {
-			rightPanel := m.renderHubInspectorPanel(detailWidth, rackOuterHeight)
+			rightPanel := m.renderHubSidebarPanels(detailWidth, rackOuterHeight)
 			bodySections = append(bodySections, lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
 		} else {
 			bodySections = append(bodySections, leftPanel)
@@ -467,6 +470,20 @@ func (m *hubModel) renderHubRackTableHeader(width int, columns hubRackColumns) s
 	return processHeaderStyle.Render(hubRackPad(line, width))
 }
 
+func (m *hubModel) renderHubSidebarPanels(width, outerHeight int) string {
+	if outerHeight >= 18 {
+		inspectorHeight := min(outerHeight-7, max(11, outerHeight*55/100))
+		linksHeight := outerHeight - inspectorHeight
+		topPanel := m.renderHubInspectorPanel(width, inspectorHeight)
+		bottomPanel := m.renderHubLinksPanel(width, linksHeight)
+		return topPanel + "\n" + bottomPanel
+	}
+	if m.service != nil || !m.links.sampledAt.IsZero() || len(m.links.edges) > 0 {
+		return m.renderHubLinksPanel(width, outerHeight)
+	}
+	return m.renderHubInspectorPanel(width, outerHeight)
+}
+
 func (m *hubModel) renderHubInspectorPanel(width, outerHeight int) string {
 	innerWidth := max(16, width-4)
 	contentRows := max(1, outerHeight-2)
@@ -547,7 +564,7 @@ func (m *hubModel) renderHubInspectorLines(index, width, budget int) []string {
 	}
 
 	// Compact 1-line resource gauges
-	barWidth := max(8, min(16, width-28))
+	barWidth := max(8, min(22, width-25))
 	gauge := func(label string, pct float64, detail string) string {
 		style, bar := hubCompactInlineBar(pct, barWidth)
 		left := dimStyle.Render(fixedCell(label, 8, false)) + " " + bar + " " + style.Render(fmt.Sprintf("%4.0f%%", pct))
@@ -605,11 +622,27 @@ func (m *hubModel) renderHubInspectorLines(index, width, budget int) []string {
 			sectionStyle.Bold(true).Render(fmt.Sprintf("DEVICES (%s)", ansi.Truncate(modelSummary, maxSummaryWidth, "…"))),
 			pwrText, width,
 		))
-		devBarWidth := max(6, min(12, width-32))
+		maxRightWidth := 12
+		maxModelWidth := 0
+		for _, g := range s.GPUs {
+			rw := lipgloss.Width(hubVRAM(g.MemoryUsed, g.MemoryTotal)) + 6
+			if rw > maxRightWidth {
+				maxRightWidth = rw
+			}
+			if !homogeneous {
+				mw := lipgloss.Width(compactGPUModelName(g.Name))
+				if mw > maxModelWidth {
+					maxModelWidth = mw
+				}
+			}
+		}
 		nameCellWidth := 0
 		if !homogeneous && width >= 36 {
-			nameCellWidth = min(14, max(8, width-34))
-			devBarWidth = max(5, min(10, width-33-nameCellWidth))
+			nameCellWidth = min(14, max(8, min(maxModelWidth, width-30)))
+		}
+		devBarWidth := max(6, width-maxRightWidth-11)
+		if nameCellWidth > 0 {
+			devBarWidth = max(5, width-nameCellWidth-maxRightWidth-12)
 		}
 		for _, g := range s.GPUs {
 			if len(lines) >= budget-1 {
@@ -724,6 +757,33 @@ func hubGPUModelsSummary(gpus []gpuInfo) (summary string, homogeneous bool) {
 	return strings.Join(parts, " + "), false
 }
 
+func (m *hubModel) renderHubLinksPanel(width, outerHeight int) string {
+	innerWidth := max(16, width-4)
+	contentRows := max(1, outerHeight-2)
+	meta := fmt.Sprintf("%d/%d observed", m.links.sampled, m.links.eligible)
+	if count := len(m.links.edges); count > 0 {
+		pageSize := max(1, contentRows-1)
+		if m.links.unmeasured > 0 || count > pageSize {
+			pageSize = max(1, contentRows-2)
+		}
+		page := min(m.linksPage, (count-1)/pageSize)
+		first, last := page*pageSize, min((page+1)*pageSize, count)
+		if pageSize < count {
+			meta += fmt.Sprintf(" · %d–%d / %d", first+1, last, count)
+		} else {
+			meta += fmt.Sprintf(" · %d ACTIVE", count)
+		}
+	}
+	if m.links.sampledAt.IsZero() {
+		meta = "SAMPLING"
+	}
+	lines := m.renderHubLinksContent(innerWidth, contentRows)
+	for len(lines) < contentRows {
+		lines = append(lines, "")
+	}
+	return btopPanel(width, "CLUSTER LINKS", meta, strings.Join(lines[:contentRows], "\n"), networkRXStyle, colorBorder)
+}
+
 func (m *hubModel) renderHubFooter(width, detailWidth int) string {
 	var hints []string
 	if len(m.config.SlurmClusters) > 0 {
@@ -747,6 +807,8 @@ func (m *hubModel) renderHubFooter(width, detailWidth int) string {
 				hints = append(hints, keyHint("←→", "cluster"), keyHint("a", "all"))
 			}
 		}
+	} else if detailWidth > 0 && len(m.links.edges) > m.hubLinksPageSize() {
+		hints = append(hints, keyHint("pg↑↓", "links"))
 	}
 	quitLabel := "quit"
 	if m.queueExpanded && (len(m.config.Nodes) > 0 || m.slurmExplain) {
@@ -831,7 +893,12 @@ func (m *hubModel) hubCompactFallbackView(width int) string {
 	rackBudget := m.hubRackBudget()
 	if detailWidth > 0 && !m.queueExpanded && m.cursor >= 0 && m.cursor < len(m.config.Nodes) {
 		detailW := max(1, width-listWidth-4)
-		details := append([]string{accentStyle.Render("NODE · " + m.config.Nodes[m.cursor].Name)}, m.renderHubRackDetail(m.cursor, detailW)...)
+		var details []string
+		if len(m.links.edges) > 0 || !m.links.sampledAt.IsZero() {
+			details = m.renderHubLinks(detailW)
+		} else {
+			details = append([]string{accentStyle.Render("NODE · " + m.config.Nodes[m.cursor].Name)}, m.renderHubRackDetail(m.cursor, detailW)...)
+		}
 		for len(rows) < min(len(details), rackBudget) {
 			rows = append(rows, "")
 		}
