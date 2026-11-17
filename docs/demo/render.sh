@@ -3,9 +3,10 @@
 #
 #   sh docs/demo/render.sh
 #
-# Builds Fleetty with -tags demo, renders the hub, GPU node, and storage node
-# through View(), and rasterizes those frames. Requires Go, Python 3, Pillow,
-# JetBrains Mono, and ffmpeg.
+# Builds Fleetty with -tags demo and rasterizes frames rendered through View().
+# Requires Go, Python 3, Pillow, JetBrains Mono, and ffmpeg. Set
+# FLEETTY_DEMO_FONT_DIR if the JetBrains Mono TTF files are outside the default
+# Linux font directory.
 
 set -eu
 
@@ -26,7 +27,7 @@ render_png() {
   screen=$1
   theme=$2
   png=$3
-  "${tmpdir}/fleetty" demo --screen "${screen}" --theme "${theme}" > "${tmpdir}/${screen}-${theme}.ansi"
+  "${tmpdir}/fleetty" demo --screen "${screen}" --theme "${theme}" --width "$4" --height "$5" > "${tmpdir}/${screen}-${theme}.ansi"
   python3 "${root}/docs/demo/rasterize.py" --theme "${theme}" \
     "${tmpdir}/${screen}-${theme}.ansi" "${png}"
 }
@@ -35,26 +36,35 @@ to_webp() {
   ffmpeg -y -loglevel error -i "$1" -c:v libwebp -quality 82 -compression_level 6 "$2"
 }
 
-render_png hub dark "${tmpdir}/hub-dark.png"
-render_png hub light "${tmpdir}/hub-light.png"
-render_png gpu dark "${tmpdir}/gpu-dark.png"
-render_png nas dark "${tmpdir}/nas-dark.png"
+render_png hub dark "${tmpdir}/hub.png" 144 37
+render_png hub-queue dark "${tmpdir}/themes-dark.png" 136 37
+render_png hub-queue light "${tmpdir}/themes-light.png" 136 37
+render_png gpu dark "${tmpdir}/gpu.png" 142 34
+render_png gpu-network dark "${tmpdir}/network.png" 142 34
+render_png nas dark "${tmpdir}/nas.png" 142 34
+render_png gpu-storage dark "${tmpdir}/storage-map.png" 142 34
 
 mkdir -p "${root}/docs/images"
-to_webp "${tmpdir}/hub-dark.png" "${root}/docs/images/fleetty-hub.webp"
-to_webp "${tmpdir}/hub-light.png" "${root}/docs/images/fleetty-hub-light.webp"
-to_webp "${tmpdir}/gpu-dark.png" "${root}/docs/images/fleetty-gpu.webp"
-to_webp "${tmpdir}/nas-dark.png" "${root}/docs/images/fleetty-nas.webp"
+to_webp "${tmpdir}/hub.png" "${root}/docs/images/fleetty-hub.webp"
+to_webp "${tmpdir}/themes-dark.png" "${root}/docs/images/fleetty-hub-dark.webp"
+to_webp "${tmpdir}/themes-light.png" "${root}/docs/images/fleetty-hub-light.webp"
+to_webp "${tmpdir}/gpu.png" "${root}/docs/images/fleetty-gpu.webp"
+to_webp "${tmpdir}/network.png" "${root}/docs/images/fleetty-network.webp"
+to_webp "${tmpdir}/nas.png" "${root}/docs/images/fleetty-nas.webp"
+to_webp "${tmpdir}/storage-map.png" "${root}/docs/images/fleetty-storage-map.webp"
 
 # Two holds of the same hub, dark then light. GitHub animates GIF.
 ffmpeg -y -loglevel error \
-  -loop 1 -t 1.6 -i "${tmpdir}/hub-dark.png" \
-  -loop 1 -t 1.6 -i "${tmpdir}/hub-light.png" \
+  -loop 1 -t 1.6 -i "${tmpdir}/themes-dark.png" \
+  -loop 1 -t 1.6 -i "${tmpdir}/themes-light.png" \
   -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0,split[v1][v2];[v1]palettegen=stats_mode=diff:max_colors=128[p];[v2][p]paletteuse=dither=bayer" \
   -loop 0 "${root}/docs/images/fleetty-themes.gif"
 
 printf 'Wrote docs/images/fleetty-hub.webp\n'
+printf 'Wrote docs/images/fleetty-hub-dark.webp\n'
 printf 'Wrote docs/images/fleetty-hub-light.webp\n'
 printf 'Wrote docs/images/fleetty-gpu.webp\n'
+printf 'Wrote docs/images/fleetty-network.webp\n'
 printf 'Wrote docs/images/fleetty-nas.webp\n'
+printf 'Wrote docs/images/fleetty-storage-map.webp\n'
 printf 'Wrote docs/images/fleetty-themes.gif\n'

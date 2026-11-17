@@ -15,24 +15,29 @@ Terminal monitor for local machines, GPU nodes, storage servers, and Slurm clust
 </div>
 
 <a href="docs/images/fleetty-hub.webp">
-  <img src="docs/images/fleetty-hub.webp" alt="Acme Research Cluster in Fleetty, with one offline node and a hot GPU" width="100%">
+  <img src="docs/images/fleetty-hub.webp" alt="Fleetty Hub with node health, live cluster links, and Slurm job progress for a fictional research cluster" width="100%">
 </a>
+
+When your terminal follows the system's light or dark appearance, Fleetty follows it too. Press <kbd>t</kbd> to switch manually.
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <strong>Dark theme</strong> · press <code>t</code> to toggle<br><br>
-      <a href="docs/images/fleetty-hub.webp">
-        <img src="docs/images/fleetty-hub.webp" alt="Fleetty hub in the dark theme">
+      <strong>Dark theme</strong><br><br>
+      <a href="docs/images/fleetty-hub-dark.webp">
+        <img src="docs/images/fleetty-hub-dark.webp" alt="Fleetty Hub and expanded Slurm queue in the dark theme">
       </a>
     </td>
     <td width="50%" valign="top">
-      <strong>Light theme</strong> · follows terminal appearance<br><br>
+      <strong>Light theme</strong><br><br>
       <a href="docs/images/fleetty-hub-light.webp">
-        <img src="docs/images/fleetty-hub-light.webp" alt="Fleetty hub in the light theme">
+        <img src="docs/images/fleetty-hub-light.webp" alt="The same Fleetty Hub and expanded Slurm queue in the light theme">
       </a>
     </td>
   </tr>
+</table>
+
+<table>
   <tr>
     <td width="50%" valign="top">
       <strong>GPU node</strong> · GPUs, Slurm queue, processes<br><br>
@@ -41,13 +46,29 @@ Terminal monitor for local machines, GPU nodes, storage servers, and Slurm clust
       </a>
     </td>
     <td width="50%" valign="top">
+      <strong>Network</strong> · traffic history and connections<br><br>
+      <a href="docs/images/fleetty-network.webp">
+        <img src="docs/images/fleetty-network.webp" alt="Network traffic history and connection list for a fictional GPU node">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
       <strong>Storage node</strong> · mounts, Docker, PM2, HTTP<br><br>
       <a href="docs/images/fleetty-nas.webp">
         <img src="docs/images/fleetty-nas.webp" alt="Fleetty overview of the fictional node storage-01">
       </a>
     </td>
+    <td width="50%" valign="top">
+      <strong>Storage map</strong> · directory sizes at a glance<br><br>
+      <a href="docs/images/fleetty-storage-map.webp">
+        <img src="docs/images/fleetty-storage-map.webp" alt="Fleetty storage treemap and directory size list">
+      </a>
+    </td>
   </tr>
 </table>
+
+Built with Bubble Tea and Lip Gloss for the terminal UI, Wish for SSH, and Charm Log for logging.
 
 ## Install
 
