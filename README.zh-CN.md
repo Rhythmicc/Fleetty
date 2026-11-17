@@ -15,24 +15,29 @@
 </div>
 
 <a href="docs/images/fleetty-hub.webp">
-  <img src="docs/images/fleetty-hub.webp" alt="Fleetty 中的 Acme Research Cluster，含一台离线节点和一块高温 GPU" width="100%">
+  <img src="docs/images/fleetty-hub.webp" alt="Fleetty Hub 展示虚构集群的节点状态、实时节点间流量和 Slurm 作业进度" width="100%">
 </a>
+
+当终端跟随系统切换深浅色时，Fleetty 也会自动切换；也可按 <kbd>t</kbd> 手动切换。
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <strong>深色主题</strong> · 按 <code>t</code> 切换<br><br>
-      <a href="docs/images/fleetty-hub.webp">
-        <img src="docs/images/fleetty-hub.webp" alt="深色主题下的 Fleetty Hub">
+      <strong>深色主题</strong><br><br>
+      <a href="docs/images/fleetty-hub-dark.webp">
+        <img src="docs/images/fleetty-hub-dark.webp" alt="深色主题下的 Fleetty Hub 和展开的 Slurm 队列">
       </a>
     </td>
     <td width="50%" valign="top">
-      <strong>浅色主题</strong> · 自动跟随终端外观<br><br>
+      <strong>浅色主题</strong><br><br>
       <a href="docs/images/fleetty-hub-light.webp">
-        <img src="docs/images/fleetty-hub-light.webp" alt="浅色主题下的 Fleetty Hub">
+        <img src="docs/images/fleetty-hub-light.webp" alt="浅色主题下相同的 Fleetty Hub 和 Slurm 队列">
       </a>
     </td>
   </tr>
+</table>
+
+<table>
   <tr>
     <td width="50%" valign="top">
       <strong>GPU 节点</strong> · GPU、Slurm 队列与进程<br><br>
@@ -41,13 +46,29 @@
       </a>
     </td>
     <td width="50%" valign="top">
+      <strong>网络</strong> · 流量历史与连接列表<br><br>
+      <a href="docs/images/fleetty-network.webp">
+        <img src="docs/images/fleetty-network.webp" alt="虚构 GPU 节点的网络流量历史与连接列表">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
       <strong>存储节点</strong> · 挂载点、Docker、PM2 与 HTTP<br><br>
       <a href="docs/images/fleetty-nas.webp">
         <img src="docs/images/fleetty-nas.webp" alt="虚构节点 storage-01 的 Fleetty 总览">
       </a>
     </td>
+    <td width="50%" valign="top">
+      <strong>存储地图</strong> · 直观看到目录占用<br><br>
+      <a href="docs/images/fleetty-storage-map.webp">
+        <img src="docs/images/fleetty-storage-map.webp" alt="Fleetty 的存储树图与目录占用列表">
+      </a>
+    </td>
   </tr>
 </table>
+
+终端界面使用 Bubble Tea 和 Lip Gloss，SSH 服务使用 Wish，日志使用 Charm Log。
 
 ## 安装
 

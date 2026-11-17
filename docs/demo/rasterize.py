@@ -7,6 +7,7 @@ JetBrains Mono on the theme background from viewColors().
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -21,8 +22,9 @@ THEMES = {
     "light": ("#F4F1EA", "#263244"),
 }
 
-REGULAR = "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf"
-BOLD = "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Bold.ttf"
+FONT_DIR = Path(os.environ.get("FLEETTY_DEMO_FONT_DIR", "/usr/share/fonts/truetype/jetbrains-mono"))
+REGULAR = FONT_DIR / "JetBrainsMono-Regular.ttf"
+BOLD = FONT_DIR / "JetBrainsMono-Bold.ttf"
 
 
 def parse_color(value):
