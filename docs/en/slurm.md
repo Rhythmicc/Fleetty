@@ -54,10 +54,10 @@ With that link, the compute-node panel lists jobs running on the node and pendin
 | State | Meaning |
 | --- | --- |
 | `RUNNING` | Allocated to this node, or running somewhere in the cluster |
-| `NEXT` | Still pending, but Slurm reports an estimated start |
-| `PENDING` | Waiting without an estimated start; the blocker explains why when known |
+| `NEXT` | The pending job(s) with the earliest estimated start (`squeue %S`) for each target node or partition |
+| `PENDING` | Other queued jobs (including later backfill estimates); the blocker explains why when known |
 
-`NEXT` is a display label, not a Slurm state or a promise of scheduling order. It uses the estimated start from `squeue %S`, shown in the job details. The time can change as the scheduler reevaluates the queue.
+`NEXT` is a display label, not a Slurm state or a promise of scheduling order. When Slurm assigns estimated starts to multiple pending jobs for the same target node or partition, only the earliest timestamp (and ties) is labeled `NEXT`, while later ones remain `PENDING` and still show `EST. START` in job details. The time can change as the scheduler reevaluates the queue.
 
 `WEIGHT` is the raw total priority from `squeue %Q`. A higher number usually means a higher scheduling priority. It is not a promise of a start time. Resources, dependencies, and backfill still change the real order.
 

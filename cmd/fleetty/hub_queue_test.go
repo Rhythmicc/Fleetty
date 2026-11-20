@@ -322,3 +322,80 @@ func TestHubQueuePreviewJobBudgetAndUnavailableStates(t *testing.T) {
 		t.Fatalf("wrong preview row budget: %q", got)
 	}
 }
+
+func TestSlurmNextMarksOnlyEarliestEstimatePerTarget(t *testing.T) {
+	m := compactTestHub(160, 40)
+	m.slurmFilter = -1
+	m.config.Nodes = []hubNodeConfig{{Name: "A100", SlurmCluster: "GPU", SlurmNode: "a100"}}
+	m.config.SlurmClusters = []slurmClusterConfig{{Name: "GPU"}}
+	m.slurmStates = []slurmClusterState{{Snapshot: slurmSnapshot{
+		Name: "GPU", CollectedAt: time.Now(),
+		Nodes: []slurmNode{
+			{Name: "a100", Partitions: []string{"a100"}},
+			{Name: "gpu5090", Partitions: []string{"gpu5090"}},
+			{Name: "gpu4090", Partitions: []string{"gpu4090", "gpu4090-long"}},
+		},
+		Jobs: []slurmJob{
+			{ID: "355527", Name: "high-pri-na", User: "hemeng", State: "PENDING", Priority: 10625, Partition: "a100", Reason: "Resources"},
+			{ID: "355274", Name: "a100-second", User: "junyuan", State: "PENDING", Priority: 6501, Partition: "a100", ExpectedNodes: "a100", ExpectedStart: "2026-11-20T10:24:00", Reason: "Priority"},
+			{ID: "355155", Name: "a100-first", User: "junyuan", State: "PENDING", Priority: 6501, Partition: "a100", ExpectedNodes: "a100", ExpectedStart: "2026-11-20T10:22:00", Reason: "Priority"},
+			{ID: "355509", Name: "a100-third", User: "nyy", State: "PENDING", Priority: 3791, Partition: "a100", ExpectedNodes: "a100", ExpectedStart: "2026-11-20T10:44:00", Reason: "Priority"},
+			{ID: "355140", Name: "a100-running", User: "junyuan", State: "RUNNING", Priority: 6501, Partition: "a100", NodeList: "a100"},
+			{ID: "355400", Name: "5090-tie-a", User: "nyy", State: "PENDING", Priority: 7489, Partition: "gpu5090", ExpectedNodes: "gpu5090", ExpectedStart: "2026-11-20T10:26:00", Reason: "Resources"},
+			{ID: "355401", Name: "5090-tie-b", User: "bob", State: "PENDING", Priority: 7000, Partition: "gpu5090", ExpectedNodes: "gpu5090", ExpectedStart: "2026-11-20T10:26:00", Reason: "Priority"},
+			{ID: "355600", Name: "4090-long", User: "carol", State: "PENDING", Priority: 8000, Partition: "gpu4090-long", ExpectedNodes: "gpu4090", ExpectedStart: "2026-11-20T11:00:00", Reason: "Priority"},
+			{ID: "355601", Name: "4090-short", User: "dave", State: "PENDING", Priority: 5000, Partition: "gpu4090", ExpectedNodes: "gpu4090", ExpectedStart: "2026-11-20T10:30:00", Reason: "Resources"},
+		},
+	}}}
+
+	jobs := m.selectedSlurmJobs()
+	byID := make(map[string]slurmDisplayJob, len(jobs))
+	var order []string
+	for _, job := range jobs {
+		byID[job.Job.ID] = job
+		order = append(order, job.Job.ID)
+	}
+	if running, next, pending := slurmDisplayStateCounts(jobs); running != 1 || next != 4 || pending != 4 {
+		t.Fatalf("counts = (run=%d, next=%d, pending=%d), want (1, 4, 4)", running, next, pending)
+	}
+	wantNext := map[string]bool{
+		"355155": true,
+		"355400": true,
+		"355401": true,
+		"355601": true,
+	}
+	for id, job := range byID {
+		if job.Next != wantNext[id] {
+			t.Fatalf("job %s Next = %v, want %v", id, job.Next, wantNext[id])
+		}
+		state, _ := slurmDisplayState(job)
+		if wantNext[id] && state != "NEXT" {
+			t.Fatalf("job %s state = %q, want NEXT", id, state)
+		}
+		if !wantNext[id] && !isSlurmRunning(job.Job.State) && state != "PENDING" {
+			t.Fatalf("job %s state = %q, want PENDING", id, state)
+		}
+	}
+	wantOrder := []string{"355140", "355155", "355400", "355401", "355601", "355527", "355274", "355509", "355600"}
+	if fmt.Sprint(order) != fmt.Sprint(wantOrder) {
+		t.Fatalf("cluster job order = %v, want %v", order, wantOrder)
+	}
+	detail := ansi.Strip(strings.Join(m.slurmExplanationLines(byID["355274"], 160, 14), "\n"))
+	if !strings.Contains(detail, "EST. START  2026-11-20 10:24:00") {
+		t.Fatalf("pending job with estimate lost EST. START in detail: %q", detail)
+	}
+
+	queue := m.nodeSlurmQueue(0)
+	if queue == nil {
+		t.Fatal("expected node Slurm queue for a100")
+	}
+	if running, next, pending := slurmDisplayStateCounts(queue.Jobs); running != 1 || next != 1 || pending != 3 {
+		t.Fatalf("a100 node queue counts = (run=%d, next=%d, pending=%d), want (1, 1, 3)", running, next, pending)
+	}
+	if len(queue.Jobs) != 5 || queue.Jobs[1].Job.ID != "355155" || !queue.Jobs[1].Next {
+		t.Fatalf("a100 node queue[1] = %+v, want 355155 as sole NEXT", queue.Jobs)
+	}
+	if queue.Jobs[2].Job.ID != "355527" || queue.Jobs[3].Job.ID != "355274" || queue.Jobs[4].Job.ID != "355509" {
+		t.Fatalf("a100 node queue pending order = %+v", queue.Jobs[2:])
+	}
+}

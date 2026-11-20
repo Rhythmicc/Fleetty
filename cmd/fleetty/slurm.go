@@ -656,7 +656,7 @@ func sortSlurmJobs(jobs []slurmDisplayJob) {
 		switch {
 		case isSlurmRunning(job.Job.State):
 			return 0
-		case job.Job.hasSlurmStartEstimate():
+		case job.Next:
 			return 1
 		case isSlurmPending(job.Job.State):
 			return 2
@@ -668,6 +668,9 @@ func sortSlurmJobs(jobs []slurmDisplayJob) {
 		left, right := rank(jobs[i]), rank(jobs[j])
 		if left != right {
 			return left < right
+		}
+		if left == 1 && jobs[i].Job.ExpectedStart != jobs[j].Job.ExpectedStart {
+			return jobs[i].Job.ExpectedStart < jobs[j].Job.ExpectedStart
 		}
 		if jobs[i].Cluster != jobs[j].Cluster {
 			return jobs[i].Cluster < jobs[j].Cluster
@@ -698,11 +701,51 @@ func (job slurmJob) hasSlurmStartEstimate() bool {
 	return strings.EqualFold(job.State, "PENDING") && job.ExpectedStart != ""
 }
 
+func slurmNextKey(display slurmDisplayJob) string {
+	if slurmNodeExpressionPresent(display.Job.ExpectedNodes) {
+		return display.Cluster + "\x00node:" + strings.TrimSpace(display.Job.ExpectedNodes)
+	}
+	return display.Cluster + "\x00part:" + strings.TrimSpace(display.Job.Partition)
+}
+
+func markSlurmNextJobs(jobs []slurmDisplayJob, singleNode bool) {
+	earliest := make(map[string]string)
+	for i := range jobs {
+		jobs[i].Next = false
+		if !jobs[i].Job.hasSlurmStartEstimate() {
+			continue
+		}
+		key := ""
+		if !singleNode {
+			key = slurmNextKey(jobs[i])
+		}
+		if current, ok := earliest[key]; !ok || jobs[i].Job.ExpectedStart < current {
+			earliest[key] = jobs[i].Job.ExpectedStart
+		}
+	}
+	if len(earliest) == 0 {
+		return
+	}
+	for i := range jobs {
+		if !jobs[i].Job.hasSlurmStartEstimate() {
+			continue
+		}
+		key := ""
+		if !singleNode {
+			key = slurmNextKey(jobs[i])
+		}
+		if jobs[i].Job.ExpectedStart == earliest[key] {
+			jobs[i].Next = true
+		}
+	}
+}
+
 type slurmDisplayJob struct {
 	Cluster  string
 	Job      slurmJob
 	ListID   string
 	Order    int
+	Next     bool
 	Snapshot *slurmSnapshot
 	Reports  []slurmProcessProgress
 }
@@ -777,6 +820,7 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 			Cluster: state.Snapshot.Name, Job: job, Order: order, Snapshot: &queueSnapshot,
 		})
 	}
+	markSlurmNextJobs(queue.Jobs, true)
 	sortSlurmJobs(queue.Jobs)
 	disambiguateSlurmListIDs(queue.Jobs)
 	return queue
@@ -1542,6 +1586,7 @@ func (m *hubModel) slurmJobs(filter int) []slurmDisplayJob {
 			})
 		}
 	}
+	markSlurmNextJobs(jobs, false)
 	sortSlurmJobs(jobs)
 	disambiguateSlurmListIDs(jobs)
 	return jobs
@@ -1552,7 +1597,7 @@ func slurmDisplayStateCounts(jobs []slurmDisplayJob) (running, next, pending int
 		switch {
 		case isSlurmRunning(job.Job.State):
 			running++
-		case job.Job.hasSlurmStartEstimate():
+		case job.Next:
 			next++
 		case isSlurmPending(job.Job.State):
 			pending++
@@ -1690,7 +1735,7 @@ func slurmQOSLabel(qos string) string {
 }
 
 func slurmDisplayState(display slurmDisplayJob) (string, lipgloss.Style) {
-	if display.Job.hasSlurmStartEstimate() {
+	if display.Next {
 		return "NEXT", accentStyle
 	}
 	return strings.ToUpper(display.Job.State), slurmJobStateStyle(display.Job.State)
