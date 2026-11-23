@@ -138,7 +138,7 @@ func TestCPUFrequencyPanelsFitAndRetainLoad(t *testing.T) {
 					}
 				}
 				for _, rich := range []bool{false, true} {
-					view := ansi.Strip(renderPagePanel(width, m.hostHealthPanelSpec(width, rich)))
+					view := ansi.Strip(renderPagePanel(width, m.hostHealthPanelSpec(width, rich, false)))
 					if !strings.Contains(view, want) {
 						t.Fatalf("overview lost frequency at width=%d rich=%v:\n%s", width, rich, view)
 					}

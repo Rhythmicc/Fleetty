@@ -17,8 +17,12 @@ type compactSlurmFormat struct {
 }
 
 func newCompactSlurmFormat(width int, cluster, hub bool) compactSlurmFormat {
+	idWidth := min(13, max(6, width-31))
+	if !hub {
+		idWidth = min(10, max(6, width-31))
+	}
 	f := compactSlurmFormat{
-		width: width, id: min(13, max(6, width-31)),
+		width: width, id: idWidth,
 		user: min(8, max(4, width-34)), hub: hub,
 	}
 	if cluster && width >= 92 {
@@ -69,13 +73,23 @@ func (f compactSlurmFormat) render(display slurmDisplayJob, header bool, base li
 		base.Render(fixedCell(job.Elapsed, 11, true)),
 	)
 	prefix := strings.Join(parts, base.Render(" ")) + base.Render(" ")
-	nameWidth := f.width - lipgloss.Width(prefix)
+	nameWidth := max(0, f.width-lipgloss.Width(prefix))
 	if f.tail > 0 {
-		nameWidth -= f.tail + 1
+		nameWidth = max(0, nameWidth-(f.tail+1))
 	}
-	name := base.Render(fixedCell(job.Name, max(0, nameWidth), false))
+	name := base.Render(fixedCell(job.Name, nameWidth, false))
 	if f.hub && !header && len(display.Reports) > 0 {
 		name = renderSlurmJobName(display, nameWidth, base)
+	} else if !f.hub && !header && f.tail == 0 && isSlurmPending(job.State) && strings.TrimSpace(job.Reason) != "" {
+		if reason := slurmDisplayReason(display); reason != "" && reason != "—" {
+			tag := " [" + reason + "]"
+			tagW := lipgloss.Width(tag)
+			if nameWidth >= tagW+4 {
+				jobLabel := ansi.Truncate(job.Name, nameWidth-tagW, "…")
+				pad := max(0, nameWidth-lipgloss.Width(jobLabel)-tagW)
+				name = base.Render(jobLabel) + warningStyle.Inherit(base).Render(tag) + base.Render(strings.Repeat(" ", pad))
+			}
+		}
 	}
 	row := prefix + name
 	if f.tail > 0 {
@@ -138,7 +152,7 @@ func slurmTableRows(width, contentLines int) int {
 }
 
 func appendSlurmQOSLegend(lines []string, jobs []slurmDisplayJob, width int) []string {
-	if width < slurmCompactWidth {
+	if width < slurmCompactWidth && len(jobs) > 0 {
 		return append(lines, slurmQOSLegend(jobs, width))
 	}
 	return lines

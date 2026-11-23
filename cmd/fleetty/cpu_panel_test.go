@@ -88,57 +88,80 @@ func TestOverviewCPUInformationGroups(t *testing.T) {
 					m.snapshot.CPUFrequency.SampledCores = 64
 				}
 			}
+			m.snapshot.NetworkInterfaces = []networkInterfaceInfo{{Name: "eth0", RX: 86 << 20, TX: 14 << 20, RXTotal: 12 << 30, TXTotal: 3 << 30}}
 			for _, width := range []int{32, 46, 60, 80, 90, 120, 180, 240} {
-				spec := m.hostHealthPanelSpec(width, true)
-				if len(spec.lines) != 8 {
-					t.Fatalf("host summary should use 8 rows: %d", len(spec.lines))
-				}
-				rows := make([]string, 3)
-				for i := range rows {
-					rows[i] = ansi.Strip(spec.lines[i])
-					if lipgloss.Width(spec.lines[i]) > width-4 {
-						t.Fatalf("CPU overview overflow width=%d: %q", width, rows[i])
+				for _, includeNet := range []bool{false, true} {
+					spec := m.hostHealthPanelSpec(width, true, includeNet)
+					contentWidth := width - 4
+					wantLines := 8
+					if contentWidth >= 64 {
+						wantLines = 7
+					} else if contentWidth >= 54 {
+						wantLines = 6
 					}
-				}
-				joined := strings.Join(rows, "\n")
-				for _, unwanted := range []string{"HEALTHY", "WATCH", "HIGH", "CRITICAL", "vCPU", "/proc/", "128/128", "64/128"} {
-					if strings.Contains(joined, unwanted) {
-						t.Fatalf("overview retains misleading/diagnostic text %q: %s", unwanted, joined)
+					if includeNet {
+						wantLines++
 					}
-				}
-				if !strings.HasPrefix(rows[0], "CPU ") || !strings.Contains(rows[0], "128 logical") {
-					t.Fatalf("hardware row lost logical count: %s", rows[0])
-				}
-				clock := "AVG 2.49GHz"
-				if state == "unavailable" {
-					clock = "CLK --"
-					if strings.Contains(joined, "GHz") {
-						t.Fatal("missing frequency rendered as a measurement")
+					if len(spec.lines) != wantLines {
+						t.Fatalf("width=%d includeNet=%v: host summary uses %d rows, want %d", width, includeNet, len(spec.lines), wantLines)
 					}
-				}
-				if !strings.HasPrefix(rows[1], "USAGE 37.8%") || !strings.Contains(rows[1], clock) {
-					t.Fatalf("primary readings truncated: %s", rows[1])
-				}
-				if !strings.HasPrefix(rows[2], "LOAD 76.57 · 80.42 · 74.61") {
-					t.Fatalf("load values moved or truncated: %s", rows[2])
-				}
-				if width >= 80 {
-					if !strings.Contains(strings.Join(spec.lines, "\n"), "HIST · CPU %") || !strings.Contains(rows[2], "(1m 5m 15m)") {
-						t.Fatalf("wide overview lost model or trend labels: %s", joined)
+					rows := make([]string, 3)
+					for i := range rows {
+						rows[i] = ansi.Strip(spec.lines[i])
 					}
-					if state != "unavailable" && !strings.Contains(rows[1], "RANGE 2.00–3.34GHz") {
-						t.Fatal("wide overview lost frequency range")
+					for _, line := range spec.lines {
+						if lipgloss.Width(line) > contentWidth {
+							t.Fatalf("CPU overview overflow width=%d includeNet=%v: %q", width, includeNet, ansi.Strip(line))
+						}
 					}
-				}
-				if width >= 90 && !strings.Contains(rows[0], m.snapshot.CPUModel) {
-					t.Fatal("wide hardware row lost CPU model")
-				}
-				if strings.Contains(strings.Join(spec.lines, "\n"), "1H") {
-					t.Fatal("overview retains duplicate CPU history")
-				}
-				compact := m.hostHealthPanelSpec(width, false)
-				if len(compact.lines) != 11 || strings.Contains(ansi.Strip(compact.lines[0]), "HEALTHY") {
-					t.Fatal("compact overview miscounted history or retained CPU health diagnosis")
+					joined := strings.Join(rows, "\n")
+					for _, unwanted := range []string{"HEALTHY", "WATCH", "HIGH", "CRITICAL", "vCPU", "/proc/", "128/128", "64/128"} {
+						if strings.Contains(joined, unwanted) {
+							t.Fatalf("overview retains misleading/diagnostic text %q: %s", unwanted, joined)
+						}
+					}
+					if !strings.HasPrefix(rows[0], "CPU ") || !strings.Contains(rows[0], "128 logical") {
+						t.Fatalf("hardware row lost logical count: %s", rows[0])
+					}
+					clock := "AVG 2.49GHz"
+					if state == "unavailable" {
+						clock = "CLK --"
+						if strings.Contains(joined, "GHz") {
+							t.Fatal("missing frequency rendered as a measurement")
+						}
+					}
+					if !strings.HasPrefix(rows[1], "USAGE 37.8%") || !strings.Contains(rows[1], clock) {
+						t.Fatalf("primary readings truncated: %s", rows[1])
+					}
+					if !strings.HasPrefix(rows[2], "LOAD 76.57 · 80.42 · 74.61") {
+						t.Fatalf("load values moved or truncated: %s", rows[2])
+					}
+					if width >= 80 {
+						if !strings.Contains(strings.Join(spec.lines, "\n"), "HIST · CPU %") || !strings.Contains(rows[2], "(1m 5m 15m)") {
+							t.Fatalf("wide overview lost model or trend labels: %s", joined)
+						}
+						if state != "unavailable" && !strings.Contains(rows[1], "RANGE 2.00–3.34GHz") {
+							t.Fatal("wide overview lost frequency range")
+						}
+					}
+					if width >= 90 && !strings.Contains(rows[0], m.snapshot.CPUModel) {
+						t.Fatal("wide hardware row lost CPU model")
+					}
+					if strings.Contains(strings.Join(spec.lines, "\n"), "1H") {
+						t.Fatal("overview retains duplicate CPU history")
+					}
+					lastPlain := ansi.Strip(spec.lines[len(spec.lines)-1])
+					if includeNet != strings.HasPrefix(lastPlain, "NET ") {
+						t.Fatalf("width=%d includeNet=%v: last line = %q", width, includeNet, lastPlain)
+					}
+					compact := m.hostHealthPanelSpec(width, false, includeNet)
+					wantCompactLines := 10
+					if includeNet {
+						wantCompactLines = 11
+					}
+					if len(compact.lines) != wantCompactLines || strings.Contains(ansi.Strip(compact.lines[0]), "HEALTHY") {
+						t.Fatalf("width=%d includeNet=%v: compact overview got %d lines (want %d)", width, includeNet, len(compact.lines), wantCompactLines)
+					}
 				}
 			}
 		}

@@ -140,14 +140,24 @@ func TestSlurmQOSColorsAreReadableAndDistinct(t *testing.T) {
 }
 
 func TestSlurmArraySuffixHiddenInListsButNotDetails(t *testing.T) {
-	for _, id := range []string{"315058", "315039_44", "312889_[2-5%1]"} {
-		base := strings.SplitN(id, "_", 2)[0]
-		job := slurmDisplayJob{Cluster: "Cluster", Job: slurmJob{ID: id, User: "alice", State: "PENDING", QOS: "low"}}
-		for _, width := range []int{36, 96, 112, 152, 200} {
+	cases := []struct {
+		id, want string
+		minWidth int
+	}{
+		{id: "315058", want: "315058", minWidth: 36},
+		{id: "315039_44", want: "315039", minWidth: 36},
+		{id: "312889_[2-5%1]", want: "312889×4", minWidth: 40},
+	}
+	for _, tc := range cases {
+		job := slurmDisplayJob{Cluster: "Cluster", Job: slurmJob{ID: tc.id, User: "alice", State: "PENDING", QOS: "low"}}
+		for _, width := range []int{36, 40, 96, 112, 152, 200} {
 			for _, row := range []string{renderSlurmJobRow(job, width, true, lipgloss.NewStyle()), renderSlurmNodeJobRow(job, width)} {
 				plain := ansi.Strip(row)
-				if !strings.Contains(plain, base+" ") || strings.Contains(plain, "_") {
-					t.Fatalf("width %d: suffix leaked or base ID is missing: %s", width, plain)
+				if strings.Contains(plain, "_") {
+					t.Fatalf("width %d: raw array suffix leaked: %s", width, plain)
+				}
+				if width >= tc.minWidth && !strings.Contains(plain, tc.want+" ") {
+					t.Fatalf("width %d: expected list ID %q in row: %s", width, tc.want, plain)
 				}
 			}
 		}
@@ -155,8 +165,8 @@ func TestSlurmArraySuffixHiddenInListsButNotDetails(t *testing.T) {
 			config:      hubConfig{SlurmClusters: []slurmClusterConfig{{Name: "Cluster"}}},
 			slurmStates: []slurmClusterState{{Snapshot: slurmSnapshot{Name: "Cluster", CollectedAt: time.Now(), Jobs: []slurmJob{job.Job}}}},
 		}
-		if !strings.Contains(ansi.Strip(m.hubView()), id) {
-			t.Fatalf("job details lost full ID %s", id)
+		if !strings.Contains(ansi.Strip(m.hubView()), tc.id) {
+			t.Fatalf("job details lost full ID %s", tc.id)
 		}
 	}
 }
@@ -306,6 +316,30 @@ func TestCompactSlurmStateCodes(t *testing.T) {
 			fields := strings.Fields(ansi.Strip(row))
 			if len(fields) != 6 || fields[2] != "yuechen" || fields[3] != test.want || fields[4] != "1:23" || fields[5] != "training" {
 				t.Fatalf("state %s: %v", test.state, fields)
+			}
+		}
+	}
+}
+
+func TestCompactNodePendingReasonFitsAndPreservesSelection(t *testing.T) {
+	job := slurmDisplayJob{Job: slurmJob{
+		ID: "18502", User: "carol", State: "PENDING", QOS: "normal",
+		Elapsed: "0:00", Name: "eval-suite", Reason: "Resources",
+	}}
+	for _, mode := range []colorMode{colorModeDark, colorModeLight} {
+		base := selectedProcessStyle(mode)
+		wantBG := uv.NewStyledString(base.Render(" ")).Lines(ansi.GraphemeWidth)[0][0].Style.Bg
+		plain := renderSlurmNodeJobRow(job, 66)
+		selected := newCompactSlurmFormat(66, false, false).render(job, false, base)
+		if lipgloss.Width(plain) > 66 || !strings.Contains(ansi.Strip(plain), "eval-suite [RESOURCES]") {
+			t.Fatalf("pending compact node row = %q", ansi.Strip(plain))
+		}
+		if ansi.Strip(plain) != ansi.Strip(selected) {
+			t.Fatalf("selection changed pending row content")
+		}
+		for x, cell := range uv.NewStyledString(selected).Lines(ansi.GraphemeWidth)[0] {
+			if !reflect.DeepEqual(cell.Style.Bg, wantBG) {
+				t.Fatalf("%s cell %d (%q) lost selection background", mode, x, cell.Content)
 			}
 		}
 	}

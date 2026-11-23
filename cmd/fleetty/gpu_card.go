@@ -101,7 +101,7 @@ func newGPUCardComponent(snapshot monitorSnapshot) gpuCardComponent {
 func (card gpuCardComponent) panelSpec(variant gpuCardVariant, width, deviceLimit int) pagePanelSpec {
 	switch variant {
 	case gpuCardOverview:
-		return buildGPUOverviewPanelSpec(card.gpus, card.gpuError, width)
+		return buildGPUOverviewPanelSpec(card.gpus, card.gpuError, width, deviceLimit)
 	case gpuCardCompact:
 		return card.compactPanelSpec(width)
 	default:

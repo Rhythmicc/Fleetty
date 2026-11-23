@@ -399,3 +399,131 @@ func TestSlurmNextMarksOnlyEarliestEstimatePerTarget(t *testing.T) {
 		t.Fatalf("a100 node queue pending order = %+v", queue.Jobs[2:])
 	}
 }
+
+func TestSlurmJobTaskCount(t *testing.T) {
+	for _, tc := range []struct {
+		id   string
+		want int
+	}{
+		{"359602", 1},
+		{"359022_43", 1},
+		{"312889_[2-5%1]", 4},
+		{"18421_[2-8]", 7},
+		{"144886_[8-15%2]", 8},
+		{"359022_[1,3,10-20:2%4]", 8},
+		{"359022_[0-99:10]", 10},
+		{"359022_[5]", 1},
+		{"359022_[5-5]", 1},
+		{"", 1},
+		{"359022_[]", 1},
+		{"359022_[%2]", 1},
+		{"359022_[5-2]", 1},
+		{"359022_[1-5:0]", 1},
+		{"359022_[-1]", 1},
+		{"359022_[1-3]+0", 1},
+	} {
+		if got := slurmJobTaskCount(tc.id); got != tc.want {
+			t.Errorf("slurmJobTaskCount(%q) = %d, want %d", tc.id, got, tc.want)
+		}
+	}
+}
+
+func TestSlurmQueueGroupsArrayTasksByBaseIDAndState(t *testing.T) {
+	now := time.Now()
+	m := compactTestHub(160, 40)
+	m.slurmFilter = -1
+	m.config.Nodes = []hubNodeConfig{
+		{Name: "gpu01", SlurmCluster: "GPU", SlurmNode: "gpu01"},
+		{Name: "gpu02", SlurmCluster: "GPU", SlurmNode: "gpu02"},
+	}
+	m.config.SlurmClusters = []slurmClusterConfig{{Name: "GPU"}}
+	m.states = []hubNodeState{
+		{LastSeen: now, Snapshot: monitorSnapshot{SlurmProgress: []slurmProcessProgress{
+			{JobID: 359101, UID: 1000, PID: 101, Value: processProgress{Done: 40, Total: 100}},
+			{JobID: 359102, UID: 1000, PID: 102, Value: processProgress{Done: 60, Total: 100}},
+		}}},
+		{LastSeen: now},
+	}
+	m.slurmStates = []slurmClusterState{{Snapshot: slurmSnapshot{
+		Name: "GPU", CollectedAt: now,
+		Nodes: []slurmNode{{Name: "gpu01", Partitions: []string{"gpu"}}},
+		Jobs: []slurmJob{
+			{ID: "359602", User: "alice", State: "RUNNING", Partition: "gpu", NodeList: "gpu01", Name: "solo-job"},
+			{ID: "359022_43", User: "bob", State: "PENDING", Priority: 900, Partition: "gpu", Reason: "Priority", Name: "sweep"},
+			{ID: "359022_42", User: "bob", State: "PENDING", Priority: 900, Partition: "gpu", Reason: "Priority", Name: "sweep"},
+			{ID: "359100_1", RawID: 359101, UID: 1000, User: "alice", State: "RUNNING", Partition: "gpu", NodeList: "gpu01", Name: "train"},
+			{ID: "359100_2", RawID: 359102, UID: 1000, User: "alice", State: "RUNNING", Partition: "gpu", NodeList: "gpu01", Name: "train"},
+			{ID: "359100_[3-6%2]", User: "alice", State: "PENDING", Priority: 800, Partition: "gpu", Reason: "JobArrayTaskLimit", Name: "train"},
+			{ID: "359200_1", User: "carol", State: "PENDING", Priority: 700, Partition: "gpu", ExpectedNodes: "gpu01", ExpectedStart: "2026-11-21T12:00:00", Reason: "Priority", Name: "eval"},
+			{ID: "359200_[2-4]", User: "carol", State: "PENDING", Priority: 700, Partition: "gpu", ExpectedNodes: "gpu01", Reason: "Priority", Name: "eval"},
+		},
+	}}}
+
+	jobs := m.selectedSlurmJobs()
+	if len(jobs) != 6 {
+		t.Fatalf("grouped jobs len = %d, want 6: %+v", len(jobs), jobs)
+	}
+	byListID := make(map[string]slurmDisplayJob, len(jobs))
+	for _, job := range jobs {
+		byListID[job.listID()] = job
+	}
+	if _, ok := byListID["359602"]; !ok || strings.Contains(strings.Join(func() []string {
+		var ids []string
+		for k := range byListID {
+			ids = append(ids, k)
+		}
+		return ids
+	}(), " "), "×1") {
+		t.Fatalf("unexpected ×1 suffix or missing solo job: %#v", byListID)
+	}
+	if sweep, ok := byListID["359022×2"]; !ok || sweep.TaskCount != 2 || len(sweep.MemberIDs) != 2 ||
+		sweep.MemberIDs[0] != "359022_43" || sweep.MemberIDs[1] != "359022_42" {
+		t.Fatalf("expected 359022×2 grouped from _43 and _42: %+v", byListID)
+	}
+	if runTrain, ok := byListID["359100×2"]; !ok || len(runTrain.Reports) != 2 || runTrain.Job.State != "RUNNING" {
+		t.Fatalf("expected RUNNING 359100×2 with 2 reports: %+v", byListID)
+	}
+	if pendTrain, ok := byListID["359100×4"]; !ok || pendTrain.Job.State != "PENDING" {
+		t.Fatalf("expected PENDING 359100×4: %+v", byListID)
+	}
+	if nextEval, ok := byListID["359200"]; !ok || !nextEval.Next || nextEval.TaskCount != 1 {
+		t.Fatalf("expected NEXT 359200 (Count=1): %+v", byListID)
+	}
+	if pendEval, ok := byListID["359200×3"]; !ok || pendEval.Next {
+		t.Fatalf("expected PENDING 359200×3: %+v", byListID)
+	}
+
+	detail := ansi.Strip(strings.Join(m.slurmExplanationLines(byListID["359022×2"], 120, 20), "\n"))
+	if !strings.Contains(detail, "GPU / 359022×2") || !strings.Contains(detail, "359022_43, 359022_42") {
+		t.Fatalf("grouped details missing aggregated title or member IDs:\n%s", detail)
+	}
+
+	queue := m.nodeSlurmQueue(0)
+	if queue == nil {
+		t.Fatal("expected node queue")
+	}
+	nodeIDs := make(map[string]bool, len(queue.Jobs))
+	for _, job := range queue.Jobs {
+		nodeIDs[job.listID()] = true
+	}
+	for _, want := range []string{"359602", "359022×2", "359100×2", "359100×4", "359200", "359200×3"} {
+		if !nodeIDs[want] {
+			t.Fatalf("node queue missing %q: %#v", want, nodeIDs)
+		}
+	}
+
+	// Retain cursor on 359022 when 359022_43 finishes/leaves and 359022_42 remains.
+	for i, job := range jobs {
+		if job.listID() == "359022×2" {
+			m.slurmCursor = i
+			break
+		}
+	}
+	m.rememberSlurmSelection()
+	m.slurmStates[0].Snapshot.Jobs = append(m.slurmStates[0].Snapshot.Jobs[:1], m.slurmStates[0].Snapshot.Jobs[2:]...)
+	m.clampSlurmCursor()
+	updated := m.selectedSlurmJobs()
+	if updated[m.slurmCursor].listID() != "359022" {
+		t.Fatalf("cursor moved to %q after _43 left, want 359022", updated[m.slurmCursor].listID())
+	}
+}

@@ -67,7 +67,7 @@ ssh-keyscan -p 22 login.example.com 2>/dev/null |
 
 Hub 队列的内容宽度达到 112 列时，`TIME` 按「已运行时间 / Slurm 运行时限」显示，例如 `4:20 / 30:00`。窄屏表格只显示已运行时间。按 `s` 展开队列，再按 Enter 打开作业详情，可查看两个完整时间。
 
-队列内容宽度小于 112 列时，隐藏 WEIGHT 和独立的 QOS 列，作业号左侧的彩色圆点表示 QOS。紧凑表保留 JOB ID、USER、状态缩写（R 为 RUNNING，N 为 NEXT，P 为 PENDING）、ELAPSED 和 NAME。Hub 从 72 列起在末列 NODE 显示已分配的节点；未分配显示 `—`。图例说明 QOS 颜色，颜色不表示调度顺序。多集群且空间足够时才显示 CLUSTER。数组后缀默认隐藏；同一集群中不同作业行会撞号时则保留后缀。完整队列按 Enter 可查看准确作业号、优先级和阻塞原因。
+队列内容宽度小于 112 列时，隐藏 WEIGHT 和独立的 QOS 列，作业号左侧的彩色圆点表示 QOS。紧凑表保留 JOB ID、USER、状态缩写（R 为 RUNNING，N 为 NEXT，P 为 PENDING）、ELAPSED 和 NAME。Hub 从 72 列起在末列 NODE 显示已分配的节点；未分配显示 `—`。图例说明 QOS 颜色，颜色不表示调度顺序。多集群且空间足够时才显示 CLUSTER。同一作业 ID 与状态下的数组子任务会合并为一行展示，格式为 `ID×Count`（`Count == 1` 时仅显示 `ID`）。完整队列按 Enter 可查看各子任务准确作业号、优先级和阻塞原因。
 
 运行中的作业收到有效的 Fleetty socket 进度上报时，作业名旁会显示进度条；空间不足时只显示百分比。上报的 Linux 节点需运行新版 Fleetty，已在 Hub 中关联到 Slurm 集群和节点，并使用数字作业 ID 的 Slurm cgroup。Fleetty 校验作业分配 ID、用户 UID 和实际分配的节点。同一作业有多个上报进程时，表格显示上报数，详情可查看各进程的计数，不合成一个作业百分比。
 

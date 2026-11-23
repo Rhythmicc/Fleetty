@@ -1427,16 +1427,16 @@ func TestDesignedOverviewIsCapabilityAwareAndNonRepeating(t *testing.T) {
 	for _, expected := range []string{
 		"1 OVERVIEW", "2 COMPUTE", "3 NETWORK",
 		"BAT 80% AC", "Caps: ", "GPU,Metal,UMA", "macOS 15.5",
-		"HOST HEALTH", "GPU", "NETWORK ACTIVITY",
+		"HOST HEALTH", "GPU",
 		"NODE QUEUE / SLURM", "TOP PROCESSES",
-		"TOTAL ↓ 842.0 GiB", "sync-worker", "FULL LIST [2 COMPUTE]",
-		"12 logical CPUs", "(1m 5m 15m)", "1m AVG", "PEAK",
+		"NET ", "TOTAL ↓ 842.0 GiB", "FULL LIST [2 COMPUTE]",
+		"12 logical CPUs", "(1m 5m 15m)",
 	} {
 		if !strings.Contains(plain, expected) {
 			t.Fatalf("designed overview missing %q:\n%s", expected, plain)
 		}
 	}
-	for _, duplicate := range []string{"SYSTEM TIMELINE", "GPU / COMPUTE SUMMARY"} {
+	for _, duplicate := range []string{"SYSTEM TIMELINE", "GPU / COMPUTE SUMMARY", "NETWORK ACTIVITY"} {
 		if strings.Contains(rendered, duplicate) {
 			t.Fatalf("designed overview repeated %q:\n%s", duplicate, rendered)
 		}
@@ -1482,7 +1482,7 @@ func TestAppleComputeActivityMetricColumnsAlign(t *testing.T) {
 		Utilization: 33, RendererUtilization: 33, TilerUtilization: 26,
 		MemoryUsed: 3200 << 20, MemoryTotal: 9 << 30, CoreCount: 40,
 	}}}}
-	lines := model.computeActivityPanelSpec(80).lines
+	lines := model.computeActivityPanelSpec(80, 0).lines
 	if len(lines) != 5 {
 		t.Fatalf("Apple GPU lines = %d, want 5", len(lines))
 	}
@@ -1526,9 +1526,9 @@ func TestMultiGPUOverviewUsesOneBoundedRowPerDevice(t *testing.T) {
 	}
 	gpus[0].Workloads = []gpuWorkloadInfo{{PID: 42, User: "alice", Name: "/jobs/train.py"}}
 	lines := (&monitorModel{snapshot: monitorSnapshot{GPUs: gpus}}).
-		computeActivityPanelSpec(80).lines
-	if len(lines) != 9 {
-		t.Fatalf("8-GPU overview lines = %d, want a bounded 9-line summary", len(lines))
+		computeActivityPanelSpec(80, 0).lines
+	if len(lines) != 8 {
+		t.Fatalf("8-GPU overview lines = %d, want a bounded 8-line summary", len(lines))
 	}
 	rendered := strings.Join(lines, "\n")
 	plain := ansi.Strip(rendered)
@@ -1547,10 +1547,15 @@ func TestMultiGPUOverviewUsesOneBoundedRowPerDevice(t *testing.T) {
 			t.Fatalf("multi-GPU line %d width = %d, want <= 76: %q", index, width, ansi.Strip(line))
 		}
 	}
+	wideLines := (&monitorModel{snapshot: monitorSnapshot{GPUs: gpus}}).
+		computeActivityPanelSpec(140, 0).lines
+	if len(wideLines) != 7 {
+		t.Fatalf("wide 8-GPU overview lines = %d, want 7", len(wideLines))
+	}
 	fourLines := (&monitorModel{snapshot: monitorSnapshot{GPUs: gpus[:4]}}).
-		computeActivityPanelSpec(80).lines
-	if len(fourLines) != 8 {
-		t.Fatalf("4-GPU overview lines = %d, want 8", len(fourLines))
+		computeActivityPanelSpec(80, 0).lines
+	if len(fourLines) != 7 {
+		t.Fatalf("4-GPU overview lines = %d, want 7", len(fourLines))
 	}
 	if strings.Contains(ansi.Strip(strings.Join(fourLines, "\n")), "more devices") {
 		t.Fatal("4-GPU overview should display every device without an overflow hint")

@@ -101,7 +101,7 @@ func TestHistoryChartAllSurfaces(t *testing.T) {
 		for _, view := range []string{
 			m.renderCPUWidget(card, 180, widgetSizeMedium),
 			m.renderCPUWidget(card, 180, widgetSizeSmall),
-			renderPagePanel(90, m.hostHealthPanelSpec(90, true)),
+			renderPagePanel(90, m.hostHealthPanelSpec(90, true, false)),
 			renderPagePanel(180, m.networkTrafficSummaryPanelSpec(180)),
 			m.nasNetworkPanel(180),
 		} {

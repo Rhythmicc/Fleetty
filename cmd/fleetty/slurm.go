@@ -741,13 +741,14 @@ func markSlurmNextJobs(jobs []slurmDisplayJob, singleNode bool) {
 }
 
 type slurmDisplayJob struct {
-	Cluster  string
-	Job      slurmJob
-	ListID   string
-	Order    int
-	Next     bool
-	Snapshot *slurmSnapshot
-	Reports  []slurmProcessProgress
+	Cluster   string
+	Job       slurmJob
+	TaskCount int
+	MemberIDs []string
+	Order     int
+	Next      bool
+	Snapshot  *slurmSnapshot
+	Reports   []slurmProcessProgress
 }
 
 type nodeSlurmQueue struct {
@@ -822,7 +823,7 @@ func (m *hubModel) nodeSlurmQueue(nodeIndex int) *nodeSlurmQueue {
 	}
 	markSlurmNextJobs(queue.Jobs, true)
 	sortSlurmJobs(queue.Jobs)
-	disambiguateSlurmListIDs(queue.Jobs)
+	queue.Jobs = groupSlurmDisplayJobs(queue.Jobs)
 	return queue
 }
 
@@ -1225,32 +1226,111 @@ func slurmBaseJobID(id string) string {
 	return base
 }
 
-// Reveal array suffixes only when distinct jobs in this list share a base ID.
-func disambiguateSlurmListIDs(jobs []slurmDisplayJob) {
-	type key struct{ cluster, base string }
-	ids := make(map[key]string, len(jobs))
+func parseSlurmArrayItem(item string) (int, bool) {
+	item = strings.TrimSpace(item)
+	if item == "" {
+		return 0, false
+	}
+	rangePart, stepPart, hasStep := strings.Cut(item, ":")
+	step := 1
+	if hasStep {
+		parsed, err := strconv.Atoi(strings.TrimSpace(stepPart))
+		if err != nil || parsed < 1 {
+			return 0, false
+		}
+		step = parsed
+	}
+	startPart, endPart, hasRange := strings.Cut(rangePart, "-")
+	if !hasRange {
+		value, err := strconv.Atoi(strings.TrimSpace(startPart))
+		if err != nil || value < 0 {
+			return 0, false
+		}
+		return 1, true
+	}
+	start, err := strconv.Atoi(strings.TrimSpace(startPart))
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	end, err := strconv.Atoi(strings.TrimSpace(endPart))
+	if err != nil || end < start {
+		return 0, false
+	}
+	return (end-start)/step + 1, true
+}
+
+func slurmJobTaskCount(id string) int {
+	_, suffix, ok := strings.Cut(id, "_")
+	if !ok || !strings.HasPrefix(suffix, "[") || !strings.HasSuffix(suffix, "]") {
+		return 1
+	}
+	spec := suffix[1 : len(suffix)-1]
+	spec, _, _ = strings.Cut(spec, "%")
+	if strings.TrimSpace(spec) == "" {
+		return 1
+	}
+	total := 0
+	for _, item := range strings.Split(spec, ",") {
+		count, valid := parseSlurmArrayItem(item)
+		if !valid {
+			return 1
+		}
+		total += count
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
+}
+
+// Group array tasks that share a cluster, base job ID, and display state into ID×Count rows.
+func groupSlurmDisplayJobs(jobs []slurmDisplayJob) []slurmDisplayJob {
+	type key struct{ cluster, base, state string }
+	indexByKey := make(map[key]int, len(jobs))
+	grouped := make([]slurmDisplayJob, 0, len(jobs))
 	for _, display := range jobs {
-		id := display.Job.ID
-		k := key{display.Cluster, slurmBaseJobID(id)}
-		if prev, ok := ids[k]; !ok {
-			ids[k] = id
-		} else if prev != id {
-			ids[k] = ""
+		count := display.taskCount()
+		state, _ := slurmDisplayState(display)
+		k := key{display.Cluster, slurmBaseJobID(display.Job.ID), state}
+		if idx, exists := indexByKey[k]; exists {
+			grouped[idx].TaskCount += count
+			grouped[idx].MemberIDs = append(grouped[idx].MemberIDs, display.Job.ID)
+			grouped[idx].Reports = append(grouped[idx].Reports, display.Reports...)
+			continue
 		}
+		display.TaskCount = count
+		display.MemberIDs = []string{display.Job.ID}
+		indexByKey[k] = len(grouped)
+		grouped = append(grouped, display)
 	}
-	for i := range jobs {
-		id := jobs[i].Job.ID
-		if ids[key{jobs[i].Cluster, slurmBaseJobID(id)}] == "" {
-			jobs[i].ListID = id
-		}
+	return grouped
+}
+
+func (display slurmDisplayJob) taskCount() int {
+	if display.TaskCount > 0 {
+		return display.TaskCount
 	}
+	return slurmJobTaskCount(display.Job.ID)
 }
 
 func (display slurmDisplayJob) listID() string {
-	if display.ListID != "" {
-		return display.ListID
+	base := slurmBaseJobID(display.Job.ID)
+	if count := display.taskCount(); count > 1 {
+		return fmt.Sprintf("%s×%d", base, count)
 	}
-	return slurmBaseJobID(display.Job.ID)
+	return base
+}
+
+func (display slurmDisplayJob) matchesStableID(target string) bool {
+	if slurmStableJobID(display.Job) == target {
+		return true
+	}
+	for _, id := range display.MemberIDs {
+		if slurmStableJobID(slurmJob{ID: id, State: display.Job.State}) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func slurmRunningArraySiblings(id string, jobs []slurmJob) int {
@@ -1356,7 +1436,7 @@ func (m *hubModel) clampSlurmCursor() {
 	}
 	if m.slurmJobID != "" {
 		for index, display := range jobs {
-			if slurmStableJobID(display.Job) == m.slurmJobID &&
+			if display.matchesStableID(m.slurmJobID) &&
 				display.Cluster == m.slurmJobCluster {
 				m.slurmCursor = index
 				return
@@ -1403,6 +1483,9 @@ func (m *hubModel) slurmExplanationLines(display slurmDisplayJob, width, height 
 	explanation := explainSlurmJob(job, display.Snapshot)
 	state, stateStyle := slurmDisplayState(display)
 	title := fmt.Sprintf("%s / %s", display.Cluster, job.ID)
+	if len(display.MemberIDs) > 1 {
+		title = fmt.Sprintf("%s / %s", display.Cluster, display.listID())
+	}
 	meta := stateStyle.Render(state) + dimStyle.Render("  ·  ") +
 		slurmExplanationBadgeStyle(explanation).Render(explanation.Badge)
 
@@ -1416,10 +1499,20 @@ func (m *hubModel) slurmExplanationLines(display slurmDisplayJob, width, height 
 	}
 	lines := []string{
 		hubRackAlign(gpuTitleStyle.Render(label)+"  "+valueStyle.Render(title), meta, width),
-		dimStyle.Render("CONTROLLER  ") + valueStyle.Render(controllerReason),
-		dimStyle.Render("EVIDENCE    ") + valueStyle.Render(explanation.Source),
-		dimStyle.Render("TIME        ") + valueStyle.Render(slurmQueueTime(job, 0)),
 	}
+	if len(display.MemberIDs) > 1 {
+		limit := min(6, len(display.MemberIDs))
+		tasks := strings.Join(display.MemberIDs[:limit], ", ")
+		if len(display.MemberIDs) > limit {
+			tasks += fmt.Sprintf(" (+%d more)", len(display.MemberIDs)-limit)
+		}
+		lines = append(lines, dimStyle.Render("TASKS       ")+valueStyle.Render(tasks))
+	}
+	lines = append(lines,
+		dimStyle.Render("CONTROLLER  ")+valueStyle.Render(controllerReason),
+		dimStyle.Render("EVIDENCE    ")+valueStyle.Render(explanation.Source),
+		dimStyle.Render("TIME        ")+valueStyle.Render(slurmQueueTime(job, 0)),
+	)
 	for _, report := range display.Reports[:min(3, len(display.Reports))] {
 		p := report.Value
 		line := fmt.Sprintf("PID %d · %d / %d · %d%%", report.PID, p.Done, p.Total, slurmProgressPercent(p))
@@ -1588,7 +1681,7 @@ func (m *hubModel) slurmJobs(filter int) []slurmDisplayJob {
 	}
 	markSlurmNextJobs(jobs, false)
 	sortSlurmJobs(jobs)
-	disambiguateSlurmListIDs(jobs)
+	jobs = groupSlurmDisplayJobs(jobs)
 	return jobs
 }
 

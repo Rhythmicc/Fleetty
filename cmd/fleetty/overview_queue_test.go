@@ -26,19 +26,23 @@ func TestOverviewQueueUsesRenderedPanelWidth(t *testing.T) {
 					m.snapshot.GPUs = []gpuInfo{{Index: 0, Name: "GPU"}}
 				}
 				page, _ := m.renderOverviewPage(width)
-				lines := strings.Split(ansi.Strip(page), "\n")
-				panelWidth, start := width, 0
-				foundRule, foundJob := false, false
-				for i, line := range lines {
+				plain := ansi.Strip(page)
+				if strings.Contains(plain, "visible jobs") {
+					t.Fatalf("overview queue retained redundant bottom footer:\n%s", plain)
+				}
+				lines := strings.Split(plain, "\n")
+				start, panelWidth := 0, width
+				if width >= 96 {
+					leftW, rightW := overviewSplitWidths(width)
+					start, panelWidth = leftW+1, rightW
+				}
+				foundHeader, foundJob := false, false
+				for _, line := range lines {
 					if lipgloss.Width(line) > width {
 						t.Fatalf("line exceeds terminal width: %q", line)
 					}
-					if strings.Contains(line, "visible jobs") {
-						foundRule = true
-						rule := ansi.Cut(lines[i-1], start+2, start+panelWidth-2)
-						if rule != strings.Repeat("─", panelWidth-4) {
-							t.Fatalf("queue rule does not span its %d-column panel: %q", panelWidth, rule)
-						}
+					if strings.Contains(line, "NODE QUEUE / SLURM") {
+						foundHeader = true
 					}
 					if strings.Contains(line, "134323 ") {
 						foundJob = true
@@ -48,12 +52,12 @@ func TestOverviewQueueUsesRenderedPanelWidth(t *testing.T) {
 						}
 						want := ansi.Truncate(ansi.Strip(renderSlurmNodeJobRow(job, panelWidth-4)), panelWidth-4, "")
 						if strings.TrimSpace(row) != strings.TrimSpace(want) {
-							t.Fatalf("queue row uses wrong width:\n got: %q\nwant: %q", row, want)
+							t.Fatalf("queue row uses wrong width (start=%d panelWidth=%d):\n got: %q\nwant: %q", start, panelWidth, row, want)
 						}
 					}
 				}
-				if !foundRule || !foundJob {
-					t.Fatal("queue job or refresh footer missing")
+				if !foundHeader || !foundJob {
+					t.Fatal("queue header or job row missing")
 				}
 			})
 		}

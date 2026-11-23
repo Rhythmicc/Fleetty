@@ -19,7 +19,7 @@ func TestGPUOverviewReadingDensity(t *testing.T) {
 		MemoryUsed: 16 << 30, MemoryTotal: 32 << 30, Temperature: 65, Power: 220, ClockMHz: 2100}
 	for _, gpu := range []gpuInfo{apple, nvidia} {
 		for _, width := range []int{28, 46, 60, 80, 104, 180, 240} {
-			spec := buildGPUOverviewPanelSpec([]gpuInfo{gpu}, "", width)
+			spec := buildGPUOverviewPanelSpec([]gpuInfo{gpu}, "", width, 0)
 			view := ansi.Strip(strings.Join(spec.lines, "\n"))
 			if spec.title != "GPU" || spec.meta != "" {
 				t.Fatal("single GPU retains redundant section/device labels")
@@ -86,8 +86,8 @@ func TestOverviewSummaryHeightDoesNotGrow(t *testing.T) {
 				if strings.Count(ansi.Strip(page), "HIST · CPU %") != 1 || strings.Contains(page, "CPU % · 1H") {
 					t.Fatal("overview should contain one CPU history")
 				}
-				if !strings.Contains(page, "net-04") || strings.Contains(page, "net-05") {
-					t.Fatal("network summary should fill five rows without growing")
+				if !strings.Contains(page, "net-03") || strings.Contains(page, "net-04") {
+					t.Fatal("network summary did not match host height without growing")
 				}
 				for _, line := range strings.Split(page, "\n") {
 					if lipgloss.Width(line) > width {
@@ -173,7 +173,7 @@ func TestMultiGPUOverviewClockFitsAndAligns(t *testing.T) {
 		{Name: "No clock", Temperature: 45},
 	}
 	for _, width := range []int{36, 68, multiGPUOverviewClockMinWidth - 1, multiGPUOverviewClockMinWidth, 140} {
-		lines := multiGPUOverviewLines(gpus, width)
+		lines := multiGPUOverviewLines(gpus, width, 0)
 		header := ansi.Strip(lines[0])
 		clkEnd := strings.Index(header, "CLK")
 		if (clkEnd >= 0) != (width >= multiGPUOverviewClockMinWidth) {
@@ -226,5 +226,95 @@ func TestGPUOverviewDoesNotStretchCard(t *testing.T) {
 		if strings.Contains(page, unwanted) {
 			t.Fatalf("overview retains duplicate label %s", unwanted)
 		}
+	}
+}
+
+func TestOverviewGPUAndSlurmFitsWithoutClipping(t *testing.T) {
+	makeGPUs := func(count int) []gpuInfo {
+		gpus := make([]gpuInfo, count)
+		for i := range gpus {
+			gpus[i] = gpuInfo{
+				Index: i, Name: "NVIDIA L40S", Utilization: float64(90 - i*5),
+				MemoryUsed: uint64(40-i) << 30, MemoryTotal: 48 << 30,
+				Power: 280, PowerLimit: 300, ClockMHz: 2400, Temperature: 70,
+				Workloads: []gpuWorkloadInfo{{PID: 4812 + i, User: "alice", Name: "train.py"}},
+			}
+		}
+		return gpus
+	}
+	procs := make([]processInfo, 12)
+	for i := range procs {
+		procs[i] = processInfo{
+			PID: 4800 + i, User: "alice", State: "R",
+			CPU: float64(180 - i*10), RSS: 16 << 30,
+			Command: fmt.Sprintf("proc-%02d", i),
+		}
+	}
+	cases := []struct {
+		width, height, gpus, minProcRows int
+	}{
+		{142, 34, 2, 8},
+		{142, 34, 4, 6},
+		{142, 34, 8, 6},
+		{142, 24, 2, 3},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%dx%d/gpus=%d", tc.width, tc.height, tc.gpus), func(t *testing.T) {
+			m := &monitorModel{
+				screen: screenMonitor, profile: machineProfileGPU, nodeName: "gpu-a01",
+				width: tc.width, height: tc.height,
+				cpuHistory: []float64{45, 58, 62},
+				snapshot: monitorSnapshot{
+					CollectedAt: time.Now(), Profile: machineProfileGPU,
+					CPUModel: "AMD EPYC 9354 32-Core Processor", CPUCores: 32, CPUPercent: 62,
+					LoadAverage: "load 10.33 · 7.75 · 6.20",
+					MemoryUsed:  364 << 30, MemoryTotal: 512 << 30,
+					DiskUsed: 1500 << 30, DiskTotal: 3500 << 30,
+					NetworkRX: 86 << 20, NetworkTX: 14 << 20,
+					NetworkRXTotal: 12 << 30, NetworkTXTotal: 3 << 30,
+					NetworkInterfaces: []networkInterfaceInfo{{Name: "eth0"}},
+					GPUs:              makeGPUs(tc.gpus),
+					Processes:         procs,
+				},
+				slurmQueue: &nodeSlurmQueue{
+					Cluster: "Acme GPU", Node: "gpu-a01", CollectedAt: time.Now().Add(-8 * time.Second),
+					Jobs: []slurmDisplayJob{
+						{Job: slurmJob{ID: "18421", Partition: "gpu", Name: "protein-fold", User: "alice", State: "RUNNING", Priority: 24000, QOS: "normal", Elapsed: "5:12:08", TimeLimit: "12:00:00"}},
+						{Job: slurmJob{ID: "18455", Partition: "gpu", Name: "embed-corpus", User: "bob", State: "RUNNING", Priority: 18000, QOS: "normal", Elapsed: "2:04:41", TimeLimit: "8:00:00"}},
+						{Job: slurmJob{ID: "18502", Partition: "gpu", Name: "eval-suite", User: "carol", State: "PENDING", Priority: 12000, QOS: "normal", Elapsed: "0:00", TimeLimit: "4:00:00", Reason: "Resources"}},
+					},
+				},
+			}
+			rendered := m.monitorView()
+			plain := ansi.Strip(rendered)
+			if lipgloss.Height(rendered) != tc.height {
+				t.Fatalf("height = %d, want %d", lipgloss.Height(rendered), tc.height)
+			}
+			if m.dashboardContent > m.dashboardViewport || strings.Contains(plain, "↕") {
+				t.Fatalf("overview clipped: content=%d viewport=%d\n%s", m.dashboardContent, m.dashboardViewport, plain)
+			}
+			for _, want := range []string{"HOST HEALTH", "NODE QUEUE / SLURM", "GPU", "TOP PROCESSES", "NET ", "refresh", "quit"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("missing %q:\n%s", want, plain)
+				}
+			}
+			if tc.height >= 34 && !strings.Contains(plain, "RESOURCES") {
+				t.Fatalf("missing pending blocker on 34-row view:\n%s", plain)
+			}
+			if tc.height < 28 && !strings.Contains(plain, "1–2/3 JOBS") {
+				t.Fatalf("missing queue count range on compact 24-row view:\n%s", plain)
+			}
+			if strings.Contains(plain, "NETWORK ACTIVITY") {
+				t.Fatalf("unexpected duplicated NETWORK ACTIVITY card:\n%s", plain)
+			}
+			if m.monitorRows < tc.minProcRows {
+				t.Fatalf("process rows = %d, want >= %d\n%s", m.monitorRows, tc.minProcRows, plain)
+			}
+			for i, line := range strings.Split(rendered, "\n") {
+				if lipgloss.Width(line) > tc.width {
+					t.Fatalf("line %d overflows width %d: %q", i, tc.width, ansi.Strip(line))
+				}
+			}
+		})
 	}
 }
