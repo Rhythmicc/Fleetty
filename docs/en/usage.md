@@ -96,6 +96,8 @@ def report_progress(path, done, total, label=""):
         return False
 ```
 
+For high-performance C and C++ workloads, see the zero-dependency fire-and-forget source package in [the C progress SDK](../../sdk/c/README.md) (`sdk/c/fleetty_progress.h` and `sdk/c/fleetty_progress.c`), which sends non-blocking updates without waiting for a reply and throttles tight loops in memory.
+
 ### Progress from an existing file
 
 On a Linux node running Fleetty as root, an administrator can attach the progress JSON file a running workload already writes. Pass its PID, start time from field 22 of `/proc/PID/stat`, absolute path as seen by the target process, and the top-level counter keys.

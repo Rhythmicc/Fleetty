@@ -5,6 +5,10 @@
 /coverage/
 *.out
 *.sock
+/sdk/c/*.o
+/sdk/c/*.a
+/sdk/c/example
+/sdk/c/fleetty_progress_test
 
 # Local runtime state and secrets
 /.ssh/

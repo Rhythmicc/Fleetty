@@ -88,6 +88,14 @@ ssh -p 23235 monitor@hub.example   # multi-server Hub
 
 在 Linux 上部署 SSH 节点或 Hub 见 [安装 Linux 节点](docs/zh-CN/installation.md#linux-ssh-节点) 与 [配置 Hub](docs/zh-CN/hub.md)。
 
+## 进程进度上报
+
+计算进程可以通过 [sdk/c](sdk/c/README.md) 中零依赖的 C/C++ SDK 向 Fleetty 上报实时进度条。如需让 coding agent 自动完成集成，可直接复制以下 prompt：
+
+```text
+请参考 https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/sdk/c/README.md 为当前项目集成 Fleetty 的 C 进度上报 SDK（下载同目录下的 fleetty_progress.h 和 fleetty_progress.c）：默认自动发现 socket 并启用 1000 ms 节流，在主计算循环中上报进度，结束时强制上报并关闭，确保未运行 Fleetty 时不影响主程序执行。
+```
+
 ## 快捷键
 
 | 按键 | 功能 |
@@ -104,6 +112,7 @@ ssh -p 23235 monitor@hub.example   # multi-server Hub
 
 - [安装与升级](docs/zh-CN/installation.md) — 系统要求、`install.sh`、`go install`、Linux SSH 节点、`fleetty update` 与卸载
 - [使用指南](docs/zh-CN/usage.md) — 页面导航、逐核 CPU（`f` / `v`）、网络连接、本地存储地图（`d` / `z` / `u`）与自定义布局
+- [C 进度上报 SDK](sdk/c/README.md) — 零依赖、非阻塞的 C/C++ 进程进度上报源码包（`fleetty_progress.h` / `fleetty_progress.c`）
 - [Ghostty 与主题](docs/zh-CN/themes.md) — 深浅色自动跟随、Ghostty 配色与 Powerlevel10k 提示符配色
 - [Hub](docs/zh-CN/hub.md) — `nodes.json` 分组、持久 SSH RPC 密钥与多服务器导航
 - [Slurm](docs/zh-CN/slurm.md) — 本机与 SSH 登录节点传输、`NEXT` 候选、QOS 与窄屏队列

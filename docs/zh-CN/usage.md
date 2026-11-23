@@ -78,6 +78,8 @@ CPU、内存和 RSS 随数值升高，从灰到青、绿、黄、红。进程名
 
 建议每 1–5 秒重新上报，即使长阶段暂时没有增量。进程退出后不再显示；30 秒不更新也会过期，亦可发送 `{"v":1,"clear":true}` 主动清除。进度只存在 Fleetty 内存中，但可被该节点的面板查看者看到，阶段名不要包含私密信息。Socket 不可用时，任务应照常运行。见[英文页的 Python 接入示例](../en/usage.md#application-reported-progress)。
 
+对于性能敏感的 C/C++ 任务，可以直接引入零外部依赖的 [C 语言进度上报源码包](../../sdk/c/README.md)（`sdk/c/fleetty_progress.h` + `sdk/c/fleetty_progress.c`）：采用非阻塞只发不收（fire-and-forget）模式并内置节流计时，可直接放进高频计算循环中。
+
 ### 读取已有进度文件
 
 在以 root 运行 Fleetty 的 Linux 节点上，管理员可以绑定任务正在写入的 JSON 文件。提供 PID、`/proc/PID/stat` 第 22 字段的启动时间、目标进程看到的绝对路径和 JSON 顶层计数键。

@@ -88,6 +88,14 @@ ssh -p 23235 monitor@hub.example   # multi-server Hub
 
 To deploy a node or Hub on Linux, see [Install a Linux node](docs/en/installation.md#linux-ssh-nodes) and [Configure a Hub](docs/en/hub.md).
 
+## Progress reporting
+
+Processes can report live progress bars to Fleetty with the zero-dependency C/C++ SDK in [sdk/c](sdk/c/README.md). To let a coding agent integrate it for you, copy this prompt:
+
+```text
+Integrate Fleetty's C progress SDK (https://raw.githubusercontent.com/Rhythmicc/Fleetty/main/sdk/c/README.md, fleetty_progress.h, fleetty_progress.c) into this project: copy the two source files in, initialize with auto-discovery and 1000 ms throttling, report progress in the main work loop, force-report and close on completion, and keep the workload unaffected if Fleetty is not running.
+```
+
 ## Keybindings
 
 | Key | Action |
@@ -104,6 +112,7 @@ To deploy a node or Hub on Linux, see [Install a Linux node](docs/en/installatio
 
 - [Install and upgrade](docs/en/installation.md) — system requirements, `install.sh`, `go install`, Linux SSH nodes, `fleetty update`, uninstall
 - [Using Fleetty](docs/en/usage.md) — pages, per-core CPU (`f` / `v`), network sockets, local storage map (`d` / `z` / `u`), custom layouts
+- [C progress SDK](sdk/c/README.md) — zero-dependency non-blocking C/C++ process progress reporting (`fleetty_progress.h` / `fleetty_progress.c`)
 - [Ghostty and themes](docs/en/themes.md) — automatic dark/light following, Ghostty palettes, Powerlevel10k colors
 - [Hub](docs/en/hub.md) — `nodes.json` groups, persistent SSH RPC keys, multi-server navigation
 - [Slurm](docs/en/slurm.md) — local and SSH login-node transports, `NEXT` candidates, QOS, compact queues
